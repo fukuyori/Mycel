@@ -6,6 +6,8 @@ Instead of showing files as a vertical list, Mycel lays out folders and files as
 
 Japanese documentation is available in [README.ja.md](README.ja.md).
 
+Current version: 0.2.0.
+
 ## Features
 
 - Full-screen whiteboard-style canvas
@@ -21,6 +23,8 @@ Japanese documentation is available in [README.ja.md](README.ja.md).
 - Multi-selection with batch preview open/close and batch file deletion
 - Context menus for refresh, rename, delete, color, open, and creation actions
 - Trackpad pinch zoom and Ctrl + mouse wheel zoom
+- Range zoom: drag an empty canvas area, then press Enter to zoom to that range
+- Fit-to-map shortcut with Ctrl + 0
 
 ## Build
 
@@ -43,6 +47,8 @@ Windows PowerShell:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 ```
+
+On Windows, the script can auto-detect Qt installed under `C:\Qt`. It prefers an MSVC Qt kit such as `C:\Qt\6.x\msvc2022_64` when available, imports the Visual Studio C++ environment, and builds a GUI-subsystem executable that does not open a terminal window at startup. With an MSVC kit, the default build directory is `build-windows-msvc`.
 
 You can also build manually with CMake:
 
@@ -81,7 +87,7 @@ The Windows script accepts parameters:
 .\scripts\build-windows.ps1 -BuildType Release -CMakePrefixPath "C:\Qt\6.x\msvc2022_64"
 ```
 
-If you use MinGW or a specific Visual Studio generator, pass `-Generator`:
+If you use MinGW or a specific generator, pass `-Generator`:
 
 ```powershell
 .\scripts\build-windows.ps1 -Generator "Ninja" -CMakePrefixPath "C:\Qt\6.x\mingw_64"
@@ -107,6 +113,12 @@ Open the current directory:
 ./build/mycel
 ```
 
+Windows MSVC build:
+
+```powershell
+.\build-windows-msvc\mycel.exe
+```
+
 Open another directory:
 
 ```sh
@@ -116,6 +128,8 @@ Open another directory:
 ## Mouse Operations
 
 - Empty canvas drag: select a range of nodes
+- Enter after empty canvas drag: zoom to the dragged range
+- Ctrl + 0: fit the whole map
 - Alt + left drag or middle-button drag: pan the canvas
 - Trackpad pinch: zoom
 - Ctrl + mouse wheel: zoom

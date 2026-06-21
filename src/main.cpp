@@ -25,6 +25,7 @@
 #include <QtGui/QFontMetricsF>
 #include <QtGui/QImageReader>
 #include <QtGui/QKeyEvent>
+#include <QtGui/QKeySequence>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QNativeGestureEvent>
 #include <QtGui/QPainter>
@@ -754,6 +755,7 @@ public:
         setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
         setResizeAnchor(QGraphicsView::AnchorUnderMouse);
         setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
+        setFocusPolicy(Qt::StrongFocus);
     }
 
 protected:
@@ -801,6 +803,7 @@ protected:
         }
         if (event->button() == Qt::LeftButton && itemAt(event->pos()) == nullptr) {
             rubberBandSelecting_ = true;
+            rubberBandStart_ = event->pos();
             setDragMode(QGraphicsView::RubberBandDrag);
             QGraphicsView::mousePressEvent(event);
             return;
@@ -825,6 +828,7 @@ protected:
     {
         if (event->button() == Qt::LeftButton && rubberBandSelecting_) {
             QGraphicsView::mouseReleaseEvent(event);
+            rememberRubberBandRect(event->pos());
             setDragMode(QGraphicsView::NoDrag);
             rubberBandSelecting_ = false;
             return;
@@ -839,7 +843,39 @@ protected:
         QGraphicsView::mouseReleaseEvent(event);
     }
 
+    void keyPressEvent(QKeyEvent* event) override
+    {
+        if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) &&
+            lastRubberBandSceneRect_.isValid()) {
+            zoomToRect(lastRubberBandSceneRect_);
+            event->accept();
+            return;
+        }
+        QGraphicsView::keyPressEvent(event);
+    }
+
 private:
+    void rememberRubberBandRect(const QPoint& endPos)
+    {
+        const QRect viewportRect = QRect(rubberBandStart_, endPos).normalized();
+        if (viewportRect.width() < 8 || viewportRect.height() < 8) {
+            lastRubberBandSceneRect_ = QRectF();
+            return;
+        }
+
+        lastRubberBandSceneRect_ = mapToScene(viewportRect).boundingRect();
+    }
+
+    void zoomToRect(const QRectF& sceneRect)
+    {
+        if (!sceneRect.isValid() || sceneRect.width() <= 1.0 || sceneRect.height() <= 1.0) {
+            return;
+        }
+
+        resetTransform();
+        fitInView(sceneRect.adjusted(-40.0, -40.0, 40.0, 40.0), Qt::KeepAspectRatio);
+    }
+
     void zoomAt(const QPointF& viewportPos, qreal factor)
     {
         const qreal currentScale = transform().m11();
@@ -860,6 +896,8 @@ private:
     bool rubberBandSelecting_ = false;
     Qt::MouseButton panningButton_ = Qt::NoButton;
     QPoint lastPanPoint_;
+    QPoint rubberBandStart_;
+    QRectF lastRubberBandSceneRect_;
 };
 
 class MainWindow final : public QMainWindow {
@@ -877,6 +915,7 @@ public:
         QAction* openAction = toolbar->addAction(QStringLiteral("Open"));
         QAction* refreshAction = toolbar->addAction(QStringLiteral("Refresh"));
         QAction* fitAction = toolbar->addAction(QStringLiteral("Fit"));
+        fitAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+0")));
         QAction* openSelectedPreviewsAction = toolbar->addAction(QStringLiteral("Open Previews"));
         QAction* closeSelectedPreviewsAction = toolbar->addAction(QStringLiteral("Close Previews"));
 
