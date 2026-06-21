@@ -24,7 +24,7 @@ jobs:
           - name: Linux
             os: ubuntu-latest
             script: ./scripts/build-linux.sh
-            qt_arch: gcc_64
+            qt_arch: linux_gcc_64
           - name: Windows
             os: windows-latest
             qt_arch: win64_msvc2019_64
@@ -39,6 +39,12 @@ jobs:
           version: "6.7.3"
           arch: ${{ matrix.qt_arch }}
           cache: true
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev
 
       - name: Configure MSVC
         if: runner.os == 'Windows'
