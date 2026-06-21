@@ -1,0 +1,55 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            script: ./scripts/build-mac.sh
+            qt_arch: clang_64
+          - name: Linux
+            os: ubuntu-latest
+            script: ./scripts/build-linux.sh
+            qt_arch: gcc_64
+          - name: Windows
+            os: windows-latest
+            qt_arch: win64_msvc2019_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.7.3"
+          arch: ${{ matrix.qt_arch }}
+          cache: true
+
+      - name: Configure MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build macOS/Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ${{ matrix.script }}
+
+      - name: Build Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\build-windows.ps1
