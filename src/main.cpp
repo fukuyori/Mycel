@@ -45,7 +45,6 @@
 #include <QtWidgets/QGraphicsSceneContextMenuEvent>
 #include <QtWidgets/QGraphicsSceneMouseEvent>
 #include <QtWidgets/QGraphicsView>
-#include <QtWidgets/QInputDialog>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QMenu>
@@ -388,6 +387,14 @@ QString normalizedDirectoryPath(const QString& path)
     return canonicalPath.isEmpty() ? QDir(absolutePath).absolutePath() : canonicalPath;
 }
 
+QString startupRootPath(const QStringList& arguments)
+{
+    if (arguments.size() > 1 && !arguments.at(1).trimmed().isEmpty()) {
+        return normalizedDirectoryPath(arguments.at(1).trimmed());
+    }
+    return normalizedDirectoryPath(QDir::currentPath());
+}
+
 class MainWindow;
 
 class NodeItem final : public QGraphicsItem {
@@ -500,6 +507,10 @@ protected:
         if (event->button() == Qt::LeftButton) {
             setOpacity(0.72);
             setZValue(100.0);
+            if ((event->modifiers() & Qt::ControlModifier) && !(event->modifiers() & Qt::ShiftModifier)) {
+                event->accept();
+                return;
+            }
         }
         QGraphicsItem::mousePressEvent(event);
     }
@@ -758,6 +769,11 @@ public:
         setFocusPolicy(Qt::StrongFocus);
     }
 
+    void setCheatSheetHandler(std::function<void()> handler)
+    {
+        cheatSheetHandler_ = std::move(handler);
+    }
+
 protected:
     void wheelEvent(QWheelEvent* event) override
     {
@@ -851,6 +867,11 @@ protected:
             event->accept();
             return;
         }
+        if (event->key() == Qt::Key_Question && cheatSheetHandler_) {
+            cheatSheetHandler_();
+            event->accept();
+            return;
+        }
         QGraphicsView::keyPressEvent(event);
     }
 
@@ -898,6 +919,7 @@ private:
     QPoint lastPanPoint_;
     QPoint rubberBandStart_;
     QRectF lastRubberBandSceneRect_;
+    std::function<void()> cheatSheetHandler_;
 };
 
 class MainWindow final : public QMainWindow {
@@ -909,15 +931,25 @@ public:
 
         view_ = new BoardView(this);
         view_->setScene(&scene_);
+        view_->setCheatSheetHandler([this] { showCheatSheet(); });
         setCentralWidget(view_);
 
         auto* toolbar = addToolBar(QStringLiteral("Mycel"));
         QAction* openAction = toolbar->addAction(QStringLiteral("Open"));
         QAction* refreshAction = toolbar->addAction(QStringLiteral("Refresh"));
+        refreshAction->setShortcut(QKeySequence(Qt::Key_F5));
         QAction* fitAction = toolbar->addAction(QStringLiteral("Fit"));
         fitAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+0")));
         QAction* openSelectedPreviewsAction = toolbar->addAction(QStringLiteral("Open Previews"));
         QAction* closeSelectedPreviewsAction = toolbar->addAction(QStringLiteral("Close Previews"));
+        QAction* renameSelectedAction = new QAction(this);
+        renameSelectedAction->setShortcut(QKeySequence(Qt::Key_F2));
+        renameSelectedAction->setShortcutContext(Qt::ApplicationShortcut);
+        addAction(renameSelectedAction);
+        QAction* maximizeAction = new QAction(this);
+        maximizeAction->setShortcut(QKeySequence(Qt::Key_F11));
+        maximizeAction->setShortcutContext(Qt::ApplicationShortcut);
+        addAction(maximizeAction);
 
         connect(openAction, &QAction::triggered, this, [this] {
             const QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("Open directory"), rootPath_);
@@ -930,16 +962,29 @@ public:
                 rebuild(true);
             }
         });
-        connect(refreshAction, &QAction::triggered, this, [this] { rebuild(false); });
+        connect(refreshAction, &QAction::triggered, this, [this] { refreshAll(); });
         connect(fitAction, &QAction::triggered, this, [this] { fitToMap(); });
         connect(openSelectedPreviewsAction, &QAction::triggered, this, [this] { setSelectedFilePreviews(true); });
         connect(closeSelectedPreviewsAction, &QAction::triggered, this, [this] { setSelectedFilePreviews(false); });
+        connect(renameSelectedAction, &QAction::triggered, this, [this] { renameSelectedItem(); });
+        connect(maximizeAction, &QAction::triggered, this, [this] {
+            if (isMaximized()) {
+                showNormal();
+            } else {
+                showMaximized();
+            }
+        });
 
         previewClickTimer_.setSingleShot(true);
         connect(&previewClickTimer_, &QTimer::timeout, this, [this] {
             if (!queuedPreviewPath_.isEmpty()) {
                 toggleInlinePreviewPath(queuedPreviewPath_);
                 queuedPreviewPath_.clear();
+                return;
+            }
+            if (!queuedCollapsePath_.isEmpty()) {
+                toggleCollapsedPath(queuedCollapsePath_);
+                queuedCollapsePath_.clear();
             }
         });
 
@@ -953,11 +998,15 @@ public:
         if (!parent || !parent->isDir) {
             return;
         }
-        const QString name = askName(QStringLiteral("Create folder"), QStringLiteral("Folder name"));
-        if (name.isEmpty()) {
-            return;
-        }
+
         QDir dir(parent->path);
+        QString name = QStringLiteral("新規フォルダ");
+        QString path = dir.filePath(name);
+        for (int number = 2; QFileInfo::exists(path); ++number) {
+            name = QStringLiteral("新規フォルダ %1").arg(number);
+            path = dir.filePath(name);
+        }
+
         if (!dir.mkdir(name)) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("フォルダを作成できませんでした。"));
             return;
@@ -1078,7 +1127,18 @@ public:
         if (!node || node->isDir) {
             return;
         }
+        queuedCollapsePath_.clear();
         queuedPreviewPath_ = node->path;
+        previewClickTimer_.start(QApplication::doubleClickInterval() + 40);
+    }
+
+    void queueCollapsedToggle(Node* node)
+    {
+        if (!node || !node->isDir) {
+            return;
+        }
+        queuedPreviewPath_.clear();
+        queuedCollapsePath_ = node->path;
         previewClickTimer_.start(QApplication::doubleClickInterval() + 40);
     }
 
@@ -1086,6 +1146,7 @@ public:
     {
         previewClickTimer_.stop();
         queuedPreviewPath_.clear();
+        queuedCollapsePath_.clear();
     }
 
     void toggleInlinePreviewPath(const QString& path)
@@ -1113,10 +1174,15 @@ public:
         if (!node || !node->isDir) {
             return;
         }
-        if (collapsedPaths_.contains(node->path)) {
-            collapsedPaths_.remove(node->path);
+        toggleCollapsedPath(node->path);
+    }
+
+    void toggleCollapsedPath(const QString& path)
+    {
+        if (collapsedPaths_.contains(path)) {
+            collapsedPaths_.remove(path);
         } else {
-            collapsedPaths_.insert(node->path);
+            collapsedPaths_.insert(path);
         }
         rebuild(false);
     }
@@ -1176,7 +1242,7 @@ public:
 
     void beginInlineRename(Node* node)
     {
-        if (!node || node->isDir) {
+        if (!node || node == root_.get()) {
             return;
         }
 
@@ -1209,7 +1275,7 @@ public:
         renameProxy_->resize(rect.size());
 
         const int dot = info.fileName().lastIndexOf(QLatin1Char('.'));
-        if (dot > 0) {
+        if (!node->isDir && dot > 0) {
             renameEdit_->setSelection(0, dot);
         } else {
             renameEdit_->selectAll();
@@ -1224,6 +1290,37 @@ public:
     void renameFile(Node* node)
     {
         beginInlineRename(node);
+    }
+
+    void renameSelectedItem()
+    {
+        beginInlineRename(singleSelectedNode());
+    }
+
+    void showCheatSheet()
+    {
+        QMessageBox::information(
+            this, QStringLiteral("Mycel"),
+            QStringLiteral(
+                "キー操作\n"
+                "? : このチートシートを表示\n"
+                "F2 : 単一選択したファイル/フォルダの名前を変更\n"
+                "F5 : 全体をリロード\n"
+                "F11 : ウィンドウを最大化/通常表示\n"
+                "Ctrl + 0 : 全体表示\n"
+                "範囲選択後 Enter : 選択範囲へズーム\n\n"
+                "クリック操作\n"
+                "Ctrl + ノード左クリック : 複数選択に追加/解除\n"
+                "Shift + ファイルクリック : プレビューを開く/閉じる\n"
+                "Shift + フォルダクリック : 折りたたみ/展開\n"
+                "フォルダをダブルクリック : 新規ファイルを作成\n"
+                "Shift + フォルダをダブルクリック : 新規フォルダを作成\n"
+                "ファイルをダブルクリック : OS の既定アプリで開く\n"
+                "右クリック : コンテキストメニュー\n\n"
+                "移動/ズーム\n"
+                "Alt + 左ドラッグ、または中ボタンドラッグ : キャンバス移動\n"
+                "Ctrl + マウスホイール : ズーム\n"
+                "タッチパッドのピンチ : ズーム"));
     }
 
     bool renamePathTo(const QString& path, const QString& name)
@@ -1242,32 +1339,20 @@ public:
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("同名のファイルまたはフォルダが既にあります。"));
             return false;
         }
+        const bool wasDir = info.isDir();
         if (!QFile::rename(path, destination)) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("名前を変更できませんでした。"));
             return false;
         }
 
-        const auto color = userColors_.find(path);
-        if (color != userColors_.end()) {
-            userColors_[destination] = color->second;
-            userColors_.erase(color);
-            saveColorFile();
-        }
-        const auto previewSize = previewSizes_.find(path);
-        if (previewSize != previewSizes_.end()) {
-            previewSizes_[destination] = previewSize->second;
-            previewSizes_.erase(previewSize);
-        }
-        if (previewPaths_.contains(path)) {
-            previewPaths_.remove(path);
-            previewPaths_.insert(destination);
-        }
         QStringList& order = fileOrders_[orderKeyForDirectory(info.absolutePath())];
         const int orderIndex = order.indexOf(info.fileName());
         if (orderIndex >= 0) {
             order[orderIndex] = name;
-            saveOrderFile();
         }
+        rekeyPathMetadataAfterRename(path, destination, wasDir);
+        saveColorFile();
+        saveOrderFile();
         rebuild(false);
         return true;
     }
@@ -1700,6 +1785,22 @@ public:
         return !scene_.selectedItems().isEmpty();
     }
 
+    Node* singleSelectedNode() const
+    {
+        Node* selectedNode = nullptr;
+        for (QGraphicsItem* item : scene_.selectedItems()) {
+            auto* nodeItem = dynamic_cast<NodeItem*>(item);
+            if (!nodeItem) {
+                continue;
+            }
+            if (selectedNode) {
+                return nullptr;
+            }
+            selectedNode = nodeItem->node();
+        }
+        return selectedNode;
+    }
+
     void refreshNode(Node*)
     {
         cancelQueuedInlinePreviewToggle();
@@ -1810,6 +1911,60 @@ private:
         }
         order.append(newName);
         fileOrders_[key] = order;
+    }
+
+    void rekeyPathMetadataAfterRename(const QString& oldPath, const QString& newPath, bool wasDir)
+    {
+        QSet<QString> updatedCollapsedPaths;
+        for (const QString& path : collapsedPaths_.values()) {
+            updatedCollapsedPaths.insert(rekeyPathAfterRename(path, oldPath, newPath, wasDir));
+        }
+        collapsedPaths_ = updatedCollapsedPaths;
+
+        std::map<QString, QColor> updatedColors;
+        for (const auto& [path, color] : userColors_) {
+            updatedColors[rekeyPathAfterRename(path, oldPath, newPath, wasDir)] = color;
+        }
+        userColors_ = std::move(updatedColors);
+
+        std::map<QString, QSizeF> updatedPreviewSizes;
+        for (const auto& [path, size] : previewSizes_) {
+            updatedPreviewSizes[rekeyPathAfterRename(path, oldPath, newPath, wasDir)] = size;
+        }
+        previewSizes_ = std::move(updatedPreviewSizes);
+
+        QSet<QString> updatedPreviewPaths;
+        for (const QString& path : previewPaths_.values()) {
+            updatedPreviewPaths.insert(rekeyPathAfterRename(path, oldPath, newPath, wasDir));
+        }
+        previewPaths_ = updatedPreviewPaths;
+
+        if (wasDir) {
+            const QString oldKey = orderKeyForDirectory(oldPath);
+            const QString newKey = orderKeyForDirectory(newPath);
+            std::map<QString, QStringList> updatedOrders;
+            for (const auto& [key, order] : fileOrders_) {
+                QString updatedKey = key;
+                if (key == oldKey) {
+                    updatedKey = newKey;
+                } else if (!oldKey.isEmpty() && key.startsWith(oldKey + QLatin1Char('/'))) {
+                    updatedKey = newKey + key.mid(oldKey.length());
+                }
+                updatedOrders[updatedKey] = order;
+            }
+            fileOrders_ = std::move(updatedOrders);
+        }
+    }
+
+    QString rekeyPathAfterRename(const QString& path, const QString& oldPath, const QString& newPath, bool wasDir) const
+    {
+        if (path == oldPath) {
+            return newPath;
+        }
+        if (wasDir && isDescendantPath(oldPath, path)) {
+            return newPath + path.mid(oldPath.length());
+        }
+        return path;
     }
 
     QString orderKeyForDirectory(const QString& directoryPath) const
@@ -1930,16 +2085,6 @@ private:
         file.write(QJsonDocument(rootObject).toJson(QJsonDocument::Indented));
     }
 
-    QString askName(const QString& title, const QString& label)
-    {
-        bool ok = false;
-        const QString text = QInputDialog::getText(this, title, label, QLineEdit::Normal, QString(), &ok).trimmed();
-        if (!ok || text.isEmpty() || text.contains('/') || text.contains('\\')) {
-            return {};
-        }
-        return text;
-    }
-
     void rebuild(bool fitAfterRebuild)
     {
         finishInlineRename(false);
@@ -2008,6 +2153,7 @@ private:
     std::map<QString, QColor> userColors_;
     QSet<QString> previewPaths_;
     QString queuedPreviewPath_;
+    QString queuedCollapsePath_;
     QTimer previewClickTimer_;
     std::map<QString, QSizeF> previewSizes_;
     std::map<QString, QStringList> fileOrders_;
@@ -2164,9 +2310,14 @@ void NodeItem::mouseReleaseEvent(QGraphicsSceneMouseEvent* event)
         window_->clearDragPreview();
         setOpacity(1.0);
         setZValue(10.0);
+        if ((event->modifiers() & Qt::ControlModifier) && !(event->modifiers() & Qt::ShiftModifier)) {
+            setSelected(!isSelected());
+            event->accept();
+            return;
+        }
         if (event->modifiers() & Qt::ShiftModifier) {
             if (node_->isDir) {
-                window_->toggleCollapsed(node_);
+                window_->queueCollapsedToggle(node_);
             } else {
                 window_->queueInlinePreviewToggle(node_);
             }
@@ -2214,7 +2365,11 @@ void NodeItem::mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event)
     window_->cancelQueuedInlinePreviewToggle();
     QGraphicsItem::mouseDoubleClickEvent(event);
     if (node_->isDir) {
-        window_->createFile(node_);
+        if (event->modifiers() & Qt::ShiftModifier) {
+            window_->createFolder(node_);
+        } else {
+            window_->createFile(node_);
+        }
     } else {
         window_->openNode(node_);
     }
@@ -2225,8 +2380,7 @@ void NodeItem::mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event)
 int main(int argc, char* argv[])
 {
     QApplication app(argc, argv);
-    const QString root = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QDir::currentPath();
-    MainWindow window(normalizedDirectoryPath(root));
+    MainWindow window(startupRootPath(app.arguments()));
     window.show();
     return app.exec();
 }

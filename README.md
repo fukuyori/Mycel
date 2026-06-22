@@ -6,7 +6,7 @@ Instead of showing files as a vertical list, Mycel lays out folders and files as
 
 Japanese documentation is available in [README.ja.md](README.ja.md).
 
-Current version: 0.2.0.
+Current version: 0.2.1.
 
 ## Features
 
@@ -25,6 +25,16 @@ Current version: 0.2.0.
 - Trackpad pinch zoom and Ctrl + mouse wheel zoom
 - Range zoom: drag an empty canvas area, then press Enter to zoom to that range
 - Fit-to-map shortcut with Ctrl + 0
+- Keyboard shortcuts for reload, maximize, inline rename, and the cheat sheet
+- Startup root selection: current directory by default, or the first command-line argument when provided
+
+## What's New in 0.2.1
+
+- Added Ctrl + left-click multi-selection.
+- Added Shift + folder double-click to create `新規フォルダ` without a dialog.
+- Added F2 inline rename for a single selected file or folder.
+- Added F5 reload, F11 maximize/restore, and `?` cheat sheet shortcuts.
+- Fixed startup root handling so the app opens the current directory by default and the argument directory when provided.
 
 ## Build
 
@@ -128,16 +138,22 @@ Open another directory:
 ## Mouse Operations
 
 - Empty canvas drag: select a range of nodes
+- ?: show the cheat sheet
 - Enter after empty canvas drag: zoom to the dragged range
 - Ctrl + 0: fit the whole map
+- F5: reload the whole map
+- F11: maximize or restore the window
 - Alt + left drag or middle-button drag: pan the canvas
 - Trackpad pinch: zoom
 - Ctrl + mouse wheel: zoom
 - Mouse wheel or trackpad scroll: scroll the canvas
+- Ctrl + left-click a node: add or remove it from the current selection
 - Shift + file click: open or close that file's preview
 - Shift + folder click: collapse or expand that folder
 - Double-click a folder: create a new file in that folder
+- Shift + double-click a folder: create a new folder named `新規フォルダ` inside that folder
 - Double-click a file: open it with the OS default application
+- F2 with a single file or folder selected: rename it inline
 - Drag a file or folder node: reorder it inside the same folder
 - Drag a file or folder node onto a folder: move it into that folder
 - Drag the lower-right corner of a preview: resize the preview
