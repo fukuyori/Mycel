@@ -36,6 +36,7 @@
 #include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
 #include <QtGui/QPen>
+#include <QtGui/QPixmap>
 #include <QtGui/QShortcut>
 #include <QtGui/QTextDocument>
 #include <QtGui/QTextOption>
@@ -44,7 +45,6 @@
 #include <QtGui/QAbstractTextDocumentLayout>
 #include <QtGui/QCloseEvent>
 #include <QtWidgets/QApplication>
-#include <QtWidgets/QColorDialog>
 #include <QtWidgets/QDialog>
 #include <QtWidgets/QFileDialog>
 #include <QtWidgets/QGraphicsItem>
@@ -112,8 +112,34 @@ QColor neutralFill()
 
 QColor softFillFromColor(QColor color)
 {
-    color.setAlpha(34);
+    color.setAlpha(42);
     return color;
+}
+
+std::vector<std::pair<QString, QColor>> colorPalette()
+{
+    return {
+        {QStringLiteral("青"), QColor(QStringLiteral("#2563eb"))},
+        {QStringLiteral("水色"), QColor(QStringLiteral("#0891b2"))},
+        {QStringLiteral("緑"), QColor(QStringLiteral("#16a34a"))},
+        {QStringLiteral("黄"), QColor(QStringLiteral("#ca8a04"))},
+        {QStringLiteral("橙"), QColor(QStringLiteral("#ea580c"))},
+        {QStringLiteral("赤"), QColor(QStringLiteral("#dc2626"))},
+        {QStringLiteral("紫"), QColor(QStringLiteral("#9333ea"))},
+        {QStringLiteral("灰"), QColor(QStringLiteral("#64748b"))},
+    };
+}
+
+QIcon colorDotIcon(const QColor& color)
+{
+    QPixmap pixmap(16, 16);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(color);
+    painter.drawEllipse(QRectF(3.0, 3.0, 10.0, 10.0));
+    return QIcon(pixmap);
 }
 
 QString shortLabel(const QString& text)
@@ -543,9 +569,14 @@ public:
         painter->setRenderHint(QPainter::Antialiasing);
         const QRectF box(-node_->size.width() / 2.0, -node_->size.height() / 2.0,
                          node_->size.width(), node_->size.height());
+        if (hasUserFill()) {
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(windowFill());
+            painter->drawRoundedRect(box.adjusted(-4.0, -3.0, 4.0, 3.0), 8.0, 8.0);
+        }
         if (isSelected()) {
             painter->setPen(QPen(QColor("#0b63ce"), 2.0));
-            painter->setBrush(QColor("#dbeafe"));
+            painter->setBrush(hasUserFill() ? QColor(219, 234, 254, 190) : QColor("#dbeafe"));
             painter->drawRoundedRect(box.adjusted(-4.0, -3.0, 4.0, 3.0), 8.0, 8.0);
         }
 
@@ -627,6 +658,7 @@ protected:
 private:
     QColor windowColor() const;
     QColor windowFill() const;
+    bool hasUserFill() const;
     QStringList windowInlinePreviewLines() const;
     QString windowMarkdownPreviewText() const;
     void resizePreview(const QSizeF& size);
@@ -728,8 +760,8 @@ private:
 
     void paintInlinePreview(QPainter* painter, const QRectF& rect)
     {
-        painter->setPen(QPen(QColor("#c4ccd1"), 1.1));
-        painter->setBrush(QColor("#ffffff"));
+        painter->setPen(QPen(hasUserFill() ? QColor(154, 162, 168, 160) : QColor("#c4ccd1"), 1.1));
+        painter->setBrush(hasUserFill() ? windowFill() : QColor("#ffffff"));
         painter->drawRoundedRect(rect, 8.0, 8.0);
 
         const QFileInfo info(node_->path);
@@ -839,24 +871,13 @@ private:
             path.cubicTo(QPointF(split.x() + 30.0, split.y()),
                          QPointF(end.x() - 38.0, end.y()),
                          end);
-            QColor color = colorForPath(child->path);
-            color.setAlpha(userColors_ && userColors_->count(child->path) ? 220 : 125);
+            QColor color = neutralStroke();
+            color.setAlpha(125);
             const qreal width = child->isDir ? (node.depth == 0 ? 2.6 : 2.1) : 1.1;
             painter->setPen(QPen(color, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
             painter->drawPath(path);
             drawEdges(painter, *child);
         }
-    }
-
-    QColor colorForPath(const QString& path) const
-    {
-        if (userColors_) {
-            const auto found = userColors_->find(path);
-            if (found != userColors_->end()) {
-                return found->second;
-            }
-        }
-        return neutralStroke();
     }
 
     Node* root_ = nullptr;
@@ -1459,6 +1480,29 @@ public:
         toggleInlinePreviewPath(node->path);
     }
 
+    bool isInlinePreviewOpen(Node* node) const
+    {
+        return node && !node->isDir && previewPaths_.contains(node->path);
+    }
+
+    void setInlinePreview(Node* node, bool open)
+    {
+        if (!node || node->isDir) {
+            return;
+        }
+        const bool currentlyOpen = previewPaths_.contains(node->path);
+        if (currentlyOpen == open) {
+            return;
+        }
+        if (open) {
+            previewPaths_.insert(node->path);
+        } else {
+            previewPaths_.remove(node->path);
+        }
+        savePreviewFile();
+        rebuild(false);
+    }
+
     void queueInlinePreviewToggle(Node* node)
     {
         if (!node || node->isDir) {
@@ -1549,22 +1593,22 @@ public:
         return mycelStorageEnabled_ && node && userColors_.find(node->path) != userColors_.end();
     }
 
+    bool hasUserColorForNode(const Node* node) const
+    {
+        return node && userColors_.find(node->path) != userColors_.end();
+    }
+
     bool canDeleteFolder(Node* node) const
     {
         return node && node->isDir && node != root_.get();
     }
 
-    void setNodeColor(Node* node)
+    void setNodeColor(Node* node, const QColor& color)
     {
-        if (!node || !mycelStorageEnabled_) {
+        if (!node || !mycelStorageEnabled_ || !color.isValid()) {
             return;
         }
-        const QColor current = colorForNode(node);
-        const QColor selected = QColorDialog::getColor(current, this, QStringLiteral("色を選択"));
-        if (!selected.isValid()) {
-            return;
-        }
-        userColors_[node->path] = selected;
+        userColors_[node->path] = color;
         saveColorFile();
         rebuild(false);
     }
@@ -2965,37 +3009,51 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
 {
     QMenu menu;
     const bool multiItemSelection = isSelected() && window_->selectedDeletableItemCount() > 1;
+    auto addColorMenu = [this](QMenu& parentMenu, std::vector<QAction*>& colorActions, QAction*& clearColorAction) {
+        if (!window_->mycelStorageEnabled()) {
+            return;
+        }
+        QMenu* colorMenu = parentMenu.addMenu(QStringLiteral("色"));
+        for (const auto& [label, color] : colorPalette()) {
+            QAction* action = colorMenu->addAction(label);
+            action->setData(color);
+            action->setIcon(colorDotIcon(color));
+            colorActions.push_back(action);
+        }
+        colorMenu->addSeparator();
+        clearColorAction = colorMenu->addAction(QStringLiteral("色をクリア"));
+        clearColorAction->setEnabled(window_->hasUserColor(node_));
+    };
 
     if (multiItemSelection) {
-        QAction* refreshSelectionAction = menu.addAction(QStringLiteral("選択範囲を更新"));
-        QAction* refreshAllAction = menu.addAction(QStringLiteral("全体を更新"));
-        menu.addSeparator();
         QAction* openSelectionAction = menu.addAction(QStringLiteral("選択ファイルのプレビューを開く"));
         QAction* closeSelectionAction = menu.addAction(QStringLiteral("選択ファイルのプレビューを閉じる"));
         openSelectionAction->setEnabled(window_->hasSelectedFiles());
         closeSelectionAction->setEnabled(window_->hasSelectedFiles());
+        menu.addSeparator();
+        QAction* refreshSelectionAction = menu.addAction(QStringLiteral("選択範囲を更新"));
+        QAction* refreshAllAction = menu.addAction(QStringLiteral("全体を更新"));
         QAction* deleteSelectionAction = menu.addAction(QStringLiteral("選択項目を削除"));
 
         QAction* selected = menu.exec(event->screenPos());
-        if (selected == refreshSelectionAction) {
-            window_->refreshSelectedItems();
-        } else if (selected == refreshAllAction) {
-            window_->refreshAll();
-        } else if (selected == openSelectionAction) {
+        if (selected == openSelectionAction) {
             window_->setSelectedFilePreviews(true);
         } else if (selected == closeSelectionAction) {
             window_->setSelectedFilePreviews(false);
+        } else if (selected == refreshSelectionAction) {
+            window_->refreshSelectedItems();
+        } else if (selected == refreshAllAction) {
+            window_->refreshAll();
         } else if (selected == deleteSelectionAction) {
             window_->deleteSelectedItems();
         }
         return;
     }
 
-    QAction* refreshNodeAction = menu.addAction(QStringLiteral("この項目を更新"));
-    QAction* refreshAllAction = menu.addAction(QStringLiteral("全体を更新"));
-    menu.addSeparator();
-
     if (node_->isDir) {
+        QAction* refreshNodeAction = menu.addAction(QStringLiteral("この項目を更新"));
+        QAction* refreshAllAction = menu.addAction(QStringLiteral("全体を更新"));
+        menu.addSeparator();
         QAction* collapseAction = menu.addAction(node_->collapsed ? QStringLiteral("展開") : QStringLiteral("折りたたむ"));
         menu.addSeparator();
         QAction* folderAction = menu.addAction(QStringLiteral("フォルダを作成"));
@@ -3004,14 +3062,10 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
         pasteAction->setEnabled(window_->canPasteClipboardToFolder(node_));
         QAction* deleteAction = menu.addAction(QStringLiteral("削除"));
         deleteAction->setEnabled(window_->canDeleteFolder(node_));
-        QAction* colorAction = nullptr;
+        std::vector<QAction*> colorActions;
         QAction* clearColorAction = nullptr;
-        if (window_->mycelStorageEnabled()) {
-            menu.addSeparator();
-            colorAction = menu.addAction(QStringLiteral("色を設定"));
-            clearColorAction = menu.addAction(QStringLiteral("色をクリア"));
-            clearColorAction->setEnabled(window_->hasUserColor(node_));
-        }
+        menu.addSeparator();
+        addColorMenu(menu, colorActions, clearColorAction);
         menu.addSeparator();
         QAction* openAction = menu.addAction(QStringLiteral("開く"));
         QAction* selected = menu.exec(event->screenPos());
@@ -3029,30 +3083,38 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
             window_->pasteClipboardToFolder(node_);
         } else if (selected == deleteAction) {
             window_->deleteFolder(node_);
-        } else if (colorAction && selected == colorAction) {
-            window_->setNodeColor(node_);
+        } else if (selected && selected->data().canConvert<QColor>()) {
+            window_->setNodeColor(node_, selected->data().value<QColor>());
         } else if (clearColorAction && selected == clearColorAction) {
             window_->clearNodeColor(node_);
         } else if (selected == openAction) {
             window_->openNode(node_);
         }
     } else {
+        QAction* openPreviewAction = menu.addAction(QStringLiteral("プレビューを開く"));
+        QAction* closePreviewAction = menu.addAction(QStringLiteral("プレビューを閉じる"));
+        openPreviewAction->setEnabled(!window_->isInlinePreviewOpen(node_));
+        closePreviewAction->setEnabled(window_->isInlinePreviewOpen(node_));
+        menu.addSeparator();
+        QAction* refreshNodeAction = menu.addAction(QStringLiteral("この項目を更新"));
+        QAction* refreshAllAction = menu.addAction(QStringLiteral("全体を更新"));
+        menu.addSeparator();
         QAction* editAction = menu.addAction(QStringLiteral("編集"));
         editAction->setEnabled(window_->canEditTextFile(node_));
         QAction* renameAction = menu.addAction(QStringLiteral("名前を変更"));
         QAction* deleteAction = menu.addAction(QStringLiteral("削除"));
-        QAction* colorAction = nullptr;
+        std::vector<QAction*> colorActions;
         QAction* clearColorAction = nullptr;
-        if (window_->mycelStorageEnabled()) {
-            menu.addSeparator();
-            colorAction = menu.addAction(QStringLiteral("色を設定"));
-            clearColorAction = menu.addAction(QStringLiteral("色をクリア"));
-            clearColorAction->setEnabled(window_->hasUserColor(node_));
-        }
+        menu.addSeparator();
+        addColorMenu(menu, colorActions, clearColorAction);
         menu.addSeparator();
         QAction* openAction = menu.addAction(QStringLiteral("開く"));
         QAction* selected = menu.exec(event->screenPos());
-        if (selected == refreshNodeAction) {
+        if (selected == openPreviewAction) {
+            window_->setInlinePreview(node_, true);
+        } else if (selected == closePreviewAction) {
+            window_->setInlinePreview(node_, false);
+        } else if (selected == refreshNodeAction) {
             window_->refreshNode(node_);
         } else if (selected == refreshAllAction) {
             window_->refreshAll();
@@ -3062,8 +3124,8 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
             window_->renameFile(node_);
         } else if (selected == deleteAction) {
             window_->deleteFile(node_);
-        } else if (colorAction && selected == colorAction) {
-            window_->setNodeColor(node_);
+        } else if (selected && selected->data().canConvert<QColor>()) {
+            window_->setNodeColor(node_, selected->data().value<QColor>());
         } else if (clearColorAction && selected == clearColorAction) {
             window_->clearNodeColor(node_);
         } else if (selected == openAction) {
@@ -3080,6 +3142,11 @@ QColor NodeItem::windowColor() const
 QColor NodeItem::windowFill() const
 {
     return window_->fillForNode(node_);
+}
+
+bool NodeItem::hasUserFill() const
+{
+    return window_->hasUserColorForNode(node_);
 }
 
 QStringList NodeItem::windowInlinePreviewLines() const

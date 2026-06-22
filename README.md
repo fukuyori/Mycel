@@ -6,7 +6,7 @@ Instead of treating files as a vertical file list, Mycel lays out folders and fi
 
 Japanese documentation is available in [README.ja.md](README.ja.md).
 
-Current version: 0.2.3.
+Current version: 0.2.4.
 
 Release history is available in [CHANGELOG.md](CHANGELOG.md).
 
@@ -32,6 +32,13 @@ Release history is available in [CHANGELOG.md](CHANGELOG.md).
 - Fit-to-map shortcut with Ctrl + 0
 - Keyboard shortcuts for reload, maximize, inline rename, and the cheat sheet
 - Startup root selection: current directory by default, or the first command-line argument when provided
+
+## What's New in 0.2.4
+
+- Added single-file preview open/close actions to the top of the file context menu.
+- Moved preview open/close actions to the top of the multi-selection context menu.
+- Replaced the color dialog with a fixed color palette in the context menu.
+- Changed node color display from colored connector lines to soft backgrounds behind the file name, icon, and preview.
 
 ## What's New in 0.2.3
 
@@ -204,20 +211,22 @@ In `--no-mycel` mode, Mycel does not load or create `.mycel/order.json`, `.mycel
 
 Single file menu:
 
+- Open preview
+- Close preview
 - Refresh this item
 - Refresh all
 - Edit text files
 - Rename
 - Delete
-- Set or clear color
+- Choose from fixed node colors or clear color
 - Open
 
 Multiple selected files menu:
 
-- Refresh selection
-- Refresh all
 - Open previews
 - Close previews
+- Refresh selection
+- Refresh all
 - Delete selected files
 
 Folder menu:
@@ -229,7 +238,7 @@ Folder menu:
 - Create file
 - Paste clipboard contents
 - Delete folder
-- Set or clear color
+- Choose from fixed node colors or clear color
 - Open
 
 ## Samples
