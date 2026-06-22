@@ -1,4 +1,5 @@
 #include <QtCore/QDir>
+#include <QtCore/QDateTime>
 #include <QtCore/QEvent>
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
@@ -35,13 +36,16 @@
 #include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
 #include <QtGui/QPen>
+#include <QtGui/QShortcut>
 #include <QtGui/QTextDocument>
 #include <QtGui/QTextOption>
 #include <QtGui/QWheelEvent>
 #include <QtGui/QAction>
 #include <QtGui/QAbstractTextDocumentLayout>
+#include <QtGui/QCloseEvent>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QColorDialog>
+#include <QtWidgets/QDialog>
 #include <QtWidgets/QFileDialog>
 #include <QtWidgets/QGraphicsItem>
 #include <QtWidgets/QGraphicsProxyWidget>
@@ -50,13 +54,17 @@
 #include <QtWidgets/QGraphicsSceneDragDropEvent>
 #include <QtWidgets/QGraphicsSceneMouseEvent>
 #include <QtWidgets/QGraphicsView>
+#include <QtWidgets/QHBoxLayout>
+#include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QMessageBox>
+#include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QScrollBar>
 #include <QtWidgets/QToolBar>
+#include <QtWidgets/QVBoxLayout>
 
 #include <algorithm>
 #include <cmath>
@@ -74,6 +82,7 @@ constexpr int MaxChildren = 90;
 constexpr qreal XStep = 260.0;
 constexpr qreal ParentChildGap = 80.0;
 constexpr qreal YStep = 72.0;
+constexpr qreal FreeCanvasMargin = 12000.0;
 
 struct Node {
     QString path;
@@ -1044,6 +1053,176 @@ private:
     std::function<void()> cheatSheetHandler_;
 };
 
+class TextEditor final : public QPlainTextEdit {
+public:
+    explicit TextEditor(QWidget* parent = nullptr) : QPlainTextEdit(parent) {}
+
+protected:
+    void wheelEvent(QWheelEvent* event) override
+    {
+        if (event->modifiers() & Qt::ControlModifier) {
+            const QPoint delta = event->angleDelta();
+            const QPoint pixelDelta = event->pixelDelta();
+            const int amount = !delta.isNull() ? delta.y() : pixelDelta.y();
+            if (amount > 0) {
+                zoomIn(1);
+            } else if (amount < 0) {
+                zoomOut(1);
+            }
+            event->accept();
+            return;
+        }
+        QPlainTextEdit::wheelEvent(event);
+    }
+};
+
+class TextEditorDialog final : public QDialog {
+public:
+    explicit TextEditorDialog(const QString& filePath, QWidget* parent = nullptr)
+        : QDialog(parent), filePath_(filePath)
+    {
+        setWindowTitle(QStringLiteral("Mycel Editor - %1").arg(QFileInfo(filePath_).fileName()));
+        resize(860, 620);
+
+        auto* layout = new QVBoxLayout(this);
+        pathLabel_ = new QLabel(QDir::toNativeSeparators(filePath_), this);
+        pathLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        layout->addWidget(pathLabel_);
+
+        editor_ = new TextEditor(this);
+        QFont font(QStringLiteral("Consolas"));
+        font.setStyleHint(QFont::Monospace);
+        font.setPointSize(10);
+        editor_->setFont(font);
+        layout->addWidget(editor_, 1);
+
+        auto* buttonRow = new QHBoxLayout();
+        statusLabel_ = new QLabel(this);
+        buttonRow->addWidget(statusLabel_, 1);
+
+        saveButton_ = new QPushButton(QStringLiteral("保存"), this);
+        closeButton_ = new QPushButton(QStringLiteral("閉じる"), this);
+        buttonRow->addWidget(saveButton_);
+        buttonRow->addWidget(closeButton_);
+        layout->addLayout(buttonRow);
+
+        if (!loadFile()) {
+            editor_->setReadOnly(true);
+            saveButton_->setEnabled(false);
+        }
+
+        connect(editor_, &QPlainTextEdit::textChanged, this, [this] {
+            if (loading_) {
+                return;
+            }
+            modified_ = true;
+            updateStatus();
+        });
+        connect(saveButton_, &QPushButton::clicked, this, [this] { saveFile(); });
+        connect(closeButton_, &QPushButton::clicked, this, &QWidget::close);
+
+        auto* saveShortcut = new QShortcut(QKeySequence::Save, this);
+        connect(saveShortcut, &QShortcut::activated, this, [this] { saveFile(); });
+
+        updateStatus();
+    }
+
+    bool wasSaved() const
+    {
+        return saved_;
+    }
+
+protected:
+    void closeEvent(QCloseEvent* event) override
+    {
+        if (!modified_) {
+            event->accept();
+            return;
+        }
+
+        const QMessageBox::StandardButton result = QMessageBox::question(
+            this,
+            QStringLiteral("Mycel"),
+            QStringLiteral("変更を保存しますか？"),
+            QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+            QMessageBox::Save);
+        if (result == QMessageBox::Cancel) {
+            event->ignore();
+            return;
+        }
+        if (result == QMessageBox::Save && !saveFile()) {
+            event->ignore();
+            return;
+        }
+        event->accept();
+    }
+
+private:
+    bool loadFile()
+    {
+        QFile file(filePath_);
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("ファイルを開けませんでした。"));
+            return false;
+        }
+
+        loading_ = true;
+        editor_->setPlainText(QString::fromUtf8(file.readAll()));
+        loading_ = false;
+        modified_ = false;
+        loadedLastModified_ = QFileInfo(filePath_).lastModified();
+        return true;
+    }
+
+    bool saveFile()
+    {
+        const QFileInfo info(filePath_);
+        if (loadedLastModified_.isValid() && info.exists() && info.lastModified() > loadedLastModified_) {
+            const QMessageBox::StandardButton result = QMessageBox::question(
+                this,
+                QStringLiteral("Mycel"),
+                QStringLiteral("ファイルが外部で変更されています。上書きしますか？"),
+                QMessageBox::Yes | QMessageBox::No,
+                QMessageBox::No);
+            if (result != QMessageBox::Yes) {
+                return false;
+            }
+        }
+
+        QFile file(filePath_);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("ファイルを保存できませんでした。"));
+            return false;
+        }
+
+        file.write(editor_->toPlainText().toUtf8());
+        file.close();
+        loadedLastModified_ = QFileInfo(filePath_).lastModified();
+        modified_ = false;
+        saved_ = true;
+        updateStatus();
+        return true;
+    }
+
+    void updateStatus()
+    {
+        statusLabel_->setText(modified_ ? QStringLiteral("未保存") : QStringLiteral("保存済み"));
+        saveButton_->setEnabled(!editor_->isReadOnly() && modified_);
+        setWindowModified(modified_);
+    }
+
+    QString filePath_;
+    QLabel* pathLabel_ = nullptr;
+    QLabel* statusLabel_ = nullptr;
+    TextEditor* editor_ = nullptr;
+    QPushButton* saveButton_ = nullptr;
+    QPushButton* closeButton_ = nullptr;
+    QDateTime loadedLastModified_;
+    bool loading_ = false;
+    bool modified_ = false;
+    bool saved_ = false;
+};
+
 class MainWindow final : public QMainWindow {
 public:
     explicit MainWindow(QString rootPath, bool mycelStorageEnabled, QWidget* parent = nullptr)
@@ -1135,10 +1314,10 @@ public:
         }
 
         QDir dir(parent->path);
-        QString name = QStringLiteral("新規フォルダ");
+        QString name = QStringLiteral("NewFolder");
         QString path = dir.filePath(name);
         for (int number = 2; QFileInfo::exists(path); ++number) {
-            name = QStringLiteral("新規フォルダ %1").arg(number);
+            name = QStringLiteral("NewFolder %1").arg(number);
             path = dir.filePath(name);
         }
 
@@ -1158,10 +1337,10 @@ public:
         }
 
         QDir dir(parent->path);
-        QString name = QStringLiteral("新規ファイル.txt");
+        QString name = QStringLiteral("NewFile.txt");
         QString path = dir.filePath(name);
         for (int number = 2; QFileInfo::exists(path); ++number) {
-            name = QStringLiteral("新規ファイル %1.txt").arg(number);
+            name = QStringLiteral("NewFile %1.txt").arg(number);
             path = dir.filePath(name);
         }
 
@@ -1181,6 +1360,29 @@ public:
             return;
         }
         QDesktopServices::openUrl(QUrl::fromLocalFile(node->path));
+    }
+
+    bool canEditTextFile(Node* node) const
+    {
+        if (!node || node->isDir) {
+            return false;
+        }
+        const QFileInfo info(node->path);
+        return info.exists() && info.isFile() && isTextPreviewFile(info) && info.size() <= 4 * 1024 * 1024;
+    }
+
+    void editTextFile(Node* node)
+    {
+        if (!canEditTextFile(node)) {
+            QMessageBox::information(this, QStringLiteral("Mycel"), QStringLiteral("このファイルは内蔵エディタで編集できません。"));
+            return;
+        }
+
+        TextEditorDialog dialog(node->path, this);
+        dialog.exec();
+        if (dialog.wasSaved()) {
+            rebuild(false);
+        }
     }
 
     QStringList inlinePreviewLines(Node* node) const
@@ -1453,12 +1655,13 @@ public:
                 "Ctrl + ノード左クリック : 複数選択に追加/解除\n"
                 "Shift + ファイルクリック : プレビューを開く/閉じる\n"
                 "Shift + フォルダクリック : 折りたたみ/展開\n"
-                "フォルダをダブルクリック : 新規ファイルを作成\n"
-                "Shift + フォルダをダブルクリック : 新規フォルダを作成\n"
+                "フォルダをダブルクリック : NewFile を作成\n"
+                "Shift + フォルダをダブルクリック : NewFolder を作成\n"
                 "ファイルをダブルクリック : OS の既定アプリで開く\n"
+                "テキストファイルを右クリックして編集 : 内蔵エディタで開く\n"
                 "右クリック : コンテキストメニュー\n\n"
                 "移動/ズーム\n"
-                "Alt + 左ドラッグ、または中ボタンドラッグ : キャンバス移動\n"
+                "Alt + 左ドラッグ、中ボタンドラッグ、または空白で右ドラッグ : キャンバス移動\n"
                 "Ctrl + マウスホイール : ズーム\n"
                 "タッチパッドのピンチ : ズーム"));
     }
@@ -2713,7 +2916,8 @@ private:
             }
             bounds = bounds.isNull() ? nodeRect : bounds.united(nodeRect);
         });
-        scene_.setSceneRect(bounds.adjusted(-160.0, -160.0, 160.0, 160.0));
+        scene_.setSceneRect(bounds.adjusted(-FreeCanvasMargin, -FreeCanvasMargin,
+                                            FreeCanvasMargin, FreeCanvasMargin));
         if (fitAfterRebuild) {
             scheduleFitToMap();
         } else {
@@ -2833,6 +3037,8 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
             window_->openNode(node_);
         }
     } else {
+        QAction* editAction = menu.addAction(QStringLiteral("編集"));
+        editAction->setEnabled(window_->canEditTextFile(node_));
         QAction* renameAction = menu.addAction(QStringLiteral("名前を変更"));
         QAction* deleteAction = menu.addAction(QStringLiteral("削除"));
         QAction* colorAction = nullptr;
@@ -2850,6 +3056,8 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
             window_->refreshNode(node_);
         } else if (selected == refreshAllAction) {
             window_->refreshAll();
+        } else if (selected == editAction) {
+            window_->editTextFile(node_);
         } else if (selected == renameAction) {
             window_->renameFile(node_);
         } else if (selected == deleteAction) {

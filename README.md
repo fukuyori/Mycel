@@ -6,11 +6,14 @@ Instead of treating files as a vertical file list, Mycel lays out folders and fi
 
 Japanese documentation is available in [README.ja.md](README.ja.md).
 
-Current version: 0.2.2.
+Current version: 0.2.3.
+
+Release history is available in [CHANGELOG.md](CHANGELOG.md).
 
 ## Features
 
 - Full-screen whiteboard-style canvas
+- Large virtual canvas area for free panning around the map
 - Directory structure rendered as connected mind-map nodes
 - Folder and file creation from the canvas
 - Drag-and-drop moving between folders
@@ -20,6 +23,7 @@ Current version: 0.2.2.
 - Preview open/closed state and custom preview sizes in `.mycel/previews.json`
 - Folder collapse and expand
 - Inline previews for text and Markdown files
+- Built-in editor for text files, with Ctrl + S save and Ctrl + mouse wheel zoom
 - Markdown preview rendering with wrapped text
 - Multi-selection with batch preview open/close and selected item deletion
 - Context menus for refresh, rename, delete, color, open, and creation actions
@@ -28,6 +32,13 @@ Current version: 0.2.2.
 - Fit-to-map shortcut with Ctrl + 0
 - Keyboard shortcuts for reload, maximize, inline rename, and the cheat sheet
 - Startup root selection: current directory by default, or the first command-line argument when provided
+
+## What's New in 0.2.3
+
+- Added a built-in editor for text files from the file context menu.
+- Added Ctrl + S save, unsaved-change prompts, and external-change overwrite confirmation in the editor.
+- Added Ctrl + mouse wheel zoom inside the built-in text editor.
+- Expanded the virtual whiteboard canvas so the map can be freely panned far beyond its nodes.
 
 ## What's New in 0.2.2
 
@@ -40,7 +51,7 @@ Current version: 0.2.2.
 ## What's New in 0.2.1
 
 - Added Ctrl + left-click multi-selection.
-- Added Shift + folder double-click to create `新規フォルダ` without a dialog.
+- Added Shift + folder double-click to create `NewFolder` without a dialog.
 - Added F2 inline rename for a single selected file or folder.
 - Added F5 reload, F11 maximize/restore, and `?` cheat sheet shortcuts.
 - Fixed startup root handling so the app opens the current directory by default and the argument directory when provided.
@@ -180,7 +191,7 @@ In `--no-mycel` mode, Mycel does not load or create `.mycel/order.json`, `.mycel
 - Shift + file click: open or close that file's preview
 - Shift + folder click: collapse or expand that folder
 - Double-click a folder: create a new file in that folder
-- Shift + double-click a folder: create a new folder named `新規フォルダ` inside that folder
+- Shift + double-click a folder: create a new folder named `NewFolder` inside that folder
 - Double-click a file: open it with the OS default application
 - F2 with a single file or folder selected: rename it inline
 - Drop files or folders from the OS onto a folder node: copy them into that folder
@@ -195,6 +206,7 @@ Single file menu:
 
 - Refresh this item
 - Refresh all
+- Edit text files
 - Rename
 - Delete
 - Set or clear color
