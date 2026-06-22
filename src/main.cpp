@@ -6,6 +6,7 @@
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
+#include <QtCore/QMimeData>
 #include <QtCore/QPointF>
 #include <QtCore/QRectF>
 #include <QtCore/QSet>
@@ -23,6 +24,9 @@
 #include <QtGui/QDesktopServices>
 #include <QtGui/QFont>
 #include <QtGui/QFontMetricsF>
+#include <QtGui/QIcon>
+#include <QtGui/QClipboard>
+#include <QtGui/QImage>
 #include <QtGui/QImageReader>
 #include <QtGui/QKeyEvent>
 #include <QtGui/QKeySequence>
@@ -43,12 +47,14 @@
 #include <QtWidgets/QGraphicsProxyWidget>
 #include <QtWidgets/QGraphicsScene>
 #include <QtWidgets/QGraphicsSceneContextMenuEvent>
+#include <QtWidgets/QGraphicsSceneDragDropEvent>
 #include <QtWidgets/QGraphicsSceneMouseEvent>
 #include <QtWidgets/QGraphicsView>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QMessageBox>
+#include <QtWidgets/QPushButton>
 #include <QtWidgets/QScrollBar>
 #include <QtWidgets/QToolBar>
 
@@ -58,6 +64,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace {
@@ -65,6 +72,7 @@ namespace {
 constexpr int MaxDepth = 5;
 constexpr int MaxChildren = 90;
 constexpr qreal XStep = 260.0;
+constexpr qreal ParentChildGap = 80.0;
 constexpr qreal YStep = 72.0;
 
 struct Node {
@@ -280,8 +288,9 @@ void layoutTree(Node& node, qreal leftX, qreal& yCursor)
         return;
     }
 
+    const qreal childLeftX = leftX + std::max(XStep, node.size.width() + ParentChildGap);
     for (auto& child : node.children) {
-        layoutTree(*child, leftX + XStep, yCursor);
+        layoutTree(*child, childLeftX, yCursor);
     }
     node.center.setY((node.children.front()->center.y() + node.children.back()->center.y()) / 2.0);
 }
@@ -387,12 +396,98 @@ QString normalizedDirectoryPath(const QString& path)
     return canonicalPath.isEmpty() ? QDir(absolutePath).absolutePath() : canonicalPath;
 }
 
-QString startupRootPath(const QStringList& arguments)
+struct StartupOptions {
+    QString rootPath;
+    bool mycelStorageEnabled = true;
+};
+
+StartupOptions startupOptions(const QStringList& arguments)
 {
-    if (arguments.size() > 1 && !arguments.at(1).trimmed().isEmpty()) {
-        return normalizedDirectoryPath(arguments.at(1).trimmed());
+    StartupOptions options;
+    QString rootArgument;
+    bool endOfOptions = false;
+
+    for (int i = 1; i < arguments.size(); ++i) {
+        const QString argument = arguments.at(i).trimmed();
+        if (argument.isEmpty()) {
+            continue;
+        }
+        if (!endOfOptions && argument == QStringLiteral("--")) {
+            endOfOptions = true;
+            continue;
+        }
+        if (!endOfOptions && (argument == QStringLiteral("--no-mycel") ||
+                              argument == QStringLiteral("--no-metadata"))) {
+            options.mycelStorageEnabled = false;
+            continue;
+        }
+        if (rootArgument.isEmpty()) {
+            rootArgument = argument;
+        }
     }
-    return normalizedDirectoryPath(QDir::currentPath());
+
+    options.rootPath = normalizedDirectoryPath(rootArgument.isEmpty() ? QDir::currentPath() : rootArgument);
+    return options;
+}
+
+bool hasMycelFolder(const QString& rootPath)
+{
+    return QFileInfo(QDir(rootPath).filePath(QStringLiteral(".mycel"))).isDir();
+}
+
+bool createMycelFolder(const QString& rootPath)
+{
+    return QDir(rootPath).mkpath(QStringLiteral(".mycel"));
+}
+
+bool resolveStartupStorageMode(StartupOptions& options)
+{
+    if (!options.mycelStorageEnabled) {
+        return true;
+    }
+
+    while (!hasMycelFolder(options.rootPath)) {
+        QMessageBox box;
+        box.setWindowTitle(QStringLiteral("Mycel"));
+        box.setIcon(QMessageBox::Question);
+        box.setText(QStringLiteral("ルートフォルダに .mycel フォルダがありません。"));
+        box.setInformativeText(
+            QStringLiteral("Mycel の並び順や色設定を保存するために .mycel フォルダを作成しますか？"));
+        QPushButton* createButton = box.addButton(QStringLiteral(".mycel を作成"), QMessageBox::AcceptRole);
+        QPushButton* restrictedButton = box.addButton(QStringLiteral(".mycel なしで開く"), QMessageBox::ActionRole);
+        QPushButton* chooseButton = box.addButton(QStringLiteral("別フォルダを選択"), QMessageBox::ActionRole);
+        QPushButton* quitButton = box.addButton(QStringLiteral("終了"), QMessageBox::RejectRole);
+        box.setDefaultButton(createButton);
+        box.setEscapeButton(quitButton);
+        box.exec();
+
+        if (box.clickedButton() == createButton) {
+            if (createMycelFolder(options.rootPath)) {
+                return true;
+            }
+            QMessageBox::warning(nullptr, QStringLiteral("Mycel"),
+                                 QStringLiteral(".mycel フォルダを作成できませんでした。"));
+            continue;
+        }
+
+        if (box.clickedButton() == chooseButton) {
+            const QString dir = QFileDialog::getExistingDirectory(nullptr, QStringLiteral("ルートフォルダを選択"),
+                                                                  options.rootPath);
+            if (!dir.isEmpty()) {
+                options.rootPath = normalizedDirectoryPath(dir);
+            }
+            continue;
+        }
+
+        if (box.clickedButton() == quitButton || box.clickedButton() != restrictedButton) {
+            return false;
+        }
+
+        options.mycelStorageEnabled = false;
+        return true;
+    }
+
+    return true;
 }
 
 class MainWindow;
@@ -405,6 +500,7 @@ public:
         setPos(node_->center);
         setFlags(QGraphicsItem::ItemIsMovable | QGraphicsItem::ItemIsSelectable |
                  QGraphicsItem::ItemSendsGeometryChanges);
+        setAcceptDrops(node_->isDir);
         setZValue(10.0);
     }
 
@@ -438,20 +534,16 @@ public:
         painter->setRenderHint(QPainter::Antialiasing);
         const QRectF box(-node_->size.width() / 2.0, -node_->size.height() / 2.0,
                          node_->size.width(), node_->size.height());
-        const QColor stroke = windowColor();
-        const QColor fill = windowFill();
-        const bool boxed = node_->isDir;
-
-        if (boxed) {
-            painter->setPen(QPen(stroke, node_->depth == 0 ? 2.2 : 1.6));
-            painter->setBrush(fill);
-            painter->drawRoundedRect(box, 13.0, 13.0);
-        } else if (isSelected()) {
-            QColor selectedFill = fill;
-            selectedFill.setAlpha(120);
-            painter->setPen(QPen(stroke, 1.2));
-            painter->setBrush(selectedFill);
+        if (isSelected()) {
+            painter->setPen(QPen(QColor("#0b63ce"), 2.0));
+            painter->setBrush(QColor("#dbeafe"));
             painter->drawRoundedRect(box.adjusted(-4.0, -3.0, 4.0, 3.0), 8.0, 8.0);
+        }
+
+        if (node_->isDir && externalDropHover_) {
+            painter->setPen(QPen(QColor("#1e8cff"), 3.0, Qt::DashLine, Qt::RoundCap, Qt::RoundJoin));
+            painter->setBrush(Qt::NoBrush);
+            painter->drawRoundedRect(box.adjusted(-5.0, -5.0, 5.0, 5.0), 15.0, 15.0);
         }
 
         if (node_->isDir) {
@@ -517,6 +609,10 @@ protected:
     void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override;
     void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override;
     void mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event) override;
+    void dragEnterEvent(QGraphicsSceneDragDropEvent* event) override;
+    void dragLeaveEvent(QGraphicsSceneDragDropEvent* event) override;
+    void dragMoveEvent(QGraphicsSceneDragDropEvent* event) override;
+    void dropEvent(QGraphicsSceneDragDropEvent* event) override;
     QVariant itemChange(GraphicsItemChange change, const QVariant& value) override;
 
 private:
@@ -683,6 +779,7 @@ private:
     QPointF layoutCenter_;
     QPointF dragStart_;
     bool resizingPreview_ = false;
+    bool externalDropHover_ = false;
     QPointF resizeStartScene_;
     QSizeF resizeStartSize_;
 };
@@ -767,6 +864,8 @@ public:
         setResizeAnchor(QGraphicsView::AnchorUnderMouse);
         setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
         setFocusPolicy(Qt::StrongFocus);
+        setAcceptDrops(true);
+        viewport()->setAcceptDrops(true);
     }
 
     void setCheatSheetHandler(std::function<void()> handler)
@@ -808,7 +907,9 @@ protected:
 
     void mousePressEvent(QMouseEvent* event) override
     {
+        const bool rightButtonCanvasPan = event->button() == Qt::RightButton && itemAt(event->pos()) == nullptr;
         if ((event->button() == Qt::MiddleButton) ||
+            rightButtonCanvasPan ||
             (event->button() == Qt::LeftButton && (event->modifiers() & Qt::AltModifier))) {
             panning_ = true;
             panningButton_ = event->button();
@@ -845,6 +946,7 @@ protected:
         if (event->button() == Qt::LeftButton && rubberBandSelecting_) {
             QGraphicsView::mouseReleaseEvent(event);
             rememberRubberBandRect(event->pos());
+            applyRubberBandSelection(event->modifiers());
             setDragMode(QGraphicsView::NoDrag);
             rubberBandSelecting_ = false;
             return;
@@ -887,6 +989,26 @@ private:
         lastRubberBandSceneRect_ = mapToScene(viewportRect).boundingRect();
     }
 
+    void applyRubberBandSelection(Qt::KeyboardModifiers modifiers)
+    {
+        QGraphicsScene* currentScene = scene();
+        if (!currentScene || !lastRubberBandSceneRect_.isValid()) {
+            return;
+        }
+
+        if (!(modifiers & Qt::ControlModifier)) {
+            currentScene->clearSelection();
+        }
+
+        for (QGraphicsItem* item :
+             currentScene->items(lastRubberBandSceneRect_, Qt::IntersectsItemBoundingRect)) {
+            auto* nodeItem = dynamic_cast<NodeItem*>(item);
+            if (nodeItem) {
+                nodeItem->setSelected(true);
+            }
+        }
+    }
+
     void zoomToRect(const QRectF& sceneRect)
     {
         if (!sceneRect.isValid() || sceneRect.width() <= 1.0 || sceneRect.height() <= 1.0) {
@@ -924,8 +1046,8 @@ private:
 
 class MainWindow final : public QMainWindow {
 public:
-    explicit MainWindow(QString rootPath, QWidget* parent = nullptr)
-        : QMainWindow(parent), rootPath_(std::move(rootPath))
+    explicit MainWindow(QString rootPath, bool mycelStorageEnabled, QWidget* parent = nullptr)
+        : QMainWindow(parent), rootPath_(std::move(rootPath)), mycelStorageEnabled_(mycelStorageEnabled)
     {
         resize(1280, 820);
 
@@ -950,6 +1072,10 @@ public:
         maximizeAction->setShortcut(QKeySequence(Qt::Key_F11));
         maximizeAction->setShortcutContext(Qt::ApplicationShortcut);
         addAction(maximizeAction);
+        QAction* quitAction = new QAction(this);
+        quitAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Q")));
+        quitAction->setShortcutContext(Qt::ApplicationShortcut);
+        addAction(quitAction);
 
         connect(openAction, &QAction::triggered, this, [this] {
             const QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("Open directory"), rootPath_);
@@ -957,8 +1083,10 @@ public:
                 rootPath_ = normalizedDirectoryPath(dir);
                 collapsedPaths_.clear();
                 previewPaths_.clear();
+                previewSizes_.clear();
                 loadOrderFile();
                 loadColorFile();
+                loadPreviewFile();
                 rebuild(true);
             }
         });
@@ -974,6 +1102,7 @@ public:
                 showMaximized();
             }
         });
+        connect(quitAction, &QAction::triggered, this, &QWidget::close);
 
         previewClickTimer_.setSingleShot(true);
         connect(&previewClickTimer_, &QTimer::timeout, this, [this] {
@@ -990,7 +1119,13 @@ public:
 
         loadOrderFile();
         loadColorFile();
+        loadPreviewFile();
         rebuild(true);
+    }
+
+    bool mycelStorageEnabled() const
+    {
+        return mycelStorageEnabled_;
     }
 
     void createFolder(Node* parent)
@@ -1156,6 +1291,7 @@ public:
         } else {
             previewPaths_.insert(path);
         }
+        savePreviewFile();
         rebuild(false);
     }
 
@@ -1166,6 +1302,7 @@ public:
         }
         previewSizes_[node->path] = QSizeF(std::clamp(size.width(), 260.0, 900.0),
                                            std::clamp(size.height(), 110.0, 520.0));
+        savePreviewFile();
         rebuild(false);
     }
 
@@ -1207,7 +1344,7 @@ public:
 
     bool hasUserColor(Node* node) const
     {
-        return node && userColors_.find(node->path) != userColors_.end();
+        return mycelStorageEnabled_ && node && userColors_.find(node->path) != userColors_.end();
     }
 
     bool canDeleteFolder(Node* node) const
@@ -1217,7 +1354,7 @@ public:
 
     void setNodeColor(Node* node)
     {
-        if (!node) {
+        if (!node || !mycelStorageEnabled_) {
             return;
         }
         const QColor current = colorForNode(node);
@@ -1232,7 +1369,7 @@ public:
 
     void clearNodeColor(Node* node)
     {
-        if (!node) {
+        if (!node || !mycelStorageEnabled_) {
             return;
         }
         userColors_.erase(node->path);
@@ -1265,7 +1402,9 @@ public:
         renameEdit_ = new QLineEdit(info.fileName());
         renameEdit_->setFrame(false);
         renameEdit_->setStyleSheet(QStringLiteral(
-            "QLineEdit { background: #ffffff; border: 1px solid #1e8cff; border-radius: 5px; padding: 2px 5px; }"));
+            "QLineEdit { background: #ffffff; color: #172321; border: 1px solid #1e8cff; "
+            "border-radius: 5px; padding: 2px 5px; selection-background-color: #1e8cff; "
+            "selection-color: #ffffff; }"));
         renameEdit_->installEventFilter(this);
 
         renameProxy_ = scene_.addWidget(renameEdit_);
@@ -1308,6 +1447,7 @@ public:
                 "F5 : 全体をリロード\n"
                 "F11 : ウィンドウを最大化/通常表示\n"
                 "Ctrl + 0 : 全体表示\n"
+                "Ctrl + Q : アプリを終了\n"
                 "範囲選択後 Enter : 選択範囲へズーム\n\n"
                 "クリック操作\n"
                 "Ctrl + ノード左クリック : 複数選択に追加/解除\n"
@@ -1345,14 +1485,17 @@ public:
             return false;
         }
 
-        QStringList& order = fileOrders_[orderKeyForDirectory(info.absolutePath())];
-        const int orderIndex = order.indexOf(info.fileName());
-        if (orderIndex >= 0) {
-            order[orderIndex] = name;
+        if (mycelStorageEnabled_) {
+            QStringList& order = fileOrders_[orderKeyForDirectory(info.absolutePath())];
+            const int orderIndex = order.indexOf(info.fileName());
+            if (orderIndex >= 0) {
+                order[orderIndex] = name;
+            }
         }
         rekeyPathMetadataAfterRename(path, destination, wasDir);
         saveColorFile();
         saveOrderFile();
+        savePreviewFile();
         rebuild(false);
         return true;
     }
@@ -1372,13 +1515,10 @@ public:
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("ファイルを削除できませんでした。"));
             return;
         }
-        userColors_.erase(node->path);
+        removeDeletedPathMetadata(node->path, false);
         saveColorFile();
-        previewSizes_.erase(node->path);
-        previewPaths_.remove(node->path);
-        QStringList& order = fileOrders_[orderKeyForDirectory(QFileInfo(node->path).absolutePath())];
-        order.removeAll(QFileInfo(node->path).fileName());
         saveOrderFile();
+        savePreviewFile();
         rebuild(false);
     }
 
@@ -1401,44 +1541,10 @@ public:
             return;
         }
 
-        for (const QString& path : collapsedPaths_.values()) {
-            if (path == folderPath || isDescendantPath(folderPath, path)) {
-                collapsedPaths_.remove(path);
-            }
-        }
-        for (auto it = userColors_.begin(); it != userColors_.end();) {
-            if (it->first == folderPath || isDescendantPath(folderPath, it->first)) {
-                it = userColors_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-        for (auto it = previewSizes_.begin(); it != previewSizes_.end();) {
-            if (it->first == folderPath || isDescendantPath(folderPath, it->first)) {
-                it = previewSizes_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-        for (const QString& path : previewPaths_.values()) {
-            if (path == folderPath || isDescendantPath(folderPath, path)) {
-                previewPaths_.remove(path);
-            }
-        }
-
-        QStringList& parentOrder = fileOrders_[orderKeyForDirectory(QFileInfo(folderPath).absolutePath())];
-        parentOrder.removeAll(QFileInfo(folderPath).fileName());
-        const QString folderKey = orderKeyForDirectory(folderPath);
-        for (auto it = fileOrders_.begin(); it != fileOrders_.end();) {
-            if (it->first == folderKey || (!folderKey.isEmpty() && it->first.startsWith(folderKey + QLatin1Char('/')))) {
-                it = fileOrders_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-
+        removeDeletedPathMetadata(folderPath, true);
         saveColorFile();
         saveOrderFile();
+        savePreviewFile();
         rebuild(false);
     }
 
@@ -1471,13 +1577,10 @@ public:
             return;
         }
 
-        const auto color = userColors_.find(source->path);
-        if (color != userColors_.end()) {
-            userColors_[destination] = color->second;
-            userColors_.erase(color);
-            saveColorFile();
-        }
-        if (!source->isDir) {
+        rekeyPathMetadataAfterRename(source->path, destination, source->isDir);
+        saveColorFile();
+        savePreviewFile();
+        if (mycelStorageEnabled_ && !source->isDir) {
             QStringList& sourceOrder = fileOrders_[orderKeyForDirectory(QFileInfo(source->path).absolutePath())];
             sourceOrder.removeAll(QFileInfo(source->path).fileName());
             QStringList& targetOrder = fileOrders_[orderKeyForDirectory(targetDir->path)];
@@ -1486,6 +1589,137 @@ public:
             }
             saveOrderFile();
         }
+        rebuild(false);
+    }
+
+    bool canImportExternalUrls(const QMimeData* mimeData, Node* targetDir) const
+    {
+        if (!mimeData || !targetDir || !targetDir->isDir || !mimeData->hasUrls()) {
+            return false;
+        }
+
+        for (const QUrl& url : mimeData->urls()) {
+            if (url.isLocalFile() && QFileInfo::exists(url.toLocalFile())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void importExternalUrlsToFolder(const QList<QUrl>& urls, Node* targetDir)
+    {
+        if (!targetDir || !targetDir->isDir) {
+            return;
+        }
+
+        QDir target(targetDir->path);
+        QStringList importedNames;
+        QStringList failedPaths;
+
+        for (const QUrl& url : urls) {
+            if (!url.isLocalFile()) {
+                continue;
+            }
+
+            const QString sourcePath = url.toLocalFile();
+            QFileInfo sourceInfo(sourcePath);
+            if (!sourceInfo.exists()) {
+                failedPaths.append(sourcePath);
+                continue;
+            }
+            if (sourceInfo.isDir() && (sourceInfo.absoluteFilePath() == targetDir->path ||
+                                       isDescendantPath(sourceInfo.absoluteFilePath(), targetDir->path))) {
+                failedPaths.append(sourceInfo.absoluteFilePath());
+                continue;
+            }
+
+            const QString destinationPath = availableImportPath(targetDir->path, sourceInfo.fileName(), sourceInfo.isDir());
+            const bool copied = sourceInfo.isDir()
+                                    ? copyDirectoryRecursively(sourceInfo.absoluteFilePath(), destinationPath)
+                                    : QFile::copy(sourceInfo.absoluteFilePath(), destinationPath);
+            if (!copied) {
+                failedPaths.append(sourceInfo.absoluteFilePath());
+                continue;
+            }
+
+            QFileInfo destinationInfo(destinationPath);
+            importedNames.append(destinationInfo.fileName());
+            appendCreatedItemToOrder(targetDir->path, destinationInfo.fileName(), destinationInfo.isDir());
+        }
+
+        if (!importedNames.isEmpty()) {
+            saveOrderFile();
+            rebuild(false);
+        }
+
+        if (!failedPaths.isEmpty()) {
+            QMessageBox::warning(
+                this, QStringLiteral("Mycel"),
+                QStringLiteral("取り込めなかった項目があります。\n%1").arg(failedPaths.join(QLatin1Char('\n'))));
+        }
+    }
+
+    bool canPasteClipboardToFolder(Node* targetDir) const
+    {
+        if (!targetDir || !targetDir->isDir) {
+            return false;
+        }
+
+        const QClipboard* clipboard = QApplication::clipboard();
+        const QMimeData* mimeData = clipboard ? clipboard->mimeData() : nullptr;
+        if (!mimeData) {
+            return false;
+        }
+
+        return canImportExternalUrls(mimeData, targetDir) || mimeData->hasImage() ||
+               mimeData->hasHtml() || mimeData->hasText() || pasteableBinaryFormat(mimeData).has_value();
+    }
+
+    void pasteClipboardToFolder(Node* targetDir)
+    {
+        if (!targetDir || !targetDir->isDir) {
+            return;
+        }
+
+        const QClipboard* clipboard = QApplication::clipboard();
+        const QMimeData* mimeData = clipboard ? clipboard->mimeData() : nullptr;
+        if (!mimeData) {
+            return;
+        }
+
+        if (canImportExternalUrls(mimeData, targetDir)) {
+            importExternalUrlsToFolder(mimeData->urls(), targetDir);
+            return;
+        }
+
+        QString destinationPath;
+        bool saved = false;
+        if (mimeData->hasImage()) {
+            const QImage image = qvariant_cast<QImage>(mimeData->imageData());
+            if (!image.isNull()) {
+                destinationPath = availableImportPath(targetDir->path, QStringLiteral("貼り付け画像.png"), false);
+                saved = image.save(destinationPath, "PNG");
+            }
+        } else if (mimeData->hasHtml()) {
+            destinationPath = availableImportPath(targetDir->path, QStringLiteral("貼り付け.html"), false);
+            saved = writeBytes(destinationPath, mimeData->html().toUtf8());
+        } else if (mimeData->hasText()) {
+            destinationPath = availableImportPath(targetDir->path, QStringLiteral("貼り付け.txt"), false);
+            saved = writeBytes(destinationPath, mimeData->text().toUtf8());
+        } else if (const auto binaryFormat = pasteableBinaryFormat(mimeData)) {
+            const QString extension = extensionForMimeFormat(*binaryFormat);
+            destinationPath = availableImportPath(targetDir->path, QStringLiteral("貼り付け.%1").arg(extension), false);
+            saved = writeBytes(destinationPath, mimeData->data(*binaryFormat));
+        }
+
+        if (!saved || destinationPath.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("クリップボードの内容を貼り付けできませんでした。"));
+            return;
+        }
+
+        const QString fileName = QFileInfo(destinationPath).fileName();
+        appendCreatedItemToOrder(targetDir->path, fileName, false);
+        saveOrderFile();
         rebuild(false);
     }
 
@@ -1538,6 +1772,9 @@ public:
 
     bool reorderNodeByY(Node* source, const NodeItem* sourceItem, qreal dropCenterY)
     {
+        if (!mycelStorageEnabled_) {
+            return false;
+        }
         if (!source || !sourceItem) {
             return false;
         }
@@ -1593,6 +1830,9 @@ public:
 
     void previewReorder(Node* source, const NodeItem* sourceItem, qreal dragCenterY)
     {
+        if (!mycelStorageEnabled_) {
+            return;
+        }
         if (!source || !sourceItem) {
             return;
         }
@@ -1709,6 +1949,22 @@ public:
         return count;
     }
 
+    int selectedDeletableItemCount() const
+    {
+        int count = 0;
+        for (QGraphicsItem* item : scene_.selectedItems()) {
+            auto* nodeItem = dynamic_cast<NodeItem*>(item);
+            if (!nodeItem) {
+                continue;
+            }
+            Node* node = nodeItem->node();
+            if (node && (!node->isDir || canDeleteFolder(node))) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
     void setSelectedFilePreviews(bool open)
     {
         bool changed = false;
@@ -1731,25 +1987,72 @@ public:
         }
 
         if (changed) {
+            savePreviewFile();
             rebuild(false);
         }
     }
 
-    void deleteSelectedFiles()
+    void deleteSelectedItems()
     {
-        QStringList paths;
+        QStringList filePaths;
+        QStringList folderPaths;
         for (QGraphicsItem* item : scene_.selectedItems()) {
             auto* nodeItem = dynamic_cast<NodeItem*>(item);
-            if (nodeItem && !nodeItem->node()->isDir) {
-                paths.append(nodeItem->node()->path);
+            if (!nodeItem) {
+                continue;
+            }
+            Node* node = nodeItem->node();
+            if (!node) {
+                continue;
+            }
+            if (node->isDir) {
+                if (canDeleteFolder(node)) {
+                    folderPaths.append(node->path);
+                }
+            } else {
+                filePaths.append(node->path);
             }
         }
-        paths.removeDuplicates();
-        if (paths.isEmpty()) {
+        filePaths.removeDuplicates();
+        folderPaths.removeDuplicates();
+
+        QStringList topLevelFolderPaths;
+        for (const QString& folderPath : folderPaths) {
+            bool containedBySelectedFolder = false;
+            for (const QString& otherFolderPath : folderPaths) {
+                if (otherFolderPath != folderPath && isDescendantPath(otherFolderPath, folderPath)) {
+                    containedBySelectedFolder = true;
+                    break;
+                }
+            }
+            if (!containedBySelectedFolder) {
+                topLevelFolderPaths.append(folderPath);
+            }
+        }
+        folderPaths = topLevelFolderPaths;
+
+        QStringList topLevelFilePaths;
+        for (const QString& filePath : filePaths) {
+            bool containedBySelectedFolder = false;
+            for (const QString& folderPath : folderPaths) {
+                if (isDescendantPath(folderPath, filePath)) {
+                    containedBySelectedFolder = true;
+                    break;
+                }
+            }
+            if (!containedBySelectedFolder) {
+                topLevelFilePaths.append(filePath);
+            }
+        }
+        filePaths = topLevelFilePaths;
+
+        const int selectedCount = filePaths.size() + folderPaths.size();
+        if (selectedCount == 0) {
             return;
         }
 
-        const QString message = QStringLiteral("選択した %1 個のファイルを削除しますか？").arg(paths.size());
+        const QString message = QStringLiteral("選択した %1 個の項目を削除しますか？\nフォルダは配下の項目も削除されます。")
+                                    .arg(selectedCount);
         if (QMessageBox::question(this, QStringLiteral("Mycel"), message,
                                   QMessageBox::Yes | QMessageBox::Cancel,
                                   QMessageBox::Cancel) != QMessageBox::Yes) {
@@ -1757,26 +2060,31 @@ public:
         }
 
         QStringList failed;
-        for (const QString& path : paths) {
+        for (const QString& path : filePaths) {
             if (!QFile::remove(path)) {
                 failed.append(path);
                 continue;
             }
+            removeDeletedPathMetadata(path, false);
+        }
 
-            userColors_.erase(path);
-            previewSizes_.erase(path);
-            previewPaths_.remove(path);
-            QStringList& order = fileOrders_[orderKeyForDirectory(QFileInfo(path).absolutePath())];
-            order.removeAll(QFileInfo(path).fileName());
+        for (const QString& path : folderPaths) {
+            QDir dir(path);
+            if (!dir.removeRecursively()) {
+                failed.append(path);
+                continue;
+            }
+            removeDeletedPathMetadata(path, true);
         }
 
         saveColorFile();
         saveOrderFile();
+        savePreviewFile();
         rebuild(false);
 
         if (!failed.isEmpty()) {
             QMessageBox::warning(this, QStringLiteral("Mycel"),
-                                 QStringLiteral("削除できなかったファイルがあります。\n%1").arg(failed.join(QLatin1Char('\n'))));
+                                 QStringLiteral("削除できなかった項目があります。\n%1").arg(failed.join(QLatin1Char('\n'))));
         }
     }
 
@@ -1818,6 +2126,7 @@ public:
         cancelQueuedInlinePreviewToggle();
         loadOrderFile();
         loadColorFile();
+        loadPreviewFile();
         rebuild(false);
     }
 
@@ -1883,8 +2192,68 @@ private:
         }
     }
 
+    void removeDeletedPathMetadata(const QString& deletedPath, bool wasDir)
+    {
+        if (wasDir) {
+            for (const QString& path : collapsedPaths_.values()) {
+                if (path == deletedPath || isDescendantPath(deletedPath, path)) {
+                    collapsedPaths_.remove(path);
+                }
+            }
+        } else {
+            collapsedPaths_.remove(deletedPath);
+        }
+
+        if (mycelStorageEnabled_) {
+            for (auto it = userColors_.begin(); it != userColors_.end();) {
+                if (it->first == deletedPath || (wasDir && isDescendantPath(deletedPath, it->first))) {
+                    it = userColors_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+
+        for (auto it = previewSizes_.begin(); it != previewSizes_.end();) {
+            if (it->first == deletedPath || (wasDir && isDescendantPath(deletedPath, it->first))) {
+                it = previewSizes_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        for (const QString& path : previewPaths_.values()) {
+            if (path == deletedPath || (wasDir && isDescendantPath(deletedPath, path))) {
+                previewPaths_.remove(path);
+            }
+        }
+
+        if (!mycelStorageEnabled_) {
+            return;
+        }
+
+        QStringList& parentOrder = fileOrders_[orderKeyForDirectory(QFileInfo(deletedPath).absolutePath())];
+        parentOrder.removeAll(QFileInfo(deletedPath).fileName());
+        if (!wasDir) {
+            return;
+        }
+
+        const QString deletedKey = orderKeyForDirectory(deletedPath);
+        for (auto it = fileOrders_.begin(); it != fileOrders_.end();) {
+            if (it->first == deletedKey || (!deletedKey.isEmpty() && it->first.startsWith(deletedKey + QLatin1Char('/')))) {
+                it = fileOrders_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
     void appendCreatedItemToOrder(const QString& directoryPath, const QString& newName, bool)
     {
+        if (!mycelStorageEnabled_) {
+            return;
+        }
+
         const QString key = orderKeyForDirectory(directoryPath);
         const QStringList previousOrder = fileOrders_[key];
         const QFileInfoList entries = QDir(directoryPath).entryInfoList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot,
@@ -1911,6 +2280,132 @@ private:
         }
         order.append(newName);
         fileOrders_[key] = order;
+    }
+
+    QString availableImportPath(const QString& targetDirectoryPath, const QString& preferredName, bool isDirectory) const
+    {
+        QFileInfo preferredInfo(preferredName);
+        const QString completeSuffix = preferredInfo.completeSuffix();
+        const QString baseName = isDirectory || completeSuffix.isEmpty()
+                                     ? preferredName
+                                     : preferredName.left(preferredName.size() - completeSuffix.size() - 1);
+        const QString suffix = isDirectory || completeSuffix.isEmpty() ? QString() : QStringLiteral(".") + completeSuffix;
+
+        QDir target(targetDirectoryPath);
+        QString candidate = target.filePath(preferredName);
+        for (int number = 2; QFileInfo::exists(candidate); ++number) {
+            candidate = target.filePath(QStringLiteral("%1 %2%3").arg(baseName).arg(number).arg(suffix));
+        }
+        return candidate;
+    }
+
+    bool writeBytes(const QString& path, const QByteArray& bytes) const
+    {
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly)) {
+            return false;
+        }
+        return file.write(bytes) == bytes.size();
+    }
+
+    std::optional<QString> pasteableBinaryFormat(const QMimeData* mimeData) const
+    {
+        if (!mimeData) {
+            return std::nullopt;
+        }
+
+        const QStringList preferredFormats = {
+            QStringLiteral("image/png"),
+            QStringLiteral("image/jpeg"),
+            QStringLiteral("image/bmp"),
+            QStringLiteral("image/gif"),
+            QStringLiteral("application/pdf"),
+            QStringLiteral("application/json"),
+            QStringLiteral("text/csv"),
+            QStringLiteral("application/octet-stream")
+        };
+
+        for (const QString& format : preferredFormats) {
+            if (mimeData->hasFormat(format) && !mimeData->data(format).isEmpty()) {
+                return format;
+            }
+        }
+
+        for (const QString& format : mimeData->formats()) {
+            if (format.startsWith(QStringLiteral("application/x-qt-"), Qt::CaseInsensitive)) {
+                continue;
+            }
+            if (!mimeData->data(format).isEmpty()) {
+                return format;
+            }
+        }
+
+        return std::nullopt;
+    }
+
+    QString extensionForMimeFormat(const QString& format) const
+    {
+        const QString lower = format.toLower();
+        if (lower == QStringLiteral("image/png")) {
+            return QStringLiteral("png");
+        }
+        if (lower == QStringLiteral("image/jpeg") || lower == QStringLiteral("image/jpg")) {
+            return QStringLiteral("jpg");
+        }
+        if (lower == QStringLiteral("image/bmp")) {
+            return QStringLiteral("bmp");
+        }
+        if (lower == QStringLiteral("image/gif")) {
+            return QStringLiteral("gif");
+        }
+        if (lower == QStringLiteral("image/webp")) {
+            return QStringLiteral("webp");
+        }
+        if (lower == QStringLiteral("application/pdf")) {
+            return QStringLiteral("pdf");
+        }
+        if (lower == QStringLiteral("application/json")) {
+            return QStringLiteral("json");
+        }
+        if (lower == QStringLiteral("text/csv")) {
+            return QStringLiteral("csv");
+        }
+        if (lower == QStringLiteral("text/markdown")) {
+            return QStringLiteral("md");
+        }
+        if (lower == QStringLiteral("text/xml") || lower == QStringLiteral("application/xml")) {
+            return QStringLiteral("xml");
+        }
+        return QStringLiteral("bin");
+    }
+
+    bool copyDirectoryRecursively(const QString& sourcePath, const QString& destinationPath) const
+    {
+        QDir source(sourcePath);
+        if (!source.exists()) {
+            return false;
+        }
+
+        QDir parent(QFileInfo(destinationPath).absolutePath());
+        if (!parent.mkpath(QFileInfo(destinationPath).fileName())) {
+            return false;
+        }
+
+        const QFileInfoList entries = source.entryInfoList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot |
+                                                           QDir::Hidden | QDir::System);
+        for (const QFileInfo& entry : entries) {
+            const QString destinationChild = QDir(destinationPath).filePath(entry.fileName());
+            if (entry.isDir()) {
+                if (!copyDirectoryRecursively(entry.absoluteFilePath(), destinationChild)) {
+                    return false;
+                }
+            } else {
+                if (!QFile::copy(entry.absoluteFilePath(), destinationChild)) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     void rekeyPathMetadataAfterRename(const QString& oldPath, const QString& newPath, bool wasDir)
@@ -1983,6 +2478,11 @@ private:
         return QDir(rootPath_).filePath(QStringLiteral(".mycel/colors.json"));
     }
 
+    QString previewFilePath() const
+    {
+        return QDir(rootPath_).filePath(QStringLiteral(".mycel/previews.json"));
+    }
+
     QString relativeKeyForPath(const QString& path) const
     {
         return QDir(rootPath_).relativeFilePath(path);
@@ -1996,6 +2496,10 @@ private:
     void loadOrderFile()
     {
         fileOrders_.clear();
+        if (!mycelStorageEnabled_) {
+            return;
+        }
+
         QFile file(orderFilePath());
         if (!file.open(QIODevice::ReadOnly)) {
             return;
@@ -2015,6 +2519,10 @@ private:
 
     void saveOrderFile()
     {
+        if (!mycelStorageEnabled_) {
+            return;
+        }
+
         QDir root(rootPath_);
         if (!root.mkpath(QStringLiteral(".mycel"))) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral(".mycel フォルダを作成できませんでした。"));
@@ -2045,6 +2553,10 @@ private:
     void loadColorFile()
     {
         userColors_.clear();
+        if (!mycelStorageEnabled_) {
+            return;
+        }
+
         QFile file(colorFilePath());
         if (!file.open(QIODevice::ReadOnly)) {
             return;
@@ -2062,6 +2574,10 @@ private:
 
     void saveColorFile()
     {
+        if (!mycelStorageEnabled_) {
+            return;
+        }
+
         QDir root(rootPath_);
         if (!root.mkpath(QStringLiteral(".mycel"))) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral(".mycel フォルダを作成できませんでした。"));
@@ -2085,10 +2601,84 @@ private:
         file.write(QJsonDocument(rootObject).toJson(QJsonDocument::Indented));
     }
 
+    void loadPreviewFile()
+    {
+        previewPaths_.clear();
+        previewSizes_.clear();
+        if (!mycelStorageEnabled_) {
+            return;
+        }
+
+        QFile file(previewFilePath());
+        if (!file.open(QIODevice::ReadOnly)) {
+            return;
+        }
+
+        const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+        const QJsonObject previews = doc.object().value(QStringLiteral("previews")).toObject();
+        for (auto it = previews.begin(); it != previews.end(); ++it) {
+            const QString absolutePath = absolutePathForKey(it.key());
+            const QJsonObject preview = it.value().toObject();
+            if (preview.value(QStringLiteral("open")).toBool(false)) {
+                previewPaths_.insert(absolutePath);
+            }
+
+            const qreal width = preview.value(QStringLiteral("width")).toDouble(0.0);
+            const qreal height = preview.value(QStringLiteral("height")).toDouble(0.0);
+            if (width > 0.0 && height > 0.0) {
+                previewSizes_[absolutePath] = QSizeF(std::clamp(width, 260.0, 900.0),
+                                                     std::clamp(height, 110.0, 520.0));
+            }
+        }
+    }
+
+    void savePreviewFile()
+    {
+        if (!mycelStorageEnabled_) {
+            return;
+        }
+
+        QDir root(rootPath_);
+        if (!root.mkpath(QStringLiteral(".mycel"))) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral(".mycel フォルダを作成できませんでした。"));
+            return;
+        }
+
+        QSet<QString> paths = previewPaths_;
+        for (const auto& [path, size] : previewSizes_) {
+            paths.insert(path);
+        }
+
+        QJsonObject previews;
+        for (const QString& path : paths.values()) {
+            QJsonObject preview;
+            preview.insert(QStringLiteral("open"), previewPaths_.contains(path));
+            const auto size = previewSizes_.find(path);
+            if (size != previewSizes_.end()) {
+                preview.insert(QStringLiteral("width"), size->second.width());
+                preview.insert(QStringLiteral("height"), size->second.height());
+            }
+            previews.insert(relativeKeyForPath(path), preview);
+        }
+
+        QJsonObject rootObject;
+        rootObject.insert(QStringLiteral("version"), 1);
+        rootObject.insert(QStringLiteral("previews"), previews);
+
+        QFile file(previewFilePath());
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("プレビュー状態を保存できませんでした。"));
+            return;
+        }
+        file.write(QJsonDocument(rootObject).toJson(QJsonDocument::Indented));
+    }
+
     void rebuild(bool fitAfterRebuild)
     {
         finishInlineRename(false);
-        setWindowTitle(QStringLiteral("Mycel - %1").arg(rootPath_));
+        setWindowTitle(mycelStorageEnabled_
+                           ? QStringLiteral("Mycel - %1").arg(rootPath_)
+                           : QStringLiteral("Mycel - %1 [--no-mycel]").arg(rootPath_));
 
         const QTransform previousTransform = view_->transform();
         const int previousHScroll = view_->horizontalScrollBar()->value();
@@ -2149,6 +2739,7 @@ private:
     }
 
     QString rootPath_;
+    bool mycelStorageEnabled_ = true;
     QSet<QString> collapsedPaths_;
     std::map<QString, QColor> userColors_;
     QSet<QString> previewPaths_;
@@ -2169,15 +2760,17 @@ private:
 void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
 {
     QMenu menu;
-    const bool multiFileSelection = !node_->isDir && isSelected() && window_->selectedFileCount() > 1;
+    const bool multiItemSelection = isSelected() && window_->selectedDeletableItemCount() > 1;
 
-    if (multiFileSelection) {
+    if (multiItemSelection) {
         QAction* refreshSelectionAction = menu.addAction(QStringLiteral("選択範囲を更新"));
         QAction* refreshAllAction = menu.addAction(QStringLiteral("全体を更新"));
         menu.addSeparator();
         QAction* openSelectionAction = menu.addAction(QStringLiteral("選択ファイルのプレビューを開く"));
         QAction* closeSelectionAction = menu.addAction(QStringLiteral("選択ファイルのプレビューを閉じる"));
-        QAction* deleteSelectionAction = menu.addAction(QStringLiteral("選択ファイルを削除"));
+        openSelectionAction->setEnabled(window_->hasSelectedFiles());
+        closeSelectionAction->setEnabled(window_->hasSelectedFiles());
+        QAction* deleteSelectionAction = menu.addAction(QStringLiteral("選択項目を削除"));
 
         QAction* selected = menu.exec(event->screenPos());
         if (selected == refreshSelectionAction) {
@@ -2189,7 +2782,7 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
         } else if (selected == closeSelectionAction) {
             window_->setSelectedFilePreviews(false);
         } else if (selected == deleteSelectionAction) {
-            window_->deleteSelectedFiles();
+            window_->deleteSelectedItems();
         }
         return;
     }
@@ -2203,12 +2796,18 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
         menu.addSeparator();
         QAction* folderAction = menu.addAction(QStringLiteral("フォルダを作成"));
         QAction* fileAction = menu.addAction(QStringLiteral("ファイルを作成"));
+        QAction* pasteAction = menu.addAction(QStringLiteral("貼り付け"));
+        pasteAction->setEnabled(window_->canPasteClipboardToFolder(node_));
         QAction* deleteAction = menu.addAction(QStringLiteral("削除"));
         deleteAction->setEnabled(window_->canDeleteFolder(node_));
-        menu.addSeparator();
-        QAction* colorAction = menu.addAction(QStringLiteral("色を設定"));
-        QAction* clearColorAction = menu.addAction(QStringLiteral("色をクリア"));
-        clearColorAction->setEnabled(window_->hasUserColor(node_));
+        QAction* colorAction = nullptr;
+        QAction* clearColorAction = nullptr;
+        if (window_->mycelStorageEnabled()) {
+            menu.addSeparator();
+            colorAction = menu.addAction(QStringLiteral("色を設定"));
+            clearColorAction = menu.addAction(QStringLiteral("色をクリア"));
+            clearColorAction->setEnabled(window_->hasUserColor(node_));
+        }
         menu.addSeparator();
         QAction* openAction = menu.addAction(QStringLiteral("開く"));
         QAction* selected = menu.exec(event->screenPos());
@@ -2222,11 +2821,13 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
             window_->createFolder(node_);
         } else if (selected == fileAction) {
             window_->createFile(node_);
+        } else if (selected == pasteAction) {
+            window_->pasteClipboardToFolder(node_);
         } else if (selected == deleteAction) {
             window_->deleteFolder(node_);
-        } else if (selected == colorAction) {
+        } else if (colorAction && selected == colorAction) {
             window_->setNodeColor(node_);
-        } else if (selected == clearColorAction) {
+        } else if (clearColorAction && selected == clearColorAction) {
             window_->clearNodeColor(node_);
         } else if (selected == openAction) {
             window_->openNode(node_);
@@ -2234,10 +2835,14 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
     } else {
         QAction* renameAction = menu.addAction(QStringLiteral("名前を変更"));
         QAction* deleteAction = menu.addAction(QStringLiteral("削除"));
-        menu.addSeparator();
-        QAction* colorAction = menu.addAction(QStringLiteral("色を設定"));
-        QAction* clearColorAction = menu.addAction(QStringLiteral("色をクリア"));
-        clearColorAction->setEnabled(window_->hasUserColor(node_));
+        QAction* colorAction = nullptr;
+        QAction* clearColorAction = nullptr;
+        if (window_->mycelStorageEnabled()) {
+            menu.addSeparator();
+            colorAction = menu.addAction(QStringLiteral("色を設定"));
+            clearColorAction = menu.addAction(QStringLiteral("色をクリア"));
+            clearColorAction->setEnabled(window_->hasUserColor(node_));
+        }
         menu.addSeparator();
         QAction* openAction = menu.addAction(QStringLiteral("開く"));
         QAction* selected = menu.exec(event->screenPos());
@@ -2249,9 +2854,9 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
             window_->renameFile(node_);
         } else if (selected == deleteAction) {
             window_->deleteFile(node_);
-        } else if (selected == colorAction) {
+        } else if (colorAction && selected == colorAction) {
             window_->setNodeColor(node_);
-        } else if (selected == clearColorAction) {
+        } else if (clearColorAction && selected == clearColorAction) {
             window_->clearNodeColor(node_);
         } else if (selected == openAction) {
             window_->openNode(node_);
@@ -2293,6 +2898,49 @@ QVariant NodeItem::itemChange(GraphicsItemChange change, const QVariant& value)
         }
     }
     return QGraphicsItem::itemChange(change, value);
+}
+
+void NodeItem::dragEnterEvent(QGraphicsSceneDragDropEvent* event)
+{
+    if (window_->canImportExternalUrls(event->mimeData(), node_)) {
+        externalDropHover_ = true;
+        update();
+        event->setDropAction(Qt::CopyAction);
+        event->accept();
+        return;
+    }
+    event->ignore();
+}
+
+void NodeItem::dragLeaveEvent(QGraphicsSceneDragDropEvent* event)
+{
+    externalDropHover_ = false;
+    update();
+    event->accept();
+}
+
+void NodeItem::dragMoveEvent(QGraphicsSceneDragDropEvent* event)
+{
+    if (window_->canImportExternalUrls(event->mimeData(), node_)) {
+        event->setDropAction(Qt::CopyAction);
+        event->accept();
+        return;
+    }
+    event->ignore();
+}
+
+void NodeItem::dropEvent(QGraphicsSceneDragDropEvent* event)
+{
+    externalDropHover_ = false;
+    update();
+    if (!window_->canImportExternalUrls(event->mimeData(), node_)) {
+        event->ignore();
+        return;
+    }
+
+    window_->importExternalUrlsToFolder(event->mimeData()->urls(), node_);
+    event->setDropAction(Qt::CopyAction);
+    event->accept();
 }
 
 void NodeItem::mouseReleaseEvent(QGraphicsSceneMouseEvent* event)
@@ -2380,7 +3028,12 @@ void NodeItem::mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event)
 int main(int argc, char* argv[])
 {
     QApplication app(argc, argv);
-    MainWindow window(startupRootPath(app.arguments()));
+    app.setWindowIcon(QIcon(":/icons/mycel.png"));
+    StartupOptions options = startupOptions(app.arguments());
+    if (!resolveStartupStorageMode(options)) {
+        return 0;
+    }
+    MainWindow window(options.rootPath, options.mycelStorageEnabled);
     window.show();
     return app.exec();
 }

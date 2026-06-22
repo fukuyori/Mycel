@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/icons">
+        <file>mycel.png</file>
+    </qresource>
+</RCC>
