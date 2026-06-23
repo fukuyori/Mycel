@@ -6,7 +6,7 @@ Instead of treating files as a vertical file list, Mycel lays out folders and fi
 
 Japanese documentation is available in [README.ja.md](README.ja.md).
 
-Current version: 0.2.5.
+Current version: 0.2.6.
 
 Release history is available in [CHANGELOG.md](CHANGELOG.md).
 
@@ -21,20 +21,23 @@ Release history is available in [CHANGELOG.md](CHANGELOG.md).
 - Persistent item order in `.mycel/order.json`
 - User-assigned node colors in `.mycel/colors.json`
 - Preview open/closed state and custom preview sizes in `.mycel/previews.json`
+- Canvas view and window state in `.mycel/view.json`
 - Folder collapse and expand
 - Inline previews for text and Markdown files
 - Selectable inline preview text with copy support
-- Right-side direct editor for the selected editable text file, with automatic saving
-- Toggleable right-side editor pane
+- Direct editor pane for the selected editable text file, with automatic saving
+- Toggleable editor pane
+- Editor pane placement can be switched between left, right, and bottom
 - Built-in editor for text files, with Ctrl + S save and Ctrl + mouse wheel zoom
 - Persistent editor font size shared across editable files and sessions
+- Persistent canvas zoom, view position, window size, and maximized/full-screen state
 - Markdown preview rendering with wrapped text
 - Multi-selection with batch preview open/close and selected item deletion
 - Context menus for refresh, rename, delete, color, open, and creation actions
 - Selection-based file and folder creation with `N` and `Shift + N`
 - Copy selected files and folders with `Ctrl + C` / `Ctrl + V`
 - Keyboard navigation across visible nodes with `Tab` and `Shift + Tab`
-- Focus the right-side editor pane with `E`
+- Focus the editor pane with `E`
 - Toggle selected file previews with `V`
 - Trackpad pinch zoom and mouse wheel zoom
 - Range zoom: drag an empty canvas area, then press Enter to zoom to that range
@@ -42,6 +45,15 @@ Release history is available in [CHANGELOG.md](CHANGELOG.md).
 - Keyboard shortcuts for reload, maximize, inline rename, and the cheat sheet
 - Startup root selection: current directory by default, or the first command-line argument when provided
 - `--version` option and title-bar version display
+
+## What's New in 0.2.6
+
+- Added an editor placement menu for left, right, and bottom layouts, with the selected placement persisted across sessions.
+- Saved canvas zoom, view position, window size, and maximized/full-screen state in `.mycel/view.json`, then restored them on the next launch.
+- Fixed startup synchronization so the editor pane is shown when the Editor toggle is on.
+- Added Ctrl + S inside the editor pane to save and return focus to the edited file.
+- Added Subject-based renaming: `Subject: filename.txt` on the first line renames the file after saving and removes that `Subject:` line from the file.
+- Hid lines starting with `Subject:` or `Key:` from inline previews.
 
 ## What's New in 0.2.5
 
@@ -217,7 +229,7 @@ Show the version and exit:
 
 On normal startup, if the root directory does not contain a `.mycel` folder, Mycel asks whether to create one, open the directory in `--no-mycel` mode, or choose another root directory.
 
-In `--no-mycel` mode, Mycel does not load or create `.mycel/order.json`, `.mycel/colors.json`, or `.mycel/previews.json`. Reordering and node color changes are disabled in this mode.
+In `--no-mycel` mode, Mycel does not load or create `.mycel/order.json`, `.mycel/colors.json`, `.mycel/previews.json`, or `.mycel/view.json`. Reordering, node color changes, and persisted view/window restoration are disabled in this mode.
 
 ## Mouse Operations
 
@@ -226,7 +238,10 @@ In `--no-mycel` mode, Mycel does not load or create `.mycel/order.json`, `.mycel
 - Enter after empty canvas drag: zoom to the dragged range
 - Ctrl + 0: fit the whole map
 - Ctrl + E: show or hide the editor pane
-- E: edit the selected file in the right-side editor pane
+- Toolbar Editor Place: move the editor pane to the left, right, or bottom
+- E: edit the selected file in the editor pane
+- Ctrl + S inside the editor pane: save and return focus to the edited file; if the first line is `Subject: filename.txt`, rename the file to `filename.txt` after saving and remove that `Subject:` line from the file
+- Lines starting with `Subject:` or `Key:` are hidden from inline previews
 - Tab: move to the next visible item at the same level
 - Shift + Tab: move to the previous visible item at the same level
 - N: create `NewFile.txt` in the selected folder or in the selected file's folder

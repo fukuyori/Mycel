@@ -24,6 +24,7 @@
 #include <QtCore/QVector>
 #include <QtGui/QTransform>
 #include <QtGui/QBrush>
+#include <QtGui/QActionGroup>
 #include <QtGui/QColor>
 #include <QtGui/QDesktopServices>
 #include <QtGui/QFont>
@@ -69,6 +70,7 @@
 #include <QtWidgets/QSplitter>
 #include <QtWidgets/QTextEdit>
 #include <QtWidgets/QToolBar>
+#include <QtWidgets/QToolButton>
 #include <QtWidgets/QVBoxLayout>
 
 #include <algorithm>
@@ -441,6 +443,23 @@ bool isMarkdownPreviewFile(const QFileInfo& info)
 {
     const QString suffix = info.suffix().toLower();
     return suffix == QStringLiteral("md") || suffix == QStringLiteral("markdown");
+}
+
+bool isPreviewMetadataLine(const QString& line)
+{
+    return line.startsWith(QStringLiteral("Subject:")) || line.startsWith(QStringLiteral("Key:"));
+}
+
+QString filterPreviewMetadataLines(const QString& text)
+{
+    QStringList filtered;
+    const QStringList lines = text.split(QLatin1Char('\n'));
+    for (const QString& line : lines) {
+        if (!isPreviewMetadataLine(line)) {
+            filtered.append(line);
+        }
+    }
+    return filtered.join(QLatin1Char('\n'));
 }
 
 bool isImagePreviewFile(const QFileInfo& info)
@@ -942,6 +961,11 @@ public:
         keyHandler_ = std::move(handler);
     }
 
+    void setViewChangedHandler(std::function<void()> handler)
+    {
+        viewChangedHandler_ = std::move(handler);
+    }
+
 protected:
     void wheelEvent(QWheelEvent* event) override
     {
@@ -1029,6 +1053,7 @@ protected:
             panning_ = false;
             panningButton_ = Qt::NoButton;
             unsetCursor();
+            notifyViewChanged();
             event->accept();
             return;
         }
@@ -1095,6 +1120,7 @@ private:
 
         resetTransform();
         fitInView(sceneRect.adjusted(-40.0, -40.0, 40.0, 40.0), Qt::KeepAspectRatio);
+        notifyViewChanged();
     }
 
     void zoomAt(const QPointF& viewportPos, qreal factor)
@@ -1111,6 +1137,14 @@ private:
         const QPointF sceneAfter = mapToScene(viewportPos.toPoint());
         const QPointF delta = sceneAfter - sceneBefore;
         translate(delta.x(), delta.y());
+        notifyViewChanged();
+    }
+
+    void notifyViewChanged()
+    {
+        if (viewChangedHandler_) {
+            viewChangedHandler_();
+        }
     }
 
     bool panning_ = false;
@@ -1121,6 +1155,7 @@ private:
     QRectF lastRubberBandSceneRect_;
     std::function<void()> cheatSheetHandler_;
     std::function<bool(QKeyEvent*)> keyHandler_;
+    std::function<void()> viewChangedHandler_;
 };
 
 class TextEditor final : public QPlainTextEdit {
@@ -1349,14 +1384,15 @@ public:
     {
         resize(1280, 820);
 
-        auto* mainSplitter = new QSplitter(Qt::Horizontal, this);
+        editorSplitter_ = new QSplitter(Qt::Horizontal, this);
 
-        view_ = new BoardView(mainSplitter);
+        view_ = new BoardView(editorSplitter_);
         view_->setScene(&scene_);
         view_->setCheatSheetHandler([this] { showCheatSheet(); });
         view_->setKeyHandler([this](QKeyEvent* event) { return handleBoardShortcut(event); });
+        view_->setViewChangedHandler([this] { scheduleViewStateSave(); });
 
-        sideEditorPanel_ = new QWidget(mainSplitter);
+        sideEditorPanel_ = new QWidget(editorSplitter_);
         auto* editorLayout = new QVBoxLayout(sideEditorPanel_);
         editorLayout->setContentsMargins(10, 8, 10, 8);
         editorLayout->setSpacing(6);
@@ -1371,12 +1407,9 @@ public:
         editorLayout->addWidget(sideEditorStatusLabel_);
         editorLayout->addWidget(sideEditor_, 1);
 
-        mainSplitter->addWidget(view_);
-        mainSplitter->addWidget(sideEditorPanel_);
-        mainSplitter->setStretchFactor(0, 1);
-        mainSplitter->setStretchFactor(1, 0);
-        mainSplitter->setSizes({920, 360});
-        setCentralWidget(mainSplitter);
+        editorSplitter_->addWidget(view_);
+        editorSplitter_->addWidget(sideEditorPanel_);
+        setCentralWidget(editorSplitter_);
 
         auto* toolbar = addToolBar(QStringLiteral("Mycel"));
         QAction* openAction = toolbar->addAction(QStringLiteral("Open"));
@@ -1392,6 +1425,32 @@ public:
         editorPaneAction_->setShortcutContext(Qt::ApplicationShortcut);
         editorPaneAction_->setChecked(QSettings().value(QStringLiteral("editor/paneVisible"), true).toBool());
         sideEditorPanel_->setVisible(editorPaneAction_->isChecked());
+        auto* editorPositionButton = new QToolButton(this);
+        editorPositionButton->setText(QStringLiteral("Editor Place"));
+        editorPositionButton->setPopupMode(QToolButton::InstantPopup);
+        auto* editorPositionMenu = new QMenu(editorPositionButton);
+        editorPositionButton->setMenu(editorPositionMenu);
+        auto* editorPositionGroup = new QActionGroup(this);
+        editorPositionGroup->setExclusive(true);
+        QAction* editorLeftAction = editorPositionMenu->addAction(QStringLiteral("Left"));
+        QAction* editorRightAction = editorPositionMenu->addAction(QStringLiteral("Right"));
+        QAction* editorBottomAction = editorPositionMenu->addAction(QStringLiteral("Bottom"));
+        for (QAction* action : {editorLeftAction, editorRightAction, editorBottomAction}) {
+            action->setCheckable(true);
+            editorPositionGroup->addAction(action);
+        }
+        editorLeftAction->setData(QStringLiteral("left"));
+        editorRightAction->setData(QStringLiteral("right"));
+        editorBottomAction->setData(QStringLiteral("bottom"));
+        toolbar->addWidget(editorPositionButton);
+        applyEditorPanePosition(QSettings().value(QStringLiteral("editor/panePosition"), QStringLiteral("right")).toString(),
+                                false);
+        for (QAction* action : editorPositionGroup->actions()) {
+            if (action->data().toString() == editorPanePosition_) {
+                action->setChecked(true);
+                break;
+            }
+        }
         QAction* renameSelectedAction = new QAction(this);
         renameSelectedAction->setShortcut(QKeySequence(Qt::Key_F2));
         renameSelectedAction->setShortcutContext(Qt::ApplicationShortcut);
@@ -1408,6 +1467,7 @@ public:
         connect(openAction, &QAction::triggered, this, [this] {
             const QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("Open directory"), rootPath_);
             if (!dir.isEmpty()) {
+                saveViewState();
                 rootPath_ = normalizedDirectoryPath(dir);
                 collapsedPaths_.clear();
                 previewPaths_.clear();
@@ -1416,13 +1476,18 @@ public:
                 loadColorFile();
                 loadPreviewFile();
                 applyLargeTreeStartupCollapse();
+                restoreWindowStateFromSettingsFile();
                 rebuild(true);
+                QTimer::singleShot(0, this, [this] { syncEditorPaneVisibility(); });
             }
         });
         connect(refreshAction, &QAction::triggered, this, [this] { refreshAll(); });
         connect(fitAction, &QAction::triggered, this, [this] { fitToMap(); });
         connect(openSelectedPreviewsAction, &QAction::triggered, this, [this] { setSelectedFilePreviews(true); });
         connect(closeSelectedPreviewsAction, &QAction::triggered, this, [this] { setSelectedFilePreviews(false); });
+        connect(editorPositionGroup, &QActionGroup::triggered, this, [this](QAction* action) {
+            applyEditorPanePosition(action->data().toString(), true);
+        });
         connect(editorPaneAction_, &QAction::toggled, this, [this](bool visible) {
             if (!visible && !saveSideEditorNow()) {
                 editorPaneAction_->setChecked(true);
@@ -1433,6 +1498,7 @@ public:
             settings.setValue(QStringLiteral("editor/paneVisible"), visible);
             settings.sync();
             if (visible) {
+                applyEditorPanePosition(editorPanePosition_, false);
                 updateSideEditorForSelection();
             }
         });
@@ -1446,10 +1512,15 @@ public:
         });
         connect(quitAction, &QAction::triggered, this, &QWidget::close);
         connect(&scene_, &QGraphicsScene::selectionChanged, this, [this] { updateSideEditorForSelection(); });
+        connect(view_->horizontalScrollBar(), &QScrollBar::valueChanged, this, [this] { scheduleViewStateSave(); });
+        connect(view_->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] { scheduleViewStateSave(); });
 
         sideEditorSaveTimer_.setSingleShot(true);
         sideEditorSaveTimer_.setInterval(300);
         connect(&sideEditorSaveTimer_, &QTimer::timeout, this, [this] { saveSideEditorNow(); });
+        auto* sideEditorSaveShortcut = new QShortcut(QKeySequence::Save, sideEditor_);
+        sideEditorSaveShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(sideEditorSaveShortcut, &QShortcut::activated, this, [this] { saveSideEditorAndReturnFocus(); });
         connect(sideEditor_, &QPlainTextEdit::textChanged, this, [this] {
             if (sideEditorLoading_ || sideEditorPath_.isEmpty() || sideEditor_->isReadOnly()) {
                 return;
@@ -1458,6 +1529,9 @@ public:
             sideEditorStatusLabel_->setText(QStringLiteral("保存待ち"));
             sideEditorSaveTimer_.start();
         });
+        viewStateSaveTimer_.setSingleShot(true);
+        viewStateSaveTimer_.setInterval(500);
+        connect(&viewStateSaveTimer_, &QTimer::timeout, this, [this] { saveViewState(); });
 
         previewClickTimer_.setSingleShot(true);
         connect(&previewClickTimer_, &QTimer::timeout, this, [this] {
@@ -1476,7 +1550,9 @@ public:
         loadColorFile();
         loadPreviewFile();
         applyLargeTreeStartupCollapse();
+        restoreWindowStateFromSettingsFile();
         rebuild(true);
+        QTimer::singleShot(0, this, [this] { syncEditorPaneVisibility(); });
     }
 
     bool mycelStorageEnabled() const
@@ -1664,6 +1740,69 @@ public:
         return true;
     }
 
+    void saveSideEditorAndReturnFocus()
+    {
+        const QString path = sideEditorPath_;
+        const QString subjectName = subjectFileNameFromEditor();
+        if (!saveSideEditorNow()) {
+            return;
+        }
+        QString focusPath = path;
+        if (!path.isEmpty() && !subjectName.isEmpty() && subjectName != QFileInfo(path).fileName()) {
+            const QString destination = QFileInfo(path).dir().filePath(subjectName);
+            if (!renamePathTo(path, subjectName)) {
+                sideEditor_->setFocus(Qt::ShortcutFocusReason);
+                return;
+            }
+            focusPath = destination;
+            sideEditorPath_ = destination;
+            sideEditorPathLabel_->setText(QDir::toNativeSeparators(relativeKeyForPath(destination)));
+        }
+        if (!focusPath.isEmpty() && !subjectName.isEmpty()) {
+            removeSubjectLineFromEditor();
+            sideEditorDirty_ = true;
+            if (!saveSideEditorNow()) {
+                sideEditor_->setFocus(Qt::ShortcutFocusReason);
+                return;
+            }
+        }
+        if (!focusPath.isEmpty()) {
+            selectNodePath(focusPath);
+            return;
+        }
+        view_->setFocus(Qt::ShortcutFocusReason);
+    }
+
+    QString subjectFileNameFromEditor() const
+    {
+        QString firstLine = sideEditor_->toPlainText().section(QLatin1Char('\n'), 0, 0).trimmed();
+        if (firstLine.endsWith(QLatin1Char('\r'))) {
+            firstLine.chop(1);
+        }
+        const QString prefix = QStringLiteral("Subject:");
+        if (!firstLine.startsWith(prefix)) {
+            return {};
+        }
+        return firstLine.mid(prefix.size()).trimmed();
+    }
+
+    void removeSubjectLineFromEditor()
+    {
+        QString text = sideEditor_->toPlainText();
+        if (!text.startsWith(QStringLiteral("Subject:"))) {
+            return;
+        }
+
+        const int newline = text.indexOf(QLatin1Char('\n'));
+        sideEditorLoading_ = true;
+        if (newline < 0) {
+            sideEditor_->setPlainText({});
+        } else {
+            sideEditor_->setPlainText(text.mid(newline + 1));
+        }
+        sideEditorLoading_ = false;
+    }
+
     bool toggleSelectedFilePreviews()
     {
         bool hasSelectedFile = false;
@@ -1769,6 +1908,20 @@ public:
             clearSideEditor({}, {});
         } else {
             clearSideEditor({}, {});
+        }
+    }
+
+    void syncEditorPaneVisibility()
+    {
+        if (!editorPaneAction_ || !sideEditorPanel_) {
+            return;
+        }
+
+        const bool visible = editorPaneAction_->isChecked();
+        sideEditorPanel_->setVisible(visible);
+        if (visible) {
+            applyEditorPanePosition(editorPanePosition_, false);
+            updateSideEditorForSelection();
         }
     }
 
@@ -1896,8 +2049,11 @@ public:
         }
 
         QTextStream stream(&file);
-        for (int lineNo = 1; lineNo <= 7 && !stream.atEnd(); ++lineNo) {
-            lines << stream.readLine();
+        while (lines.size() < 7 && !stream.atEnd()) {
+            const QString line = stream.readLine();
+            if (!isPreviewMetadataLine(line)) {
+                lines << line;
+            }
         }
         if (lines.isEmpty()) {
             lines << QStringLiteral("空のファイル");
@@ -1928,7 +2084,8 @@ public:
         if (!file.atEnd()) {
             data += "\n\n...";
         }
-        return QString::fromUtf8(data);
+        const QString filtered = filterPreviewMetadataLines(QString::fromUtf8(data));
+        return filtered.trimmed().isEmpty() ? QStringLiteral("空のファイル") : filtered;
     }
 
     void toggleInlinePreview(Node* node)
@@ -2154,6 +2311,7 @@ public:
                 "Ctrl + 0 : 全体表示\n"
                 "Ctrl + E : 編集ペインの表示/非表示\n"
                 "E : 選択ファイルを右側エディタで編集\n"
+                "編集ペイン内 Ctrl + S : 保存し、1行目の Subject: に合わせてファイル名を変更して Subject 行を削除\n"
                 "Tab : 同じ階層の次の表示項目へ移動\n"
                 "Shift + Tab : 同じ階層の前の表示項目へ移動\n"
                 "V : 選択ファイルのプレビュー表示/非表示\n"
@@ -3251,6 +3409,7 @@ protected:
             event->ignore();
             return;
         }
+        saveViewState();
         QMainWindow::closeEvent(event);
     }
 
@@ -3591,6 +3750,11 @@ private:
         return QDir(rootPath_).filePath(QStringLiteral(".mycel/previews.json"));
     }
 
+    QString viewStateFilePath() const
+    {
+        return QDir(rootPath_).filePath(QStringLiteral(".mycel/view.json"));
+    }
+
     QString relativeKeyForPath(const QString& path) const
     {
         return QDir(rootPath_).relativeFilePath(path);
@@ -3781,6 +3945,151 @@ private:
         file.write(QJsonDocument(rootObject).toJson(QJsonDocument::Indented));
     }
 
+    QJsonObject currentViewStateObject() const
+    {
+        const QTransform transform = view_->transform();
+
+        QJsonObject transformObject;
+        transformObject.insert(QStringLiteral("m11"), transform.m11());
+        transformObject.insert(QStringLiteral("m12"), transform.m12());
+        transformObject.insert(QStringLiteral("m13"), transform.m13());
+        transformObject.insert(QStringLiteral("m21"), transform.m21());
+        transformObject.insert(QStringLiteral("m22"), transform.m22());
+        transformObject.insert(QStringLiteral("m23"), transform.m23());
+        transformObject.insert(QStringLiteral("m31"), transform.m31());
+        transformObject.insert(QStringLiteral("m32"), transform.m32());
+        transformObject.insert(QStringLiteral("m33"), transform.m33());
+
+        QJsonObject scrollObject;
+        scrollObject.insert(QStringLiteral("horizontal"), view_->horizontalScrollBar()->value());
+        scrollObject.insert(QStringLiteral("vertical"), view_->verticalScrollBar()->value());
+
+        const QRect geometry = (isMaximized() || isFullScreen()) ? normalGeometry() : this->geometry();
+        QJsonObject geometryObject;
+        geometryObject.insert(QStringLiteral("x"), geometry.x());
+        geometryObject.insert(QStringLiteral("y"), geometry.y());
+        geometryObject.insert(QStringLiteral("width"), geometry.width());
+        geometryObject.insert(QStringLiteral("height"), geometry.height());
+
+        QJsonObject windowObject;
+        windowObject.insert(QStringLiteral("geometry"), geometryObject);
+        windowObject.insert(QStringLiteral("maximized"), isMaximized());
+        windowObject.insert(QStringLiteral("fullScreen"), isFullScreen());
+
+        QJsonObject rootObject;
+        rootObject.insert(QStringLiteral("version"), 1);
+        rootObject.insert(QStringLiteral("transform"), transformObject);
+        rootObject.insert(QStringLiteral("scroll"), scrollObject);
+        rootObject.insert(QStringLiteral("window"), windowObject);
+        return rootObject;
+    }
+
+    std::optional<QJsonObject> loadViewStateObject() const
+    {
+        if (!mycelStorageEnabled_) {
+            return std::nullopt;
+        }
+
+        QFile file(viewStateFilePath());
+        if (!file.open(QIODevice::ReadOnly)) {
+            return std::nullopt;
+        }
+
+        const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+        if (!doc.isObject()) {
+            return std::nullopt;
+        }
+        return doc.object();
+    }
+
+    bool readViewStateObject(const QJsonObject& rootObject, QTransform& transform, int& horizontal, int& vertical) const
+    {
+        const QJsonObject transformObject = rootObject.value(QStringLiteral("transform")).toObject();
+        const QJsonObject scrollObject = rootObject.value(QStringLiteral("scroll")).toObject();
+
+        const qreal m11 = transformObject.value(QStringLiteral("m11")).toDouble(0.0);
+        const qreal m12 = transformObject.value(QStringLiteral("m12")).toDouble(0.0);
+        const qreal m13 = transformObject.value(QStringLiteral("m13")).toDouble(0.0);
+        const qreal m21 = transformObject.value(QStringLiteral("m21")).toDouble(0.0);
+        const qreal m22 = transformObject.value(QStringLiteral("m22")).toDouble(0.0);
+        const qreal m23 = transformObject.value(QStringLiteral("m23")).toDouble(0.0);
+        const qreal m31 = transformObject.value(QStringLiteral("m31")).toDouble(0.0);
+        const qreal m32 = transformObject.value(QStringLiteral("m32")).toDouble(0.0);
+        const qreal m33 = transformObject.value(QStringLiteral("m33")).toDouble(0.0);
+        if (std::abs(m11) < 0.001 || std::abs(m22) < 0.001 || std::abs(m33) < 0.001) {
+            return false;
+        }
+
+        transform = QTransform(m11, m12, m13, m21, m22, m23, m31, m32, m33);
+        horizontal = scrollObject.value(QStringLiteral("horizontal")).toInt(0);
+        vertical = scrollObject.value(QStringLiteral("vertical")).toInt(0);
+        return true;
+    }
+
+    bool loadViewState(QTransform& transform, int& horizontal, int& vertical) const
+    {
+        const std::optional<QJsonObject> rootObject = loadViewStateObject();
+        if (!rootObject) {
+            return false;
+        }
+
+        return readViewStateObject(*rootObject, transform, horizontal, vertical);
+    }
+
+    void saveViewState()
+    {
+        if (!view_ || !mycelStorageEnabled_) {
+            return;
+        }
+        viewStateSaveTimer_.stop();
+        const QJsonObject rootObject = currentViewStateObject();
+
+        QDir root(rootPath_);
+        if (!root.mkpath(QStringLiteral(".mycel"))) {
+            return;
+        }
+
+        QFile file(viewStateFilePath());
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            return;
+        }
+        file.write(QJsonDocument(rootObject).toJson(QJsonDocument::Indented));
+    }
+
+    void restoreWindowStateFromSettingsFile()
+    {
+        const std::optional<QJsonObject> rootObject = loadViewStateObject();
+        if (!rootObject) {
+            return;
+        }
+
+        const QJsonObject windowObject = rootObject->value(QStringLiteral("window")).toObject();
+        const QJsonObject geometryObject = windowObject.value(QStringLiteral("geometry")).toObject();
+        const int width = geometryObject.value(QStringLiteral("width")).toInt(0);
+        const int height = geometryObject.value(QStringLiteral("height")).toInt(0);
+        if (width >= 320 && height >= 240) {
+            resize(width, height);
+            move(geometryObject.value(QStringLiteral("x")).toInt(x()),
+                 geometryObject.value(QStringLiteral("y")).toInt(y()));
+        }
+
+        if (windowObject.value(QStringLiteral("fullScreen")).toBool(false)) {
+            setWindowState(Qt::WindowFullScreen);
+        } else if (windowObject.value(QStringLiteral("maximized")).toBool(false)) {
+            setWindowState(Qt::WindowMaximized);
+        } else {
+            setWindowState(Qt::WindowNoState);
+        }
+    }
+
+    void scheduleViewStateSave()
+    {
+        if (restoringViewState_ || !mycelStorageEnabled_) {
+            return;
+        }
+        viewStateSaveTimer_.start();
+    }
+
     void rebuild(bool fitAfterRebuild)
     {
         saveSideEditorNow();
@@ -3823,7 +4132,7 @@ private:
         scene_.setSceneRect(bounds.adjusted(-FreeCanvasMargin, -FreeCanvasMargin,
                                             FreeCanvasMargin, FreeCanvasMargin));
         if (fitAfterRebuild) {
-            scheduleFitToMap();
+            scheduleRestoreViewStateOrFit();
         } else {
             view_->setTransform(previousTransform);
             view_->horizontalScrollBar()->setValue(previousHScroll);
@@ -3831,9 +4140,26 @@ private:
         }
     }
 
-    void scheduleFitToMap()
+    void scheduleRestoreViewStateOrFit()
     {
-        QTimer::singleShot(0, this, [this] { fitToMap(); });
+        QTimer::singleShot(0, this, [this] { restoreViewStateOrFit(); });
+    }
+
+    void restoreViewStateOrFit()
+    {
+        QTransform transform;
+        int horizontal = 0;
+        int vertical = 0;
+        if (!loadViewState(transform, horizontal, vertical)) {
+            fitToMap();
+            return;
+        }
+
+        restoringViewState_ = true;
+        view_->setTransform(transform);
+        view_->horizontalScrollBar()->setValue(horizontal);
+        view_->verticalScrollBar()->setValue(vertical);
+        restoringViewState_ = false;
     }
 
     void fitToMap()
@@ -3844,6 +4170,52 @@ private:
         view_->resetTransform();
         view_->fitInView(scene_.itemsBoundingRect().adjusted(-160.0, -160.0, 260.0, 160.0), Qt::KeepAspectRatio);
         view_->scale(0.96, 0.96);
+        scheduleViewStateSave();
+    }
+
+    void applyEditorPanePosition(QString position, bool persist)
+    {
+        if (!editorSplitter_ || !view_ || !sideEditorPanel_) {
+            return;
+        }
+        if (position != QStringLiteral("left") &&
+            position != QStringLiteral("right") &&
+            position != QStringLiteral("bottom")) {
+            position = QStringLiteral("right");
+        }
+
+        const bool editorVisible = sideEditorPanel_->isVisible();
+        editorPanePosition_ = position;
+
+        if (position == QStringLiteral("bottom")) {
+            editorSplitter_->setOrientation(Qt::Vertical);
+            editorSplitter_->insertWidget(0, view_);
+            editorSplitter_->insertWidget(1, sideEditorPanel_);
+            editorSplitter_->setStretchFactor(0, 1);
+            editorSplitter_->setStretchFactor(1, 0);
+            editorSplitter_->setSizes({620, 220});
+        } else if (position == QStringLiteral("left")) {
+            editorSplitter_->setOrientation(Qt::Horizontal);
+            editorSplitter_->insertWidget(0, sideEditorPanel_);
+            editorSplitter_->insertWidget(1, view_);
+            editorSplitter_->setStretchFactor(0, 0);
+            editorSplitter_->setStretchFactor(1, 1);
+            editorSplitter_->setSizes({360, 920});
+        } else {
+            editorSplitter_->setOrientation(Qt::Horizontal);
+            editorSplitter_->insertWidget(0, view_);
+            editorSplitter_->insertWidget(1, sideEditorPanel_);
+            editorSplitter_->setStretchFactor(0, 1);
+            editorSplitter_->setStretchFactor(1, 0);
+            editorSplitter_->setSizes({920, 360});
+        }
+
+        sideEditorPanel_->setVisible(editorVisible);
+        if (persist) {
+            QSettings settings;
+            settings.setValue(QStringLiteral("editor/panePosition"), editorPanePosition_);
+            settings.sync();
+        }
     }
 
     QString rootPath_;
@@ -3861,6 +4233,7 @@ private:
     QString renamingPath_;
     bool finishingRename_ = false;
     MindMapScene scene_;
+    QSplitter* editorSplitter_ = nullptr;
     BoardView* view_ = nullptr;
     NodeItem* dragHoverFolder_ = nullptr;
     QStringList copiedPaths_;
@@ -3870,10 +4243,13 @@ private:
     QLabel* sideEditorPathLabel_ = nullptr;
     QLabel* sideEditorStatusLabel_ = nullptr;
     QTimer sideEditorSaveTimer_;
+    QTimer viewStateSaveTimer_;
     QString sideEditorPath_;
+    QString editorPanePosition_ = QStringLiteral("right");
     QDateTime sideEditorLastModified_;
     bool sideEditorLoading_ = false;
     bool sideEditorDirty_ = false;
+    bool restoringViewState_ = false;
     std::unique_ptr<Node> root_;
 };
 
