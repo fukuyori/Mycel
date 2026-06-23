@@ -202,9 +202,155 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilen
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
+Name: "modifypath"; Description: "Add Mycel to the user PATH"; GroupDescription: "Command line:"; Flags: unchecked
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+const
+  EnvironmentKey = 'Environment';
+  EnvironmentValue = 'Path';
+  MycelHwndBroadcast = 65535;
+  MycelWmSettingChange = 26;
+  MycelSmtoAbortIfHung = 2;
+
+function SendMessageTimeout(hWnd: HWND; Msg: UINT; wParam: Longint; lParam: String;
+  fuFlags: UINT; uTimeout: UINT; var lpdwResult: DWORD): Longint;
+  external 'SendMessageTimeoutW@user32.dll stdcall';
+
+function NormalizePathForCompare(Path: string): string;
+begin
+  Result := Lowercase(Trim(Path));
+  while (Length(Result) > 3) and (Copy(Result, Length(Result), 1) = '\') do
+    Delete(Result, Length(Result), 1);
+end;
+
+function PathContainsDir(PathValue: string; Dir: string): Boolean;
+var
+  Remaining: string;
+  Item: string;
+  Separator: Integer;
+  NormalizedDir: string;
+begin
+  Result := False;
+  Remaining := PathValue;
+  NormalizedDir := NormalizePathForCompare(Dir);
+
+  while Remaining <> '' do
+  begin
+    Separator := Pos(';', Remaining);
+    if Separator > 0 then
+    begin
+      Item := Copy(Remaining, 1, Separator - 1);
+      Delete(Remaining, 1, Separator);
+    end
+    else
+    begin
+      Item := Remaining;
+      Remaining := '';
+    end;
+
+    if NormalizePathForCompare(Item) = NormalizedDir then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
+end;
+
+function RemoveDirFromPath(PathValue: string; Dir: string): string;
+var
+  Remaining: string;
+  Item: string;
+  Separator: Integer;
+  NormalizedDir: string;
+begin
+  Result := '';
+  Remaining := PathValue;
+  NormalizedDir := NormalizePathForCompare(Dir);
+
+  while Remaining <> '' do
+  begin
+    Separator := Pos(';', Remaining);
+    if Separator > 0 then
+    begin
+      Item := Copy(Remaining, 1, Separator - 1);
+      Delete(Remaining, 1, Separator);
+    end
+    else
+    begin
+      Item := Remaining;
+      Remaining := '';
+    end;
+
+    if (Trim(Item) <> '') and (NormalizePathForCompare(Item) <> NormalizedDir) then
+    begin
+      if Result <> '' then
+        Result := Result + ';';
+      Result := Result + Item;
+    end;
+  end;
+end;
+
+procedure BroadcastEnvironmentChange;
+var
+  ResultCode: DWORD;
+begin
+  SendMessageTimeout(MycelHwndBroadcast, MycelWmSettingChange, 0, 'Environment',
+    MycelSmtoAbortIfHung, 5000, ResultCode);
+end;
+
+procedure AddAppDirToPath;
+var
+  PathValue: string;
+  AppDir: string;
+begin
+  AppDir := ExpandConstant('{app}');
+  if not RegQueryStringValue(HKCU, EnvironmentKey, EnvironmentValue, PathValue) then
+    PathValue := '';
+
+  if PathContainsDir(PathValue, AppDir) then
+    Exit;
+
+  if Trim(PathValue) = '' then
+    PathValue := AppDir
+  else
+    PathValue := PathValue + ';' + AppDir;
+
+  RegWriteStringValue(HKCU, EnvironmentKey, EnvironmentValue, PathValue);
+  BroadcastEnvironmentChange;
+end;
+
+procedure RemoveAppDirFromPath;
+var
+  PathValue: string;
+  NewPathValue: string;
+  AppDir: string;
+begin
+  AppDir := ExpandConstant('{app}');
+  if not RegQueryStringValue(HKCU, EnvironmentKey, EnvironmentValue, PathValue) then
+    Exit;
+
+  NewPathValue := RemoveDirFromPath(PathValue, AppDir);
+  if NewPathValue <> PathValue then
+  begin
+    RegWriteStringValue(HKCU, EnvironmentKey, EnvironmentValue, NewPathValue);
+    BroadcastEnvironmentChange;
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if (CurStep = ssPostInstall) and WizardIsTaskSelected('modifypath') then
+    AddAppDirToPath;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    RemoveAppDirFromPath;
+end;
 "@
 
 Set-Content -LiteralPath $IssPath -Value $IssContent -Encoding UTF8

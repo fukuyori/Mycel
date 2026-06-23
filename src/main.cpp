@@ -61,6 +61,7 @@
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
+#include <QtWidgets/QListWidget>
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QMessageBox>
@@ -614,9 +615,122 @@ bool createMycelFolder(const QString& rootPath)
     return QDir(rootPath).mkpath(QStringLiteral(".mycel"));
 }
 
+QString historyPathKey(const QString& path)
+{
+    QString key = QDir::cleanPath(path);
+#ifdef Q_OS_WIN
+    key = key.toCaseFolded();
+#endif
+    return key;
+}
+
+QStringList recentRootPaths()
+{
+    constexpr int MaxRecentRoots = 20;
+    QSettings settings;
+    const QStringList savedPaths = settings.value(QStringLiteral("startup/recentRoots")).toStringList();
+    QStringList paths;
+    QSet<QString> seen;
+
+    for (const QString& savedPath : savedPaths) {
+        if (savedPath.trimmed().isEmpty()) {
+            continue;
+        }
+        const QString path = normalizedDirectoryPath(savedPath);
+        if (!QFileInfo(path).isDir()) {
+            continue;
+        }
+        const QString key = historyPathKey(path);
+        if (seen.contains(key)) {
+            continue;
+        }
+        seen.insert(key);
+        paths.append(path);
+        if (paths.size() >= MaxRecentRoots) {
+            break;
+        }
+    }
+
+    if (paths != savedPaths) {
+        settings.setValue(QStringLiteral("startup/recentRoots"), paths);
+    }
+    return paths;
+}
+
+void rememberRootPath(const QString& rootPath)
+{
+    constexpr int MaxRecentRoots = 20;
+    const QString path = normalizedDirectoryPath(rootPath);
+    if (!QFileInfo(path).isDir()) {
+        return;
+    }
+
+    QStringList paths = recentRootPaths();
+    const QString key = historyPathKey(path);
+    for (auto it = paths.begin(); it != paths.end();) {
+        if (historyPathKey(*it) == key) {
+            it = paths.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    paths.prepend(path);
+    while (paths.size() > MaxRecentRoots) {
+        paths.removeLast();
+    }
+
+    QSettings settings;
+    settings.setValue(QStringLiteral("startup/recentRoots"), paths);
+}
+
+QString chooseRecentRootPath(QWidget* parent)
+{
+    const QStringList paths = recentRootPaths();
+    if (paths.isEmpty()) {
+        return {};
+    }
+
+    QDialog dialog(parent);
+    dialog.setWindowTitle(QStringLiteral("履歴から選択"));
+    dialog.resize(640, 360);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* label = new QLabel(QStringLiteral("ルートフォルダを選択してください。"), &dialog);
+    layout->addWidget(label);
+
+    auto* list = new QListWidget(&dialog);
+    list->addItems(paths);
+    list->setSelectionMode(QAbstractItemView::SingleSelection);
+    list->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    list->setWordWrap(false);
+    if (list->count() > 0) {
+        list->setCurrentRow(0);
+    }
+    layout->addWidget(list, 1);
+
+    auto* buttonRow = new QHBoxLayout;
+    buttonRow->addStretch(1);
+    auto* cancelButton = new QPushButton(QStringLiteral("キャンセル"), &dialog);
+    auto* okButton = new QPushButton(QStringLiteral("開く"), &dialog);
+    okButton->setDefault(true);
+    buttonRow->addWidget(cancelButton);
+    buttonRow->addWidget(okButton);
+    layout->addLayout(buttonRow);
+
+    QObject::connect(cancelButton, &QPushButton::clicked, &dialog, &QDialog::reject);
+    QObject::connect(okButton, &QPushButton::clicked, &dialog, &QDialog::accept);
+    QObject::connect(list, &QListWidget::itemDoubleClicked, &dialog, &QDialog::accept);
+
+    if (dialog.exec() != QDialog::Accepted || !list->currentItem()) {
+        return {};
+    }
+    return normalizedDirectoryPath(list->currentItem()->text());
+}
+
 bool resolveStartupStorageMode(StartupOptions& options)
 {
     if (!options.mycelStorageEnabled) {
+        rememberRootPath(options.rootPath);
         return true;
     }
 
@@ -629,18 +743,29 @@ bool resolveStartupStorageMode(StartupOptions& options)
             QStringLiteral("Mycel の並び順や色設定を保存するために .mycel フォルダを作成しますか？"));
         QPushButton* createButton = box.addButton(QStringLiteral(".mycel を作成"), QMessageBox::AcceptRole);
         QPushButton* restrictedButton = box.addButton(QStringLiteral(".mycel なしで開く"), QMessageBox::ActionRole);
+        QPushButton* historyButton = box.addButton(QStringLiteral("履歴から選択"), QMessageBox::ActionRole);
         QPushButton* chooseButton = box.addButton(QStringLiteral("別フォルダを選択"), QMessageBox::ActionRole);
         QPushButton* quitButton = box.addButton(QStringLiteral("終了"), QMessageBox::RejectRole);
+        historyButton->setEnabled(!recentRootPaths().isEmpty());
         box.setDefaultButton(createButton);
         box.setEscapeButton(quitButton);
         box.exec();
 
         if (box.clickedButton() == createButton) {
             if (createMycelFolder(options.rootPath)) {
+                rememberRootPath(options.rootPath);
                 return true;
             }
             QMessageBox::warning(nullptr, QStringLiteral("Mycel"),
                                  QStringLiteral(".mycel フォルダを作成できませんでした。"));
+            continue;
+        }
+
+        if (box.clickedButton() == historyButton) {
+            const QString dir = chooseRecentRootPath(nullptr);
+            if (!dir.isEmpty()) {
+                options.rootPath = dir;
+            }
             continue;
         }
 
@@ -658,9 +783,11 @@ bool resolveStartupStorageMode(StartupOptions& options)
         }
 
         options.mycelStorageEnabled = false;
+        rememberRootPath(options.rootPath);
         return true;
     }
 
+    rememberRootPath(options.rootPath);
     return true;
 }
 
@@ -1614,6 +1741,7 @@ public:
             if (!dir.isEmpty()) {
                 saveViewState();
                 rootPath_ = normalizedDirectoryPath(dir);
+                rememberRootPath(rootPath_);
                 collapsedPaths_.clear();
                 previewPaths_.clear();
                 previewSizes_.clear();
