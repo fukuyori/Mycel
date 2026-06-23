@@ -6,7 +6,7 @@ Instead of treating files as a vertical file list, Mycel lays out folders and fi
 
 Japanese documentation is available in [README.ja.md](README.ja.md).
 
-Current version: 0.2.4.
+Current version: 0.2.5.
 
 Release history is available in [CHANGELOG.md](CHANGELOG.md).
 
@@ -23,15 +23,39 @@ Release history is available in [CHANGELOG.md](CHANGELOG.md).
 - Preview open/closed state and custom preview sizes in `.mycel/previews.json`
 - Folder collapse and expand
 - Inline previews for text and Markdown files
+- Selectable inline preview text with copy support
+- Right-side direct editor for the selected editable text file, with automatic saving
+- Toggleable right-side editor pane
 - Built-in editor for text files, with Ctrl + S save and Ctrl + mouse wheel zoom
+- Persistent editor font size shared across editable files and sessions
 - Markdown preview rendering with wrapped text
 - Multi-selection with batch preview open/close and selected item deletion
 - Context menus for refresh, rename, delete, color, open, and creation actions
-- Trackpad pinch zoom and Ctrl + mouse wheel zoom
+- Selection-based file and folder creation with `N` and `Shift + N`
+- Copy selected files and folders with `Ctrl + C` / `Ctrl + V`
+- Keyboard navigation across visible nodes with `Tab` and `Shift + Tab`
+- Focus the right-side editor pane with `E`
+- Toggle selected file previews with `V`
+- Trackpad pinch zoom and mouse wheel zoom
 - Range zoom: drag an empty canvas area, then press Enter to zoom to that range
 - Fit-to-map shortcut with Ctrl + 0
 - Keyboard shortcuts for reload, maximize, inline rename, and the cheat sheet
 - Startup root selection: current directory by default, or the first command-line argument when provided
+- `--version` option and title-bar version display
+
+## What's New in 0.2.5
+
+- Collapsed large root trees on startup so only the root and its direct folders are shown initially.
+- Added `N` / `Shift + N` shortcuts to create `NewFile.txt` / `NewFolder` from the selected folder.
+- Changed `N` on a selected file to create `NewFile.txt` in that file's parent folder.
+- Added `Ctrl + C` / `Ctrl + V` copy support for selected files and folders in their parent folders.
+- Added `E` to focus the selected editable file in the right-side editor pane.
+- Added `V` to toggle selected file previews; with multiple files, all open previews close, otherwise all selected file previews open.
+- Added `Tab` / `Shift + Tab` navigation through visible same-level items.
+- Preserved canvas focus and selection after `N`, `Shift + N`, `V`, and `Tab` operations.
+- Refreshed an open inline preview after automatic saves from the right-side editor pane.
+- Improved multi-selection dragging, folder drops, and deletion for mixed file/folder selections.
+- Highlighted folder drop targets while dragging items.
 
 ## What's New in 0.2.4
 
@@ -39,6 +63,13 @@ Release history is available in [CHANGELOG.md](CHANGELOG.md).
 - Moved preview open/close actions to the top of the multi-selection context menu.
 - Replaced the color dialog with a fixed color palette in the context menu.
 - Changed node color display from colored connector lines to soft backgrounds behind the file name, icon, and preview.
+- Added text selection and copy support inside inline previews.
+- Added a Copy context menu to inline preview text.
+- Changed canvas zoom so the mouse wheel zooms without holding Ctrl.
+- Added `--version` output and version display in the window title.
+- Added a right-side editor pane that opens the selected editable text file and saves edits automatically.
+- Persisted editor font size changes from Ctrl + mouse wheel across files and sessions.
+- Added an Editor toolbar toggle and Ctrl + E shortcut to show or hide the right-side editor pane.
 
 ## What's New in 0.2.3
 
@@ -178,6 +209,12 @@ Run without reading or creating `.mycel` metadata:
 ./build/mycel --no-mycel /path/to/project
 ```
 
+Show the version and exit:
+
+```sh
+./build/mycel --version
+```
+
 On normal startup, if the root directory does not contain a `.mycel` folder, Mycel asks whether to create one, open the directory in `--no-mycel` mode, or choose another root directory.
 
 In `--no-mycel` mode, Mycel does not load or create `.mycel/order.json`, `.mycel/colors.json`, or `.mycel/previews.json`. Reordering and node color changes are disabled in this mode.
@@ -188,12 +225,20 @@ In `--no-mycel` mode, Mycel does not load or create `.mycel/order.json`, `.mycel
 - ?: show the cheat sheet
 - Enter after empty canvas drag: zoom to the dragged range
 - Ctrl + 0: fit the whole map
+- Ctrl + E: show or hide the editor pane
+- E: edit the selected file in the right-side editor pane
+- Tab: move to the next visible item at the same level
+- Shift + Tab: move to the previous visible item at the same level
+- N: create `NewFile.txt` in the selected folder or in the selected file's folder
+- Shift + N: create `NewFolder` in the selected folder
+- V: toggle selected file previews
+- Ctrl + C / Ctrl + V: copy selected items into their parent folders
 - F5: reload the whole map
 - F11: maximize or restore the window
 - Alt + left drag, middle-button drag, or right-button drag on empty canvas space: pan the canvas
 - Trackpad pinch: zoom
-- Ctrl + mouse wheel: zoom
-- Mouse wheel or trackpad scroll: scroll the canvas
+- Mouse wheel: zoom
+- Trackpad scroll: scroll the canvas
 - Ctrl + left-click a node: add or remove it from the current selection
 - Shift + file click: open or close that file's preview
 - Shift + folder click: collapse or expand that folder
@@ -201,10 +246,13 @@ In `--no-mycel` mode, Mycel does not load or create `.mycel/order.json`, `.mycel
 - Shift + double-click a folder: create a new folder named `NewFolder` inside that folder
 - Double-click a file: open it with the OS default application
 - F2 with a single file or folder selected: rename it inline
+- Select an editable text file: edit it directly in the right-side editor pane
+- Ctrl + mouse wheel in an editor: change editor font size and keep it for other files and future sessions
 - Drop files or folders from the OS onto a folder node: copy them into that folder
 - Drag a file or folder node: reorder it inside the same folder
 - Drag a file or folder node onto a folder: move it into that folder
 - Drag the lower-right corner of a preview: resize the preview
+- Select text in a preview, then press Ctrl + C or right-click and choose Copy
 - Right-click a node: open its context menu
 
 ## Context Menus

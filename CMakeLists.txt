@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(Mycel VERSION 0.2.4 LANGUAGES CXX)
+project(Mycel VERSION 0.2.5 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,6 +22,10 @@ if(WIN32)
 endif()
 
 target_link_libraries(mycel PRIVATE Qt6::Widgets)
+
+target_compile_definitions(mycel PRIVATE
+    MYCEL_VERSION=\"${PROJECT_VERSION}\"
+)
 
 target_compile_options(mycel PRIVATE
     $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wall -Wextra -Wpedantic>
