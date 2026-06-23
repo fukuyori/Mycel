@@ -162,6 +162,11 @@ struct Node {
     std::vector<std::unique_ptr<Node>> children;
 };
 
+struct FileLink {
+    QString from;
+    QString to;
+};
+
 QColor neutralStroke()
 {
     return QColor("#7f8a90");
@@ -400,6 +405,55 @@ void translateTree(Node& node, const QPointF& delta)
     }
 }
 
+Node* findNodeByPath(Node& node, const QString& path)
+{
+    if (node.path == path) {
+        return &node;
+    }
+    for (auto& child : node.children) {
+        if (Node* found = findNodeByPath(*child, path)) {
+            return found;
+        }
+    }
+    return nullptr;
+}
+
+qreal nodeVerticalSpan(const Node& node)
+{
+    return YStep + (node.previewOpen ? node.previewSize.height() + 28.0 : 0.0);
+}
+
+qreal nodeContentRightX(const Node& node)
+{
+    qreal right = node.center.x() + node.size.width() / 2.0;
+    if (node.previewOpen) {
+        const qreal previewRight = node.center.x() - node.size.width() / 2.0 + 40.0 + node.previewSize.width();
+        right = std::max(right, previewRight);
+    }
+    return right;
+}
+
+void layoutFileLinks(Node& root, const std::vector<FileLink>& links)
+{
+    const int passes = std::clamp(static_cast<int>(links.size()), 1, 8);
+    for (int pass = 0; pass < passes; ++pass) {
+        std::map<QString, qreal> nextLinkedY;
+        for (const FileLink& link : links) {
+            Node* from = findNodeByPath(root, link.from);
+            Node* to = findNodeByPath(root, link.to);
+            if (!from || !to || from->isDir || to->isDir || from == to) {
+                continue;
+            }
+
+            auto [it, inserted] = nextLinkedY.emplace(from->path, from->center.y());
+            const qreal linkedY = it->second;
+            const qreal linkedLeftX = nodeContentRightX(*from) + ParentChildGap;
+            to->center = QPointF(linkedLeftX + to->size.width() / 2.0, linkedY);
+            it->second = linkedY + nodeVerticalSpan(*to);
+        }
+    }
+}
+
 void visitNodes(Node& node, const std::function<void(Node&)>& fn)
 {
     fn(node);
@@ -635,6 +689,27 @@ public:
         internalDropHover_ = hover;
         update();
     }
+    void setLinkDropHover(bool hover)
+    {
+        if (linkDropHover_ == hover) {
+            return;
+        }
+        linkDropHover_ = hover;
+        update();
+    }
+    QRectF linkDropSceneRect() const
+    {
+        if (node_->isDir) {
+            return {};
+        }
+        const QRectF box(-node_->size.width() / 2.0, -node_->size.height() / 2.0,
+                         node_->size.width(), node_->size.height());
+        return mapRectToScene(QRectF(box.right() - 28.0, box.top() - 3.0, 34.0, box.height() + 6.0));
+    }
+    bool containsLinkDropScenePoint(const QPointF& scenePos) const
+    {
+        return linkDropSceneRect().contains(scenePos);
+    }
     QRectF labelSceneRect() const
     {
         const QRectF box(-node_->size.width() / 2.0, -node_->size.height() / 2.0,
@@ -692,6 +767,15 @@ public:
             painter->setPen(QPen(QColor("#1e8cff"), 3.0, Qt::DashLine, Qt::RoundCap, Qt::RoundJoin));
             painter->setBrush(QColor(30, 140, 255, 30));
             painter->drawRoundedRect(box.adjusted(-5.0, -5.0, 5.0, 5.0), 15.0, 15.0);
+        }
+        if (!node_->isDir && linkDropHover_) {
+            const QRectF zone(box.right() - 25.0, box.top() + 3.0, 30.0, box.height() - 6.0);
+            painter->setPen(QPen(QColor("#0f9f6e"), 2.4, Qt::DashLine, Qt::RoundCap, Qt::RoundJoin));
+            painter->setBrush(QColor(16, 185, 129, 38));
+            painter->drawRoundedRect(zone, 8.0, 8.0);
+            painter->setPen(QPen(QColor("#047857"), 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            painter->drawLine(QPointF(zone.center().x() - 5.0, zone.center().y()),
+                              QPointF(zone.center().x() + 5.0, zone.center().y()));
         }
 
         if (node_->isDir) {
@@ -873,6 +957,7 @@ private:
     bool resizingPreview_ = false;
     bool externalDropHover_ = false;
     bool internalDropHover_ = false;
+    bool linkDropHover_ = false;
     QPointF resizeStartScene_;
     QSizeF resizeStartSize_;
     QGraphicsProxyWidget* previewProxy_ = nullptr;
@@ -882,6 +967,7 @@ class MindMapScene final : public QGraphicsScene {
 public:
     void setRoot(Node* root) { root_ = root; }
     void setUserColors(const std::map<QString, QColor>* userColors) { userColors_ = userColors; }
+    void setFileLinks(const std::vector<FileLink>* links) { links_ = links; }
 
 protected:
     void drawBackground(QPainter* painter, const QRectF& rect) override
@@ -899,10 +985,64 @@ protected:
         if (root_) {
             painter->setRenderHint(QPainter::Antialiasing);
             drawEdges(painter, *root_);
+            drawFileLinks(painter);
         }
     }
 
 private:
+    Node* findNodeByPath(Node& node, const QString& path) const
+    {
+        if (node.path == path) {
+            return &node;
+        }
+        for (auto& child : node.children) {
+            if (Node* found = findNodeByPath(*child, path)) {
+                return found;
+            }
+        }
+        return nullptr;
+    }
+
+    void drawFileLinks(QPainter* painter)
+    {
+        if (!root_ || !links_) {
+            return;
+        }
+
+        for (const FileLink& link : *links_) {
+            Node* from = findNodeByPath(*root_, link.from);
+            Node* to = findNodeByPath(*root_, link.to);
+            if (!from || !to || from->isDir || to->isDir) {
+                continue;
+            }
+
+            const QPointF start(from->center.x() + from->size.width() / 2.0 + 6.0, from->center.y());
+            const QPointF end(to->center.x() - to->size.width() / 2.0 - 6.0, to->center.y());
+            const qreal distance = std::max<qreal>(72.0, end.x() - start.x());
+            QPainterPath path(start);
+            path.cubicTo(QPointF(start.x() + distance * 0.45, start.y()),
+                         QPointF(end.x() - distance * 0.45, end.y()),
+                         end);
+            QColor color = neutralStroke();
+            color.setAlpha(125);
+            painter->setPen(QPen(color, 1.1, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            painter->drawPath(path);
+        }
+    }
+
+    bool hasIncomingFileLink(const Node& node) const
+    {
+        if (!links_ || node.isDir) {
+            return false;
+        }
+        for (const FileLink& link : *links_) {
+            if (link.to == node.path) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void drawEdges(QPainter* painter, const Node& node)
     {
         if (node.children.empty()) {
@@ -912,6 +1052,10 @@ private:
         const QPointF start(node.center.x() + node.size.width() / 2.0, node.center.y());
 
         for (const auto& child : node.children) {
+            if (hasIncomingFileLink(*child)) {
+                drawEdges(painter, *child);
+                continue;
+            }
             const QPointF end(child->center.x() - child->size.width() / 2.0, child->center.y());
             const qreal distance = std::max<qreal>(96.0, end.x() - start.x());
             const qreal splitX = start.x() + std::clamp(distance * 0.46, 58.0, 128.0);
@@ -935,6 +1079,7 @@ private:
 
     Node* root_ = nullptr;
     const std::map<QString, QColor>* userColors_ = nullptr;
+    const std::vector<FileLink>* links_ = nullptr;
 };
 
 class BoardView final : public QGraphicsView {
@@ -1475,6 +1620,7 @@ public:
                 loadOrderFile();
                 loadColorFile();
                 loadPreviewFile();
+                loadLinkFile();
                 applyLargeTreeStartupCollapse();
                 restoreWindowStateFromSettingsFile();
                 rebuild(true);
@@ -1549,6 +1695,7 @@ public:
         loadOrderFile();
         loadColorFile();
         loadPreviewFile();
+        loadLinkFile();
         applyLargeTreeStartupCollapse();
         restoreWindowStateFromSettingsFile();
         rebuild(true);
@@ -2368,6 +2515,7 @@ public:
         saveColorFile();
         saveOrderFile();
         savePreviewFile();
+        saveLinkFile();
         rebuild(false);
         return true;
     }
@@ -2391,6 +2539,7 @@ public:
         saveColorFile();
         saveOrderFile();
         savePreviewFile();
+        saveLinkFile();
         rebuild(false);
     }
 
@@ -2417,6 +2566,7 @@ public:
         saveColorFile();
         saveOrderFile();
         savePreviewFile();
+        saveLinkFile();
         rebuild(false);
     }
 
@@ -2452,6 +2602,7 @@ public:
         rekeyPathMetadataAfterRename(source->path, destination, source->isDir);
         saveColorFile();
         savePreviewFile();
+        saveLinkFile();
         if (mycelStorageEnabled_ && !source->isDir) {
             QStringList& sourceOrder = fileOrders_[orderKeyForDirectory(QFileInfo(source->path).absolutePath())];
             sourceOrder.removeAll(QFileInfo(source->path).fileName());
@@ -2561,6 +2712,7 @@ public:
         saveColorFile();
         savePreviewFile();
         saveOrderFile();
+        saveLinkFile();
         rebuild(false);
 
         if (!failed.isEmpty()) {
@@ -2830,6 +2982,25 @@ public:
         return best;
     }
 
+    NodeItem* linkTargetItemForDrop(const NodeItem* source, const QPointF& scenePos) const
+    {
+        if (!mycelStorageEnabled_ || !source || !source->node() || source->node()->isDir ||
+            isMultiDragSelection(source)) {
+            return nullptr;
+        }
+
+        for (QGraphicsItem* item : scene_.items(scenePos)) {
+            auto* candidate = dynamic_cast<NodeItem*>(item);
+            if (!candidate || candidate == source || !candidate->node() || candidate->node()->isDir) {
+                continue;
+            }
+            if (candidate->containsLinkDropScenePoint(scenePos)) {
+                return candidate;
+            }
+        }
+        return nullptr;
+    }
+
     NodeItem* updateInternalDropHover(NodeItem* source)
     {
         NodeItem* target = folderItemForDrop(source);
@@ -2845,6 +3016,21 @@ public:
         return dragHoverFolder_;
     }
 
+    NodeItem* updateLinkDropHover(NodeItem* source, const QPointF& scenePos)
+    {
+        NodeItem* target = linkTargetItemForDrop(source, scenePos);
+        if (target == dragHoverLinkTarget_) {
+            return target;
+        }
+
+        clearLinkDropHover();
+        dragHoverLinkTarget_ = target;
+        if (dragHoverLinkTarget_) {
+            dragHoverLinkTarget_->setLinkDropHover(true);
+        }
+        return dragHoverLinkTarget_;
+    }
+
     void clearInternalDropHover()
     {
         if (!dragHoverFolder_) {
@@ -2852,6 +3038,70 @@ public:
         }
         dragHoverFolder_->setInternalDropHover(false);
         dragHoverFolder_ = nullptr;
+    }
+
+    void clearLinkDropHover()
+    {
+        if (!dragHoverLinkTarget_) {
+            return;
+        }
+        dragHoverLinkTarget_->setLinkDropHover(false);
+        dragHoverLinkTarget_ = nullptr;
+    }
+
+    void addFileLink(Node* from, Node* to)
+    {
+        if (!mycelStorageEnabled_) {
+            QMessageBox::information(this, QStringLiteral("Mycel"),
+                                     QStringLiteral(".mycel なしの制限モードでは関連付けできません。"));
+            return;
+        }
+        if (!from || !to || from->isDir || to->isDir || from->path == to->path) {
+            return;
+        }
+
+        for (const FileLink& link : fileLinks_) {
+            if (link.from == from->path && link.to == to->path) {
+                rebuild(false);
+                return;
+            }
+        }
+
+        fileLinks_.push_back({from->path, to->path});
+        saveLinkFile();
+        rebuild(false);
+    }
+
+    bool hasIncomingFileLink(Node* node) const
+    {
+        if (!mycelStorageEnabled_ || !node || node->isDir) {
+            return false;
+        }
+        for (const FileLink& link : fileLinks_) {
+            if (link.to == node->path) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void removeIncomingFileLinks(Node* node)
+    {
+        if (!mycelStorageEnabled_ || !node || node->isDir) {
+            return;
+        }
+
+        const auto oldSize = fileLinks_.size();
+        fileLinks_.erase(std::remove_if(fileLinks_.begin(), fileLinks_.end(), [node](const FileLink& link) {
+                             return link.to == node->path;
+                         }),
+                         fileLinks_.end());
+        if (fileLinks_.size() == oldSize) {
+            return;
+        }
+
+        saveLinkFile();
+        rebuild(false);
     }
 
     bool reorderNodeByY(Node* source, const NodeItem* sourceItem, qreal dropCenterY)
@@ -3199,6 +3449,7 @@ public:
         saveColorFile();
         saveOrderFile();
         savePreviewFile();
+        saveLinkFile();
         rebuild(false);
 
         if (!failed.isEmpty()) {
@@ -3347,6 +3598,7 @@ public:
         loadOrderFile();
         loadColorFile();
         loadPreviewFile();
+        loadLinkFile();
         rebuild(false);
     }
 
@@ -3492,6 +3744,16 @@ private:
         for (const QString& path : previewPaths_.values()) {
             if (path == deletedPath || (wasDir && isDescendantPath(deletedPath, path))) {
                 previewPaths_.remove(path);
+            }
+        }
+
+        for (auto it = fileLinks_.begin(); it != fileLinks_.end();) {
+            const bool deleteFrom = it->from == deletedPath || (wasDir && isDescendantPath(deletedPath, it->from));
+            const bool deleteTo = it->to == deletedPath || (wasDir && isDescendantPath(deletedPath, it->to));
+            if (deleteFrom || deleteTo) {
+                it = fileLinks_.erase(it);
+            } else {
+                ++it;
             }
         }
 
@@ -3701,6 +3963,11 @@ private:
         }
         previewPaths_ = updatedPreviewPaths;
 
+        for (FileLink& link : fileLinks_) {
+            link.from = rekeyPathAfterRename(link.from, oldPath, newPath, wasDir);
+            link.to = rekeyPathAfterRename(link.to, oldPath, newPath, wasDir);
+        }
+
         if (wasDir) {
             const QString oldKey = orderKeyForDirectory(oldPath);
             const QString newKey = orderKeyForDirectory(newPath);
@@ -3748,6 +4015,11 @@ private:
     QString previewFilePath() const
     {
         return QDir(rootPath_).filePath(QStringLiteral(".mycel/previews.json"));
+    }
+
+    QString linkFilePath() const
+    {
+        return QDir(rootPath_).filePath(QStringLiteral(".mycel/links.json"));
     }
 
     QString viewStateFilePath() const
@@ -3945,6 +4217,83 @@ private:
         file.write(QJsonDocument(rootObject).toJson(QJsonDocument::Indented));
     }
 
+    void loadLinkFile()
+    {
+        fileLinks_.clear();
+        if (!mycelStorageEnabled_) {
+            return;
+        }
+
+        QFile file(linkFilePath());
+        if (!file.open(QIODevice::ReadOnly)) {
+            return;
+        }
+
+        const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+        const QJsonArray links = doc.object().value(QStringLiteral("links")).toArray();
+        QSet<QString> seen;
+        for (const QJsonValue& value : links) {
+            const QJsonObject link = value.toObject();
+            const QString fromKey = link.value(QStringLiteral("from")).toString();
+            const QString toKey = link.value(QStringLiteral("to")).toString();
+            if (fromKey.isEmpty() || toKey.isEmpty()) {
+                continue;
+            }
+            const QString from = absolutePathForKey(fromKey);
+            const QString to = absolutePathForKey(toKey);
+            if (from == to) {
+                continue;
+            }
+            const QString key = from + QLatin1Char('\n') + to;
+            if (seen.contains(key)) {
+                continue;
+            }
+            seen.insert(key);
+            fileLinks_.push_back({from, to});
+        }
+    }
+
+    void saveLinkFile()
+    {
+        if (!mycelStorageEnabled_) {
+            return;
+        }
+
+        QDir root(rootPath_);
+        if (!root.mkpath(QStringLiteral(".mycel"))) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral(".mycel フォルダを作成できませんでした。"));
+            return;
+        }
+
+        QJsonArray links;
+        QSet<QString> seen;
+        for (const FileLink& link : fileLinks_) {
+            if (link.from.isEmpty() || link.to.isEmpty() || link.from == link.to) {
+                continue;
+            }
+            const QString key = link.from + QLatin1Char('\n') + link.to;
+            if (seen.contains(key)) {
+                continue;
+            }
+            seen.insert(key);
+            QJsonObject object;
+            object.insert(QStringLiteral("from"), relativeKeyForPath(link.from));
+            object.insert(QStringLiteral("to"), relativeKeyForPath(link.to));
+            links.append(object);
+        }
+
+        QJsonObject rootObject;
+        rootObject.insert(QStringLiteral("version"), 1);
+        rootObject.insert(QStringLiteral("links"), links);
+
+        QFile file(linkFilePath());
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("関連設定を保存できませんでした。"));
+            return;
+        }
+        file.write(QJsonDocument(rootObject).toJson(QJsonDocument::Indented));
+    }
+
     QJsonObject currentViewStateObject() const
     {
         const QTransform transform = view_->transform();
@@ -4106,10 +4455,12 @@ private:
 
         qreal yCursor = 0.0;
         layoutTree(*root_, 0.0, yCursor);
+        layoutFileLinks(*root_, fileLinks_);
         translateTree(*root_, QPointF(140.0, 120.0 - root_->center.y()));
 
         scene_.setRoot(root_.get());
         scene_.setUserColors(&userColors_);
+        scene_.setFileLinks(&fileLinks_);
         visitNodes(*root_, [this](Node& node) {
             scene_.addItem(new NodeItem(&node, this));
         });
@@ -4236,7 +4587,9 @@ private:
     QSplitter* editorSplitter_ = nullptr;
     BoardView* view_ = nullptr;
     NodeItem* dragHoverFolder_ = nullptr;
+    NodeItem* dragHoverLinkTarget_ = nullptr;
     QStringList copiedPaths_;
+    std::vector<FileLink> fileLinks_;
     QAction* editorPaneAction_ = nullptr;
     QWidget* sideEditorPanel_ = nullptr;
     TextEditor* sideEditor_ = nullptr;
@@ -4343,6 +4696,8 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
         QAction* closePreviewAction = menu.addAction(QStringLiteral("プレビューを閉じる"));
         openPreviewAction->setEnabled(!window_->isInlinePreviewOpen(node_));
         closePreviewAction->setEnabled(window_->isInlinePreviewOpen(node_));
+        QAction* unlinkAction = menu.addAction(QStringLiteral("関連を解除"));
+        unlinkAction->setEnabled(window_->hasIncomingFileLink(node_));
         menu.addSeparator();
         QAction* refreshNodeAction = menu.addAction(QStringLiteral("この項目を更新"));
         QAction* refreshAllAction = menu.addAction(QStringLiteral("全体を更新"));
@@ -4362,6 +4717,8 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
             window_->setInlinePreview(node_, true);
         } else if (selected == closePreviewAction) {
             window_->setInlinePreview(node_, false);
+        } else if (selected == unlinkAction) {
+            window_->removeIncomingFileLinks(node_);
         } else if (selected == refreshNodeAction) {
             window_->refreshNode(node_);
         } else if (selected == refreshAllAction) {
@@ -4549,6 +4906,7 @@ void NodeItem::mouseReleaseEvent(QGraphicsSceneMouseEvent* event)
     QGraphicsItem::mouseReleaseEvent(event);
     if ((pos() - dragStart_).manhattanLength() < 16.0) {
         window_->clearInternalDropHover();
+        window_->clearLinkDropHover();
         window_->clearDragPreview();
         window_->setDragVisuals(this, 1.0, 10.0);
         if ((event->modifiers() & Qt::ControlModifier) && !(event->modifiers() & Qt::ShiftModifier)) {
@@ -4566,21 +4924,33 @@ void NodeItem::mouseReleaseEvent(QGraphicsSceneMouseEvent* event)
         return;
     }
 
+    NodeItem* linkTarget = window_->linkTargetItemForDrop(this, event->scenePos());
+    if (linkTarget) {
+        window_->clearInternalDropHover();
+        window_->clearLinkDropHover();
+        window_->clearDragPreview();
+        window_->addFileLink(linkTarget->node(), node_);
+        return;
+    }
+
     NodeItem* folderTarget = window_->folderItemForDrop(this);
     if (folderTarget) {
         window_->clearInternalDropHover();
+        window_->clearLinkDropHover();
         window_->moveDragItemsToFolder(this, folderTarget->node());
         return;
     }
 
     if (window_->isMultiDragSelection(this)) {
         window_->clearInternalDropHover();
+        window_->clearLinkDropHover();
         window_->clearDragPreview();
         window_->setDragVisuals(this, 1.0, 10.0);
         return;
     }
 
     window_->clearInternalDropHover();
+    window_->clearLinkDropHover();
     if (window_->reorderNodeByY(node_, this, sceneBoundingRect().center().y())) {
         return;
     }
@@ -4610,10 +4980,17 @@ void NodeItem::mouseMoveEvent(QGraphicsSceneMouseEvent* event)
         } else if (node_->isDir) {
             window_->previewMoveDescendants(node_, pos() - layoutCenter_);
         }
-        if (window_->updateInternalDropHover(this)) {
+        if (window_->updateLinkDropHover(this, event->scenePos())) {
+            window_->clearInternalDropHover();
             window_->clearDragPreviewForSource(this);
             return;
         }
+        if (window_->updateInternalDropHover(this)) {
+            window_->clearLinkDropHover();
+            window_->clearDragPreviewForSource(this);
+            return;
+        }
+        window_->clearLinkDropHover();
         if (multiDrag) {
             return;
         }
@@ -4640,15 +5017,21 @@ void NodeItem::mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event)
 
 int main(int argc, char* argv[])
 {
-    QApplication app(argc, argv);
-    app.setOrganizationName(QStringLiteral("Mycel"));
-    app.setApplicationName(QStringLiteral("Mycel"));
-    app.setWindowIcon(QIcon(":/icons/mycel.png"));
-    StartupOptions options = startupOptions(app.arguments());
+    QStringList rawArguments;
+    rawArguments.reserve(argc);
+    for (int i = 0; i < argc; ++i) {
+        rawArguments << QString::fromLocal8Bit(argv[i]);
+    }
+    StartupOptions options = startupOptions(rawArguments);
     if (options.showVersion) {
         printVersion();
         return 0;
     }
+
+    QApplication app(argc, argv);
+    app.setOrganizationName(QStringLiteral("Mycel"));
+    app.setApplicationName(QStringLiteral("Mycel"));
+    app.setWindowIcon(QIcon(":/icons/mycel.png"));
     if (!resolveStartupStorageMode(options)) {
         return 0;
     }

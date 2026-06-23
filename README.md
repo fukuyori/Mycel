@@ -6,7 +6,7 @@ Instead of treating files as a vertical file list, Mycel lays out folders and fi
 
 Japanese documentation is available in [README.ja.md](README.ja.md).
 
-Current version: 0.2.6.
+Current version: 0.2.7.
 
 Release history is available in [CHANGELOG.md](CHANGELOG.md).
 
@@ -17,10 +17,12 @@ Release history is available in [CHANGELOG.md](CHANGELOG.md).
 - Directory structure rendered as connected mind-map nodes
 - Folder and file creation from the canvas
 - Drag-and-drop moving between folders
+- File-to-file linking by dropping a file on the right edge of another file
 - Drag-and-drop reordering across files and folders
 - Persistent item order in `.mycel/order.json`
 - User-assigned node colors in `.mycel/colors.json`
 - Preview open/closed state and custom preview sizes in `.mycel/previews.json`
+- File-to-file links in `.mycel/links.json`
 - Canvas view and window state in `.mycel/view.json`
 - Folder collapse and expand
 - Inline previews for text and Markdown files
@@ -45,6 +47,13 @@ Release history is available in [CHANGELOG.md](CHANGELOG.md).
 - Keyboard shortcuts for reload, maximize, inline rename, and the cheat sheet
 - Startup root selection: current directory by default, or the first command-line argument when provided
 - `--version` option and title-bar version display
+
+## What's New in 0.2.7
+
+- Added file-to-file links: drop a file on the right edge of another file to create a relationship line without moving the file, persisted in `.mycel/links.json`.
+- Placed linked target files to the right of their source file and adjusted spacing to reduce preview overlap.
+- Changed linked file connections from dashed lines to normal solid lines, and hid the target file's original folder connection while linked.
+- Added a file context-menu action to remove an incoming file link and restore the original folder connection.
 
 ## What's New in 0.2.6
 
@@ -229,7 +238,7 @@ Show the version and exit:
 
 On normal startup, if the root directory does not contain a `.mycel` folder, Mycel asks whether to create one, open the directory in `--no-mycel` mode, or choose another root directory.
 
-In `--no-mycel` mode, Mycel does not load or create `.mycel/order.json`, `.mycel/colors.json`, `.mycel/previews.json`, or `.mycel/view.json`. Reordering, node color changes, and persisted view/window restoration are disabled in this mode.
+In `--no-mycel` mode, Mycel does not load or create `.mycel/order.json`, `.mycel/colors.json`, `.mycel/previews.json`, `.mycel/links.json`, or `.mycel/view.json`. Reordering, node color changes, file-to-file linking, and persisted view/window restoration are disabled in this mode.
 
 ## Mouse Operations
 
@@ -247,6 +256,8 @@ In `--no-mycel` mode, Mycel does not load or create `.mycel/order.json`, `.mycel
 - N: create `NewFile.txt` in the selected folder or in the selected file's folder
 - Shift + N: create `NewFolder` in the selected folder
 - V: toggle selected file previews
+- Drop a file on the right edge of another file: link the files
+- Right-click a linked target file and choose `関連を解除`: restore its original folder connection
 - Ctrl + C / Ctrl + V: copy selected items into their parent folders
 - F5: reload the whole map
 - F11: maximize or restore the window
