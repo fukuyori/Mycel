@@ -733,6 +733,18 @@ QString normalizedDirectoryPath(const QString& path)
     return canonicalPath.isEmpty() ? QDir(absolutePath).absolutePath() : canonicalPath;
 }
 
+bool textInputWidgetHasFocus()
+{
+    for (QWidget* widget = QApplication::focusWidget(); widget; widget = widget->parentWidget()) {
+        if (qobject_cast<QLineEdit*>(widget) ||
+            qobject_cast<QPlainTextEdit*>(widget) ||
+            qobject_cast<QTextEdit*>(widget)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 struct StartupOptions {
     QString rootPath;
     bool mycelStorageEnabled = true;
@@ -1420,7 +1432,7 @@ protected:
         if (event->type() == QEvent::KeyPress) {
             auto* keyEvent = static_cast<QKeyEvent*>(event);
             if ((keyEvent->key() == Qt::Key_Tab || keyEvent->key() == Qt::Key_Backtab) &&
-                keyHandler_ && keyHandler_(keyEvent)) {
+                !textInputWidgetHasFocus() && keyHandler_ && keyHandler_(keyEvent)) {
                 event->accept();
                 return true;
             }
@@ -1498,6 +1510,10 @@ protected:
 
     void keyPressEvent(QKeyEvent* event) override
     {
+        if (textInputWidgetHasFocus()) {
+            QGraphicsView::keyPressEvent(event);
+            return;
+        }
         if (event->key() == Qt::Key_Plus) {
             zoomAt(viewport()->rect().center(), 1.12);
             event->accept();
@@ -1604,47 +1620,8 @@ private:
     std::function<void()> viewChangedHandler_;
 };
 
-class TextEditor final : public QPlainTextEdit {
+class TextFontSettings {
 public:
-    explicit TextEditor(QWidget* parent = nullptr) : QPlainTextEdit(parent)
-    {
-        instances().push_back(this);
-        applyConfiguredFont();
-    }
-
-    ~TextEditor() override
-    {
-        auto& editors = instances();
-        editors.erase(std::remove(editors.begin(), editors.end(), this), editors.end());
-    }
-
-protected:
-    void wheelEvent(QWheelEvent* event) override
-    {
-        if (event->modifiers() & Qt::ControlModifier) {
-            const QPoint delta = event->angleDelta();
-            const QPoint pixelDelta = event->pixelDelta();
-            const int amount = !delta.isNull() ? delta.y() : pixelDelta.y();
-            if (amount != 0) {
-                setConfiguredPointSize(configuredPointSize() + (amount > 0 ? 1 : -1));
-            }
-            event->accept();
-            return;
-        }
-        QPlainTextEdit::wheelEvent(event);
-    }
-
-private:
-    static constexpr int DefaultPointSize = 10;
-    static constexpr int MinPointSize = 7;
-    static constexpr int MaxPointSize = 32;
-
-    static std::vector<TextEditor*>& instances()
-    {
-        static std::vector<TextEditor*> editors;
-        return editors;
-    }
-
     static int configuredPointSize()
     {
         QSettings settings;
@@ -1660,23 +1637,144 @@ private:
         return font;
     }
 
+    static QFont previewFont(int pointSize)
+    {
+        QFont font(QStringLiteral("Meiryo"));
+        font.setStyleHint(QFont::SansSerif);
+        font.setPointSize(pointSize);
+        return font;
+    }
+
+    static void registerEditor(QPlainTextEdit* editor)
+    {
+        editors().push_back(editor);
+        applyToEditor(editor);
+    }
+
+    static void unregisterEditor(QPlainTextEdit* editor)
+    {
+        auto& registered = editors();
+        registered.erase(std::remove(registered.begin(), registered.end(), editor), registered.end());
+    }
+
+    static void registerPreview(QTextEdit* preview)
+    {
+        previews().push_back(preview);
+        applyToPreview(preview);
+    }
+
+    static void unregisterPreview(QTextEdit* preview)
+    {
+        auto& registered = previews();
+        registered.erase(std::remove(registered.begin(), registered.end(), preview), registered.end());
+    }
+
+    static void changeConfiguredPointSize(int delta)
+    {
+        setConfiguredPointSize(configuredPointSize() + delta);
+    }
+
+private:
+    static constexpr int DefaultPointSize = 10;
+    static constexpr int MinPointSize = 7;
+    static constexpr int MaxPointSize = 32;
+
+    static std::vector<QPlainTextEdit*>& editors()
+    {
+        static std::vector<QPlainTextEdit*> registered;
+        return registered;
+    }
+
+    static std::vector<QTextEdit*>& previews()
+    {
+        static std::vector<QTextEdit*> registered;
+        return registered;
+    }
+
     static void setConfiguredPointSize(int pointSize)
     {
         const int clampedPointSize = std::clamp(pointSize, MinPointSize, MaxPointSize);
         QSettings settings;
         settings.setValue(QStringLiteral("editor/fontPointSize"), clampedPointSize);
         settings.sync();
-        const QFont font = editorFont(clampedPointSize);
-        for (TextEditor* editor : instances()) {
-            if (editor) {
-                editor->setFont(font);
-            }
+        for (QPlainTextEdit* editor : editors()) {
+            applyToEditor(editor);
+        }
+        for (QTextEdit* preview : previews()) {
+            applyToPreview(preview);
         }
     }
 
-    void applyConfiguredFont()
+    static void applyToEditor(QPlainTextEdit* editor)
     {
-        setFont(editorFont(configuredPointSize()));
+        if (editor) {
+            editor->setFont(editorFont(configuredPointSize()));
+        }
+    }
+
+    static void applyToPreview(QTextEdit* preview)
+    {
+        if (preview) {
+            preview->setFont(previewFont(configuredPointSize()));
+        }
+    }
+};
+
+class PreviewText final : public QTextEdit {
+public:
+    explicit PreviewText(QWidget* parent = nullptr) : QTextEdit(parent)
+    {
+        TextFontSettings::registerPreview(this);
+    }
+
+    ~PreviewText() override
+    {
+        TextFontSettings::unregisterPreview(this);
+    }
+
+protected:
+    void wheelEvent(QWheelEvent* event) override
+    {
+        if (event->modifiers() & Qt::ControlModifier) {
+            const QPoint delta = event->angleDelta();
+            const QPoint pixelDelta = event->pixelDelta();
+            const int amount = !delta.isNull() ? delta.y() : pixelDelta.y();
+            if (amount != 0) {
+                TextFontSettings::changeConfiguredPointSize(amount > 0 ? 1 : -1);
+            }
+            event->accept();
+            return;
+        }
+        QTextEdit::wheelEvent(event);
+    }
+};
+
+class TextEditor final : public QPlainTextEdit {
+public:
+    explicit TextEditor(QWidget* parent = nullptr) : QPlainTextEdit(parent)
+    {
+        TextFontSettings::registerEditor(this);
+    }
+
+    ~TextEditor() override
+    {
+        TextFontSettings::unregisterEditor(this);
+    }
+
+protected:
+    void wheelEvent(QWheelEvent* event) override
+    {
+        if (event->modifiers() & Qt::ControlModifier) {
+            const QPoint delta = event->angleDelta();
+            const QPoint pixelDelta = event->pixelDelta();
+            const int amount = !delta.isNull() ? delta.y() : pixelDelta.y();
+            if (amount != 0) {
+                TextFontSettings::changeConfiguredPointSize(amount > 0 ? 1 : -1);
+            }
+            event->accept();
+            return;
+        }
+        QPlainTextEdit::wheelEvent(event);
     }
 };
 
@@ -1839,15 +1937,19 @@ public:
         view_->setViewChangedHandler([this] { scheduleViewStateSave(); });
 
         sideEditorPanel_ = new QWidget(editorSplitter_);
+        sideEditorPanel_->setObjectName(QStringLiteral("SideEditorPanel"));
         auto* editorLayout = new QVBoxLayout(sideEditorPanel_);
         editorLayout->setContentsMargins(10, 8, 10, 8);
         editorLayout->setSpacing(6);
+        sideModeLabel_ = new QLabel(sideEditorPanel_);
+        sideModeLabel_->setAlignment(Qt::AlignCenter);
+        sideModeLabel_->setFixedHeight(24);
         sideEditorPathLabel_ = new QLabel(sideEditorPanel_);
         sideEditorPathLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
         sideEditorPathLabel_->setWordWrap(true);
         sideEditorStatusLabel_ = new QLabel(sideEditorPanel_);
         sidePreviewStack_ = new QStackedWidget(sideEditorPanel_);
-        sidePreviewText_ = new QTextEdit(sidePreviewStack_);
+        sidePreviewText_ = new PreviewText(sidePreviewStack_);
         sidePreviewText_->setReadOnly(true);
         sidePreviewText_->setUndoRedoEnabled(false);
         sidePreviewText_->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
@@ -1859,6 +1961,13 @@ public:
         sideEditor_ = new TextEditor(sideEditorPanel_);
         sideEditor_->setReadOnly(true);
         sideEditor_->setPlaceholderText({});
+        sidePreviewText_->setStyleSheet(QStringLiteral(
+            "QTextEdit { background: #f7fbff; color: #172321; border: 1px solid #b7d4f2; "
+            "border-radius: 4px; padding: 8px; }"));
+        sideEditor_->setStyleSheet(QStringLiteral(
+            "QPlainTextEdit { background: #f4fbf7; color: #172321; border: 2px solid #2f8f68; "
+            "border-radius: 4px; padding: 8px; selection-background-color: #2f7de1; "
+            "selection-color: #ffffff; }"));
         sidePreviewStack_->addWidget(sidePreviewText_);
         sidePreviewStack_->addWidget(sidePreviewImage_);
         sidePreviewStack_->addWidget(sidePreviewVideo_);
@@ -1868,6 +1977,7 @@ public:
         sidePreviewPlayer_ = new QMediaPlayer(this);
         sidePreviewPlayer_->setAudioOutput(sidePreviewAudioOutput_);
         sidePreviewPlayer_->setVideoOutput(sidePreviewVideo_);
+        editorLayout->addWidget(sideModeLabel_);
         editorLayout->addWidget(sideEditorPathLabel_);
         editorLayout->addWidget(sideEditorStatusLabel_);
         editorLayout->addWidget(sidePreviewStack_, 1);
@@ -1985,7 +2095,11 @@ public:
             }
         });
         connect(quitAction, &QAction::triggered, this, &QWidget::close);
-        connect(&scene_, &QGraphicsScene::selectionChanged, this, [this] { updateSideEditorForSelection(); });
+        connect(&scene_, &QGraphicsScene::selectionChanged, this, [this] {
+            if (!suppressSideEditorSelectionUpdate_) {
+                updateSideEditorForSelection();
+            }
+        });
         connect(view_->horizontalScrollBar(), &QScrollBar::valueChanged, this, [this] { scheduleViewStateSave(); });
         connect(view_->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] { scheduleViewStateSave(); });
 
@@ -2282,6 +2396,7 @@ public:
         }
         if (!focusPath.isEmpty()) {
             sideEditorEditing_ = false;
+            resetFileSystemWatcher();
             loadSidePreviewFile(focusPath);
             selectNodePath(focusPath);
             return;
@@ -2405,7 +2520,7 @@ public:
         if (!event || event->isAutoRepeat()) {
             return false;
         }
-        if (renameEdit_ || textInputHasFocus()) {
+        if (renameEdit_ || sideEditorEditing_ || textInputHasFocus()) {
             return false;
         }
 
@@ -2464,14 +2579,7 @@ public:
 
     bool textInputHasFocus() const
     {
-        for (QWidget* widget = QApplication::focusWidget(); widget; widget = widget->parentWidget()) {
-            if (qobject_cast<QLineEdit*>(widget) ||
-                qobject_cast<QPlainTextEdit*>(widget) ||
-                qobject_cast<QTextEdit*>(widget)) {
-                return true;
-            }
-        }
-        return false;
+        return textInputWidgetHasFocus();
     }
 
     void openNode(Node* node)
@@ -2518,7 +2626,12 @@ public:
 
     void updateSideEditorForSelection()
     {
-        if (sideEditorEditing_ && !saveSideEditorNow()) {
+        if (sideEditorEditing_) {
+            if (!saveSideEditorNow()) {
+                return;
+            }
+            sideEditor_->setReadOnly(false);
+            sidePreviewStack_->setCurrentWidget(sideEditor_);
             return;
         }
         sideEditorEditing_ = false;
@@ -2571,6 +2684,7 @@ public:
         sidePreviewText_->setPlainText(message);
         sidePreviewImage_->clear();
         sidePreviewStack_->setCurrentWidget(sidePreviewText_);
+        setSidePaneMode(false, status);
         sideEditorPathLabel_->setText(message);
         sideEditorStatusLabel_->setText(status);
     }
@@ -2595,12 +2709,15 @@ public:
         sideEditorLastModified_ = QFileInfo(path).lastModified();
         sideEditorDirty_ = false;
         sideEditorEditing_ = true;
+        pendingFileSystemPaths_.clear();
+        fileSystemRefreshTimer_.stop();
         sideEditorLoading_ = true;
         sideEditor_->setReadOnly(false);
         sideEditor_->setPlainText(QString::fromUtf8(file.readAll()));
         sideEditor_->moveCursor(QTextCursor::Start);
         sideEditorLoading_ = false;
         sidePreviewStack_->setCurrentWidget(sideEditor_);
+        setSidePaneMode(true, QStringLiteral("編集中"));
         sideEditorPathLabel_->setText(QDir::toNativeSeparators(relativeKeyForPath(path)));
         sideEditorStatusLabel_->setText(QStringLiteral("保存済み"));
     }
@@ -2620,6 +2737,7 @@ public:
         sideEditor_->setPlainText({});
         sideEditorLoading_ = false;
         sideEditorPathLabel_->setText(QDir::toNativeSeparators(relativeKeyForPath(path)));
+        setSidePaneMode(false, QStringLiteral("プレビュー"));
 
         const QFileInfo info(path);
         if (!info.exists() || !info.isFile()) {
@@ -2639,6 +2757,7 @@ public:
             }
             sidePreviewImage_->setPixmap(pixmap);
             sidePreviewStack_->setCurrentWidget(sidePreviewImage_);
+            setSidePaneMode(false, QStringLiteral("画像プレビュー"));
             sideEditorStatusLabel_->setText(QStringLiteral("画像プレビュー"));
             return;
         }
@@ -2647,6 +2766,7 @@ public:
             sidePreviewPlayer_->setSource(QUrl::fromLocalFile(info.absoluteFilePath()));
             sidePreviewStack_->setCurrentWidget(sidePreviewVideo_);
             sidePreviewPlayer_->play();
+            setSidePaneMode(false, QStringLiteral("動画プレビュー"));
             sideEditorStatusLabel_->setText(QStringLiteral("動画プレビュー"));
             return;
         }
@@ -2666,15 +2786,19 @@ public:
         sidePreviewText_->clear();
         if (isMarkdownPreviewFile(info)) {
             sidePreviewText_->setMarkdown(filterPreviewMetadataLines(text));
+            setSidePaneMode(false, QStringLiteral("Markdown プレビュー"));
             sideEditorStatusLabel_->setText(QStringLiteral("Markdown プレビュー"));
         } else if (isHtmlPreviewFile(info)) {
             sidePreviewText_->setHtml(text);
+            setSidePaneMode(false, QStringLiteral("HTML プレビュー"));
             sideEditorStatusLabel_->setText(QStringLiteral("HTML プレビュー"));
         } else if (isCsvPreviewFile(info)) {
             sidePreviewText_->setHtml(csvToHtmlTable(text));
+            setSidePaneMode(false, QStringLiteral("CSV プレビュー"));
             sideEditorStatusLabel_->setText(QStringLiteral("CSV プレビュー"));
         } else {
             sidePreviewText_->setPlainText(filterPreviewMetadataLines(text));
+            setSidePaneMode(false, QStringLiteral("テキストプレビュー"));
             sideEditorStatusLabel_->setText(QStringLiteral("テキストプレビュー"));
         }
         sidePreviewStack_->setCurrentWidget(sidePreviewText_);
@@ -2686,7 +2810,35 @@ public:
         sidePreviewText_->clear();
         sidePreviewText_->setPlainText(text);
         sidePreviewStack_->setCurrentWidget(sidePreviewText_);
+        setSidePaneMode(false, status);
         sideEditorStatusLabel_->setText(status);
+    }
+
+    void setSidePaneMode(bool editing, const QString& detail)
+    {
+        if (!sideModeLabel_ || !sideEditorPanel_) {
+            return;
+        }
+
+        if (editing) {
+            sideModeLabel_->setText(detail.isEmpty()
+                                        ? QStringLiteral("EDIT")
+                                        : QStringLiteral("EDIT - %1").arg(detail));
+            sideModeLabel_->setStyleSheet(QStringLiteral(
+                "QLabel { background: #2f8f68; color: #ffffff; border-radius: 4px; "
+                "font-weight: 700; padding: 3px 8px; }"));
+            sideEditorPanel_->setStyleSheet(QStringLiteral(
+                "QWidget#SideEditorPanel { background: #edf7f1; border-left: 4px solid #2f8f68; }"));
+        } else {
+            sideModeLabel_->setText(detail.isEmpty()
+                                        ? QStringLiteral("PREVIEW")
+                                        : QStringLiteral("PREVIEW - %1").arg(detail));
+            sideModeLabel_->setStyleSheet(QStringLiteral(
+                "QLabel { background: #2f7de1; color: #ffffff; border-radius: 4px; "
+                "font-weight: 700; padding: 3px 8px; }"));
+            sideEditorPanel_->setStyleSheet(QStringLiteral(
+                "QWidget#SideEditorPanel { background: #eef6ff; border-left: 4px solid #2f7de1; }"));
+        }
     }
 
     void stopSidePreviewMedia()
@@ -4368,6 +4520,9 @@ public:
 
     void scheduleFileSystemRefresh(const QString& path)
     {
+        if (sideEditorEditing_) {
+            return;
+        }
         if (isMetadataPath(path)) {
             return;
         }
@@ -4484,6 +4639,10 @@ public:
 
     void refreshFromFileSystemChange()
     {
+        if (sideEditorEditing_) {
+            pendingFileSystemPaths_.clear();
+            return;
+        }
         if (!QFileInfo(rootPath_).isDir()) {
             resetFileSystemWatcher();
             return;
@@ -4498,7 +4657,6 @@ public:
             return;
         }
 
-        scene_.clear();
         if (!refreshChangedSubtrees(refreshDirectories)) {
             root_ = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_);
         }
@@ -5978,8 +6136,11 @@ private:
         const int previousHScroll = view_->horizontalScrollBar()->value();
         const int previousVScroll = view_->verticalScrollBar()->value();
 
+        const bool previousSuppressSelectionUpdate = suppressSideEditorSelectionUpdate_;
+        suppressSideEditorSelectionUpdate_ = true;
         scene_.clear();
         if (!root_) {
+            suppressSideEditorSelectionUpdate_ = previousSuppressSelectionUpdate;
             resetFileSystemWatcher();
             return;
         }
@@ -5996,6 +6157,7 @@ private:
         visitNodes(*root_, [this](Node& node) {
             scene_.addItem(new NodeItem(&node, this));
         });
+        suppressSideEditorSelectionUpdate_ = previousSuppressSelectionUpdate;
 
         QRectF bounds;
         visitNodes(*root_, [&bounds](Node& node) {
@@ -6137,12 +6299,13 @@ private:
     QAction* editorPaneAction_ = nullptr;
     QWidget* sideEditorPanel_ = nullptr;
     QStackedWidget* sidePreviewStack_ = nullptr;
-    QTextEdit* sidePreviewText_ = nullptr;
+    PreviewText* sidePreviewText_ = nullptr;
     QLabel* sidePreviewImage_ = nullptr;
     QVideoWidget* sidePreviewVideo_ = nullptr;
     QMediaPlayer* sidePreviewPlayer_ = nullptr;
     QAudioOutput* sidePreviewAudioOutput_ = nullptr;
     TextEditor* sideEditor_ = nullptr;
+    QLabel* sideModeLabel_ = nullptr;
     QLabel* sideEditorPathLabel_ = nullptr;
     QLabel* sideEditorStatusLabel_ = nullptr;
     QTimer sideEditorSaveTimer_;
@@ -6154,6 +6317,7 @@ private:
     bool sideEditorDirty_ = false;
     bool sideEditorEditing_ = false;
     bool restoringViewState_ = false;
+    bool suppressSideEditorSelectionUpdate_ = false;
     std::unique_ptr<Node> root_;
 };
 

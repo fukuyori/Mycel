@@ -4,8 +4,9 @@ Mycel is a C++/Qt mind-map tool that uses the system's folder and file structure
 
 Instead of treating files as a vertical file list, Mycel lays out folders and files as connected nodes on a whiteboard-style canvas. It is designed for exploring project structure, understanding document sets, and organizing information as a map while keeping the underlying data in normal system folders and files.
 
-- Current version: 0.3.1
+- Current version: 0.3.2
 - Release history: [CHANGELOG.md](CHANGELOG.md)
+- Development plan: [docs/development-plan.ja.md](docs/development-plan.ja.md)
 - Japanese documentation: [README.ja.md](README.ja.md)
 
 ## Features
@@ -39,8 +40,10 @@ Instead of treating files as a vertical file list, Mycel lays out folders and fi
 - Lightweight preview frames for images, PDFs, and other files
 - Plain-text edit mode for the selected editable file
 - Preview pane placement can be switched between left, right, and bottom
+- Clear preview/edit mode indicators with labels, background color, and borders
 - Automatic saving, `Ctrl + S` to save, and `Esc` to return to preview mode
-- Persistent editor font size changed with `Ctrl + mouse wheel`
+- Shared persistent preview/edit font size changed with `Ctrl + mouse wheel`
+- File-watcher refresh is paused while editing so focus and edit mode are preserved
 - Rename by putting `Subject: filename.txt` on the first line
 - Lines starting with `Subject:` or `Key:` are hidden from inline previews
 
@@ -165,7 +168,7 @@ On normal startup, if the root directory does not contain a `.mycel` folder, Myc
 | Toolbar Preview Place | Move the preview pane to the left, right, or bottom |
 | Ctrl + S in edit mode | Save and apply `Subject:` file-name changes |
 | Esc in edit mode | Save and return to preview mode |
-| Ctrl + mouse wheel in edit mode | Change editor font size |
+| Ctrl + mouse wheel in preview/edit mode | Change text font size |
 
 ### File Links
 
