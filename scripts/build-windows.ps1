@@ -76,6 +76,44 @@ function Find-CMake {
     return "cmake"
 }
 
+function Find-WinDeployQt {
+    param([string]$QtPrefixPath)
+
+    if (-not [string]::IsNullOrWhiteSpace($QtPrefixPath)) {
+        $Candidate = Join-Path $QtPrefixPath "bin\windeployqt.exe"
+        if (Test-Path -LiteralPath $Candidate) {
+            return (Resolve-Path -LiteralPath $Candidate).Path
+        }
+    }
+
+    $Command = Get-Command "windeployqt.exe" -ErrorAction SilentlyContinue
+    if ($Command) {
+        return $Command.Source
+    }
+
+    return ""
+}
+
+function Find-BuiltExecutable {
+    param(
+        [string]$BuildDir,
+        [string]$BuildType
+    )
+
+    $Candidates = @(
+        (Join-Path $BuildDir "mycel.exe"),
+        (Join-Path (Join-Path $BuildDir $BuildType) "mycel.exe")
+    )
+
+    foreach ($Candidate in $Candidates) {
+        if (Test-Path -LiteralPath $Candidate) {
+            return (Resolve-Path -LiteralPath $Candidate).Path
+        }
+    }
+
+    return ""
+}
+
 function Find-VcVars64 {
     $VcVars64 = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Filter "vcvars64.bat" -ErrorAction SilentlyContinue |
         Sort-Object FullName -Descending |
@@ -228,4 +266,24 @@ if ($LASTEXITCODE -ne 0) {
 & $CMakeExe --build $BuildDir --config $BuildType
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
+}
+
+$BuiltExe = Find-BuiltExecutable $BuildDir $BuildType
+if (-not [string]::IsNullOrWhiteSpace($BuiltExe)) {
+    $WinDeployQt = Find-WinDeployQt $CMakePrefixPath
+    if (-not [string]::IsNullOrWhiteSpace($WinDeployQt)) {
+        $DeployArgs = @()
+        if ($BuildType -ieq "Debug") {
+            $DeployArgs += "--debug"
+        } else {
+            $DeployArgs += "--release"
+        }
+        $DeployArgs += $BuiltExe
+        & $WinDeployQt @DeployArgs
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
+    } else {
+        Write-Warning "windeployqt.exe was not found. The executable was built, but Qt runtime files were not deployed."
+    }
 }

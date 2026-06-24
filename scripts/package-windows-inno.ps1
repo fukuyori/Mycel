@@ -125,7 +125,11 @@ if (-not (Test-Path -LiteralPath $IconPath)) {
 $RequiredRuntimeFiles = @(
     "Qt6Core.dll",
     "Qt6Gui.dll",
+    "Qt6Multimedia.dll",
+    "Qt6MultimediaWidgets.dll",
     "Qt6Widgets.dll",
+    "multimedia\ffmpegmediaplugin.dll",
+    "multimedia\windowsmediaplugin.dll",
     "platforms\qwindows.dll"
 )
 
@@ -150,6 +154,7 @@ $RuntimeDirectories = @(
     "generic",
     "iconengines",
     "imageformats",
+    "multimedia",
     "networkinformation",
     "platforms",
     "styles",
