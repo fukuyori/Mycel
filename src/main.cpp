@@ -4,6 +4,7 @@
 #include <QtCore/QEvent>
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
+#include <QtCore/QFileSystemWatcher>
 #include <QtCore/QDirIterator>
 #include <QtCore/QIODevice>
 #include <QtCore/QJsonArray>
@@ -2008,6 +2009,15 @@ public:
         viewStateSaveTimer_.setSingleShot(true);
         viewStateSaveTimer_.setInterval(500);
         connect(&viewStateSaveTimer_, &QTimer::timeout, this, [this] { saveViewState(); });
+
+        fileSystemWatcher_ = new QFileSystemWatcher(this);
+        fileSystemRefreshTimer_.setSingleShot(true);
+        fileSystemRefreshTimer_.setInterval(500);
+        connect(fileSystemWatcher_, &QFileSystemWatcher::directoryChanged,
+                this, [this](const QString& path) { scheduleFileSystemRefresh(path); });
+        connect(fileSystemWatcher_, &QFileSystemWatcher::fileChanged,
+                this, [this](const QString& path) { scheduleFileSystemRefresh(path); });
+        connect(&fileSystemRefreshTimer_, &QTimer::timeout, this, [this] { refreshFromFileSystemChange(); });
 
         previewClickTimer_.setSingleShot(true);
         connect(&previewClickTimer_, &QTimer::timeout, this, [this] {
@@ -4050,6 +4060,19 @@ public:
         return !scene_.selectedItems().isEmpty();
     }
 
+    QStringList selectedNodePaths() const
+    {
+        QStringList paths;
+        for (QGraphicsItem* item : scene_.selectedItems()) {
+            auto* nodeItem = dynamic_cast<NodeItem*>(item);
+            if (nodeItem && nodeItem->node()) {
+                paths.append(nodeItem->node()->path);
+            }
+        }
+        paths.removeDuplicates();
+        return paths;
+    }
+
     void restoreFolderSelection(const QString& folderPath)
     {
         selectNodePath(folderPath);
@@ -4267,6 +4290,222 @@ public:
             applyLargeTreeStartupCollapse();
         }
         rebuild(false);
+    }
+
+    bool isMetadataPath(const QString& path) const
+    {
+        const QString metadataRoot = QDir::cleanPath(QDir(rootPath_).filePath(QStringLiteral(".mycel")));
+        const QString cleanPath = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+        return cleanPath == metadataRoot || cleanPath.startsWith(metadataRoot + QLatin1Char('/'));
+    }
+
+    QStringList collectWatchedDirectories() const
+    {
+        QStringList directories;
+        const QFileInfo rootInfo(rootPath_);
+        if (!rootInfo.isDir()) {
+            return directories;
+        }
+
+        directories.append(rootInfo.absoluteFilePath());
+        QDirIterator iterator(rootPath_,
+                              QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+                              QDirIterator::Subdirectories);
+        while (iterator.hasNext()) {
+            const QString path = QFileInfo(iterator.next()).absoluteFilePath();
+            if (!isMetadataPath(path)) {
+                directories.append(path);
+            }
+        }
+        directories.removeDuplicates();
+        return directories;
+    }
+
+    QStringList collectWatchedFiles() const
+    {
+        QStringList files;
+        if (!QFileInfo(rootPath_).isDir()) {
+            return files;
+        }
+
+        QDirIterator iterator(rootPath_,
+                              QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+                              QDirIterator::Subdirectories);
+        while (iterator.hasNext()) {
+            const QString path = QFileInfo(iterator.next()).absoluteFilePath();
+            if (!isMetadataPath(path)) {
+                files.append(path);
+            }
+        }
+        files.removeDuplicates();
+        return files;
+    }
+
+    void resetFileSystemWatcher()
+    {
+        if (!fileSystemWatcher_) {
+            return;
+        }
+
+        const QStringList currentFiles = fileSystemWatcher_->files();
+        if (!currentFiles.isEmpty()) {
+            fileSystemWatcher_->removePaths(currentFiles);
+        }
+        const QStringList currentDirectories = fileSystemWatcher_->directories();
+        if (!currentDirectories.isEmpty()) {
+            fileSystemWatcher_->removePaths(currentDirectories);
+        }
+
+        const QStringList directories = collectWatchedDirectories();
+        if (!directories.isEmpty()) {
+            fileSystemWatcher_->addPaths(directories);
+        }
+        const QStringList files = collectWatchedFiles();
+        if (!files.isEmpty()) {
+            fileSystemWatcher_->addPaths(files);
+        }
+    }
+
+    void scheduleFileSystemRefresh(const QString& path)
+    {
+        if (isMetadataPath(path)) {
+            return;
+        }
+        pendingFileSystemPaths_.insert(QFileInfo(path).absoluteFilePath());
+        fileSystemRefreshTimer_.start();
+    }
+
+    QString refreshDirectoryForChangedPath(const QString& path) const
+    {
+        QFileInfo info(path);
+        if (info.exists() && info.isDir()) {
+            return info.absoluteFilePath();
+        }
+        return info.absolutePath();
+    }
+
+    QString nearestVisibleDirectoryPath(QString path) const
+    {
+        path = QDir::cleanPath(path);
+        const QString cleanRoot = QDir::cleanPath(rootPath_);
+        while (!path.isEmpty()) {
+            if (findVisibleNodeByPath(root_.get(), path)) {
+                return path;
+            }
+            if (path == cleanRoot) {
+                return cleanRoot;
+            }
+            const QString parent = QFileInfo(path).absolutePath();
+            if (parent == path) {
+                break;
+            }
+            path = parent;
+        }
+        return cleanRoot;
+    }
+
+    QStringList pendingRefreshDirectories() const
+    {
+        QStringList directories;
+        for (const QString& path : pendingFileSystemPaths_) {
+            QString directory = refreshDirectoryForChangedPath(path);
+            if (directory.isEmpty() || isMetadataPath(directory)) {
+                continue;
+            }
+            if (root_ && !findVisibleNodeByPath(root_.get(), directory)) {
+                directory = nearestVisibleDirectoryPath(directory);
+            }
+            directories.append(QDir::cleanPath(directory));
+        }
+        directories.removeDuplicates();
+
+        QStringList topLevel;
+        for (const QString& directory : directories) {
+            bool coveredByAncestor = false;
+            for (const QString& other : directories) {
+                if (directory == other) {
+                    continue;
+                }
+                if (isDescendantPath(other, directory)) {
+                    coveredByAncestor = true;
+                    break;
+                }
+            }
+            if (!coveredByAncestor) {
+                topLevel.append(directory);
+            }
+        }
+        return topLevel;
+    }
+
+    bool replaceScannedSubtree(const QString& directoryPath)
+    {
+        if (!root_) {
+            return false;
+        }
+
+        const QString cleanPath = QDir::cleanPath(directoryPath);
+        const QString cleanRoot = QDir::cleanPath(root_->path);
+        if (cleanPath == cleanRoot) {
+            root_ = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_);
+            return true;
+        }
+
+        Node* existing = findVisibleNodeByPath(root_.get(), cleanPath);
+        if (!existing || !existing->isDir) {
+            return false;
+        }
+
+        Node* parent = findVisibleNodeByPath(root_.get(), existing->parentPath);
+        if (!parent) {
+            return false;
+        }
+
+        for (auto& child : parent->children) {
+            if (QDir::cleanPath(child->path) == cleanPath) {
+                child = scanTree(cleanPath, existing->depth, existing->branch,
+                                 collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool refreshChangedSubtrees(const QStringList& directories)
+    {
+        bool changed = false;
+        for (const QString& directory : directories) {
+            if (replaceScannedSubtree(directory)) {
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    void refreshFromFileSystemChange()
+    {
+        if (!QFileInfo(rootPath_).isDir()) {
+            resetFileSystemWatcher();
+            return;
+        }
+
+        const QStringList selectedPaths = selectedNodePaths();
+        const QStringList refreshDirectories = pendingRefreshDirectories();
+        pendingFileSystemPaths_.clear();
+        cancelQueuedInlinePreviewToggle();
+        if (refreshDirectories.isEmpty()) {
+            resetFileSystemWatcher();
+            return;
+        }
+
+        scene_.clear();
+        if (!refreshChangedSubtrees(refreshDirectories)) {
+            root_ = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_);
+        }
+        renderCurrentTree(false);
+        if (!selectedPaths.isEmpty()) {
+            restoreSelection(selectedPaths);
+        }
     }
 
     void exportArchive()
@@ -5731,10 +5970,8 @@ private:
         viewStateSaveTimer_.start();
     }
 
-    void rebuild(bool fitAfterRebuild)
+    void renderCurrentTree(bool fitAfterRender)
     {
-        saveSideEditorNow();
-        finishInlineRename(false);
         setWindowTitle(windowTitleForRoot(rootPath_, mycelStorageEnabled_));
 
         const QTransform previousTransform = view_->transform();
@@ -5742,7 +5979,10 @@ private:
         const int previousVScroll = view_->verticalScrollBar()->value();
 
         scene_.clear();
-        root_ = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_);
+        if (!root_) {
+            resetFileSystemWatcher();
+            return;
+        }
         assignTopLevelBranches(*root_);
 
         qreal yCursor = 0.0;
@@ -5774,13 +6014,22 @@ private:
         });
         scene_.setSceneRect(bounds.adjusted(-FreeCanvasMargin, -FreeCanvasMargin,
                                             FreeCanvasMargin, FreeCanvasMargin));
-        if (fitAfterRebuild) {
+        if (fitAfterRender) {
             scheduleRestoreViewStateOrFit();
         } else {
             view_->setTransform(previousTransform);
             view_->horizontalScrollBar()->setValue(previousHScroll);
             view_->verticalScrollBar()->setValue(previousVScroll);
         }
+        resetFileSystemWatcher();
+    }
+
+    void rebuild(bool fitAfterRebuild)
+    {
+        saveSideEditorNow();
+        finishInlineRename(false);
+        root_ = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_);
+        renderCurrentTree(fitAfterRebuild);
     }
 
     void scheduleRestoreViewStateOrFit()
@@ -5869,6 +6118,9 @@ private:
     QString queuedPreviewPath_;
     QString queuedCollapsePath_;
     QTimer previewClickTimer_;
+    QFileSystemWatcher* fileSystemWatcher_ = nullptr;
+    QTimer fileSystemRefreshTimer_;
+    QSet<QString> pendingFileSystemPaths_;
     std::map<QString, QSizeF> previewSizes_;
     std::map<QString, QStringList> fileOrders_;
     QGraphicsProxyWidget* renameProxy_ = nullptr;
