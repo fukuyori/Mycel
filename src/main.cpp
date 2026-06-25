@@ -2762,11 +2762,8 @@ public:
             if (!saveSideEditorNow()) {
                 return;
             }
-            sideEditor_->setReadOnly(false);
-            sidePreviewStack_->setCurrentWidget(sideEditor_);
-            return;
+            sideEditorEditing_ = false;
         }
-        sideEditorEditing_ = false;
         Node* node = singleSelectedNode();
         if (node && !node->isDir) {
             loadSidePreviewFile(node->path);
