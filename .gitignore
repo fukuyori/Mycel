@@ -3,3 +3,4 @@ build-*/
 mycel
 *.svg
 Documents/
+scripts/sign-mac.local.sh

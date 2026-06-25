@@ -1417,6 +1417,18 @@ public:
 protected:
     void wheelEvent(QWheelEvent* event) override
     {
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+        if (!(event->modifiers() & Qt::ControlModifier)) {
+            const QPoint pixelDelta = event->pixelDelta();
+            if (!pixelDelta.isNull()) {
+                horizontalScrollBar()->setValue(horizontalScrollBar()->value() - pixelDelta.x());
+                verticalScrollBar()->setValue(verticalScrollBar()->value() - pixelDelta.y());
+                notifyViewChanged();
+                event->accept();
+                return;
+            }
+        }
+#endif
         const QPoint delta = event->angleDelta();
         if (!delta.isNull()) {
             const int amount = delta.y();

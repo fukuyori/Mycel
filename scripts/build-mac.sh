@@ -30,4 +30,3 @@ fi
 
 "$CMAKE_BIN" "${CMAKE_ARGS[@]}"
 "$CMAKE_BIN" --build "$BUILD_DIR" --config "$BUILD_TYPE"
-
