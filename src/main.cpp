@@ -253,6 +253,88 @@ bool isImagePreviewFile(const QFileInfo& info);
 bool isVideoPreviewFile(const QFileInfo& info);
 std::optional<QString> youtubeEmbedUrlForFile(const QFileInfo& info);
 
+QSize imagePixelSizeForFile(const QFileInfo& info)
+{
+    QImageReader reader(info.absoluteFilePath());
+    QSize imageSize = reader.size();
+    if (!imageSize.isValid()) {
+        const QPixmap pixmap(info.absoluteFilePath());
+        imageSize = pixmap.size();
+    }
+    return imageSize;
+}
+
+QSizeF clampedImagePreviewSize(const QFileInfo& info, const QSizeF& size, bool preferHeight)
+{
+    constexpr qreal minWidth = 72.0;
+    constexpr qreal minHeight = 48.0;
+    constexpr qreal maxWidth = 3200.0;
+    constexpr qreal maxHeight = 2400.0;
+
+    const QSize imageSize = imagePixelSizeForFile(info);
+    if (!imageSize.isValid() || imageSize.isEmpty()) {
+        return QSizeF(std::clamp(size.width(), minWidth, maxWidth),
+                      std::clamp(size.height(), minHeight, maxHeight));
+    }
+
+    const qreal imageWidth = static_cast<qreal>(imageSize.width());
+    const qreal imageHeight = static_cast<qreal>(imageSize.height());
+    if (preferHeight) {
+        const qreal scale = size.height() / imageHeight;
+        const qreal minScale = std::max(minWidth / imageWidth, minHeight / imageHeight);
+        const qreal maxScale = std::min(maxWidth / imageWidth, maxHeight / imageHeight);
+        const qreal clampedScale = std::clamp(scale, minScale, maxScale);
+        return QSizeF(imageWidth * clampedScale, imageHeight * clampedScale);
+    }
+
+    const qreal scale = size.width() / imageWidth;
+    const qreal minScale = std::max(minWidth / imageWidth, minHeight / imageHeight);
+    const qreal maxScale = std::min(maxWidth / imageWidth, maxHeight / imageHeight);
+    const qreal clampedScale = std::clamp(scale, minScale, maxScale);
+    return QSizeF(imageWidth * clampedScale, imageHeight * clampedScale);
+}
+
+qreal imagePreviewScaleForSize(const QFileInfo& info, const QSizeF& size, bool preferHeight)
+{
+    const QSize imageSize = imagePixelSizeForFile(info);
+    if (!imageSize.isValid() || imageSize.isEmpty()) {
+        return 1.0;
+    }
+
+    const qreal scale = preferHeight
+                            ? size.height() / static_cast<qreal>(imageSize.height())
+                            : size.width() / static_cast<qreal>(imageSize.width());
+    const qreal minScale = std::max(72.0 / static_cast<qreal>(imageSize.width()),
+                                    48.0 / static_cast<qreal>(imageSize.height()));
+    const qreal maxScale = std::min(3200.0 / static_cast<qreal>(imageSize.width()),
+                                    2400.0 / static_cast<qreal>(imageSize.height()));
+    return std::clamp(scale, minScale, maxScale);
+}
+
+QSizeF imagePreviewSizeForScale(const QFileInfo& info, qreal scale)
+{
+    const QSize imageSize = imagePixelSizeForFile(info);
+    if (!imageSize.isValid() || imageSize.isEmpty()) {
+        return clampedImagePreviewSize(info, QSizeF(460.0, 260.0), false);
+    }
+
+    const qreal imageWidth = static_cast<qreal>(imageSize.width());
+    const qreal imageHeight = static_cast<qreal>(imageSize.height());
+    const qreal minScale = std::max(72.0 / imageWidth, 48.0 / imageHeight);
+    const qreal maxScale = std::min(3200.0 / imageWidth, 2400.0 / imageHeight);
+    const qreal clampedScale = std::clamp(scale, minScale, maxScale);
+    return QSizeF(imageWidth * clampedScale, imageHeight * clampedScale);
+}
+
+QSizeF clampedPreviewSizeForFile(const QFileInfo& info, const QSizeF& size, bool preferHeight = false)
+{
+    if (isImagePreviewFile(info)) {
+        return clampedImagePreviewSize(info, size, preferHeight);
+    }
+    return QSizeF(std::clamp(size.width(), 260.0, 900.0),
+                  std::clamp(size.height(), 110.0, 520.0));
+}
+
 QSizeF automaticPreviewSize(const QFileInfo& info)
 {
     constexpr qreal width = 460.0;
@@ -260,20 +342,15 @@ QSizeF automaticPreviewSize(const QFileInfo& info)
     constexpr qreal maxHeight = 320.0;
 
     if (isImagePreviewFile(info)) {
-        QImageReader reader(info.absoluteFilePath());
-        QSize imageSize = reader.size();
-        if (!imageSize.isValid()) {
-            const QPixmap pixmap(info.absoluteFilePath());
-            imageSize = pixmap.size();
-        }
+        QSize imageSize = imagePixelSizeForFile(info);
         if (!imageSize.isValid() || imageSize.isEmpty()) {
             return QSizeF(width, 260.0);
         }
 
-        constexpr qreal minWidth = 260.0;
-        constexpr qreal minImageHeight = 150.0;
-        constexpr qreal maxWidth = 720.0;
-        constexpr qreal maxImageHeight = 440.0;
+        constexpr qreal minWidth = 180.0;
+        constexpr qreal minImageHeight = 100.0;
+        constexpr qreal maxWidth = 1200.0;
+        constexpr qreal maxImageHeight = 800.0;
         const qreal imageWidth = imageSize.width();
         const qreal imageHeight = imageSize.height();
         qreal scale = std::min(maxWidth / imageWidth, maxImageHeight / imageHeight);
@@ -282,9 +359,9 @@ QSizeF automaticPreviewSize(const QFileInfo& info)
         }
         scale = std::clamp(scale, 0.05, 3.0);
 
-        qreal previewWidth = std::clamp(imageWidth * scale, minWidth, maxWidth);
-        qreal previewHeight = std::clamp(imageHeight * scale, minImageHeight, maxImageHeight);
-        return QSizeF(previewWidth, previewHeight);
+        const qreal previewWidth = std::clamp(imageWidth * scale, minWidth, maxWidth);
+        const qreal previewHeight = std::clamp(imageHeight * scale, minImageHeight, maxImageHeight);
+        return clampedPreviewSizeForFile(info, QSizeF(previewWidth, previewHeight));
     }
 
     if (isVideoPreviewFile(info)) {
@@ -1151,6 +1228,7 @@ public:
     }
 
     Node* node() const { return node_; }
+    QString path() const { return node_ ? node_->path : QString(); }
     QPointF layoutCenter() const { return layoutCenter_; }
     void setInternalDropHover(bool hover)
     {
@@ -1180,6 +1258,108 @@ public:
     bool containsLinkDropScenePoint(const QPointF& scenePos) const
     {
         return linkDropSceneRect().contains(scenePos);
+    }
+    bool canResizeImagePreviewAtScene(const QPointF& scenePos) const
+    {
+        if (!node_->previewOpen || node_->isDir || !isImagePreviewFile(QFileInfo(node_->path))) {
+            return false;
+        }
+        return previewResizeHandle().contains(mapFromScene(scenePos));
+    }
+    QString imageResizeDebugAtScene(const QPointF& scenePos) const
+    {
+        const QPointF local = mapFromScene(scenePos);
+        const QRectF rect = previewRect();
+        const QRectF handle = previewResizeHandle();
+        return QStringLiteral("path=%1 previewOpen=%2 isDir=%3 isImage=%4 scene=(%5,%6) local=(%7,%8) rect=(%9,%10,%11,%12) inside=%13 handle=(%14,%15,%16,%17) insideHandle=%18")
+            .arg(node_ ? node_->path : QStringLiteral("(null)"))
+            .arg(node_ && node_->previewOpen ? QStringLiteral("true") : QStringLiteral("false"))
+            .arg(node_ && node_->isDir ? QStringLiteral("true") : QStringLiteral("false"))
+            .arg(node_ && isImagePreviewFile(QFileInfo(node_->path)) ? QStringLiteral("true") : QStringLiteral("false"))
+            .arg(scenePos.x(), 0, 'f', 1)
+            .arg(scenePos.y(), 0, 'f', 1)
+            .arg(local.x(), 0, 'f', 1)
+            .arg(local.y(), 0, 'f', 1)
+            .arg(rect.x(), 0, 'f', 1)
+            .arg(rect.y(), 0, 'f', 1)
+            .arg(rect.width(), 0, 'f', 1)
+            .arg(rect.height(), 0, 'f', 1)
+            .arg(rect.contains(local) ? QStringLiteral("true") : QStringLiteral("false"))
+            .arg(handle.x(), 0, 'f', 1)
+            .arg(handle.y(), 0, 'f', 1)
+            .arg(handle.width(), 0, 'f', 1)
+            .arg(handle.height(), 0, 'f', 1)
+            .arg(handle.contains(local) ? QStringLiteral("true") : QStringLiteral("false"));
+    }
+    qreal currentImageResizeScale() const
+    {
+        return imagePreviewScaleForSize(QFileInfo(node_->path), node_->previewSize, false);
+    }
+    QSizeF currentPreviewSize() const
+    {
+        return node_ ? node_->previewSize : QSizeF();
+    }
+    void applyImagePreviewScale(qreal scale)
+    {
+        if (!node_ || node_->isDir || !isImagePreviewFile(QFileInfo(node_->path))) {
+            return;
+        }
+        prepareGeometryChange();
+        node_->previewSize = imagePreviewSizeForScale(QFileInfo(node_->path), scale);
+        syncPreviewWidgetGeometry();
+        update();
+    }
+    void saveImagePreviewScale(qreal scale)
+    {
+        if (!node_ || node_->isDir || !isImagePreviewFile(QFileInfo(node_->path))) {
+            return;
+        }
+        resizeImagePreview(scale);
+    }
+    bool beginImagePreviewResizeAtScene(const QPointF& scenePos)
+    {
+        if (!canResizeImagePreviewAtScene(scenePos)) {
+            return false;
+        }
+        resizingPreview_ = true;
+        resizePreferHeight_ = false;
+        resizeStartScene_ = scenePos;
+        resizeStartSize_ = node_->previewSize;
+        resizeStartScale_ = imagePreviewScaleForSize(QFileInfo(node_->path), node_->previewSize, false);
+        resizeCurrentScale_ = resizeStartScale_;
+        setFlag(QGraphicsItem::ItemIsMovable, false);
+        setSelected(true);
+        update();
+        return true;
+    }
+    void updateImagePreviewResizeAtScene(const QPointF& scenePos)
+    {
+        if (!resizingPreview_ || node_->isDir) {
+            return;
+        }
+        prepareGeometryChange();
+        const QPointF delta = scenePos - resizeStartScene_;
+        const QFileInfo info(node_->path);
+        const bool preferHeight = std::abs(delta.y()) > std::abs(delta.x());
+        const QSizeF targetSize = preferHeight
+                                      ? QSizeF(resizeStartSize_.width(),
+                                               resizeStartSize_.height() + delta.y())
+                                      : QSizeF(resizeStartSize_.width() + delta.x(),
+                                               resizeStartSize_.height());
+        resizeCurrentScale_ = imagePreviewScaleForSize(info, targetSize, preferHeight);
+        node_->previewSize = imagePreviewSizeForScale(info, resizeCurrentScale_);
+        resizeCurrentScale_ = imagePreviewScaleForSize(info, node_->previewSize, false);
+        syncPreviewWidgetGeometry();
+        update();
+    }
+    void finishImagePreviewResize()
+    {
+        if (!resizingPreview_) {
+            return;
+        }
+        resizingPreview_ = false;
+        setFlag(QGraphicsItem::ItemIsMovable, true);
+        resizeImagePreview(resizeCurrentScale_);
     }
     QRectF labelSceneRect() const
     {
@@ -1215,6 +1395,21 @@ public:
             rect = rect.united(previewFrameRect());
         }
         return rect;
+    }
+
+    QPainterPath shape() const override
+    {
+        QPainterPath path;
+        const QRectF box(-node_->size.width() / 2.0, -node_->size.height() / 2.0,
+                         node_->size.width(), node_->size.height());
+        path.addRoundedRect(box, 8.0, 8.0);
+        if (node_->previewOpen && !node_->isDir) {
+            path.addRect(previewFrameRect());
+        }
+        if (node_->collapsed && node_->hiddenChildren > 0) {
+            path.addRect(QRectF(box.right(), box.top(), 104.0, box.height()));
+        }
+        return path;
     }
 
     void paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget*) override
@@ -1291,23 +1486,7 @@ public:
 
 protected:
     void contextMenuEvent(QGraphicsSceneContextMenuEvent* event) override;
-    void mousePressEvent(QGraphicsSceneMouseEvent* event) override
-    {
-        if (node_->previewOpen && previewResizeHandle().contains(event->pos())) {
-            resizingPreview_ = true;
-            resizeStartScene_ = event->scenePos();
-            resizeStartSize_ = node_->previewSize;
-            setFlag(QGraphicsItem::ItemIsMovable, false);
-            event->accept();
-            return;
-        }
-        dragStart_ = pos();
-        if (event->button() == Qt::LeftButton) {
-            setOpacity(0.72);
-            setZValue(100.0);
-        }
-        QGraphicsItem::mousePressEvent(event);
-    }
+    void mousePressEvent(QGraphicsSceneMouseEvent* event) override;
     void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override;
     void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override;
     void mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event) override;
@@ -1323,7 +1502,8 @@ private:
     bool hasUserFill() const;
     QStringList windowInlinePreviewLines() const;
     QString windowMarkdownPreviewText() const;
-    void resizePreview(const QSizeF& size);
+    void resizePreview(const QSizeF& size, bool preferHeight);
+    void resizeImagePreview(qreal scale);
     void createPreviewWidget();
     void syncPreviewWidgetGeometry();
 
@@ -1351,7 +1531,8 @@ private:
     QRectF previewResizeHandle() const
     {
         const QRectF rect = previewRect();
-        return QRectF(rect.right() - 16.0, rect.bottom() - 16.0, 16.0, 16.0);
+        const qreal grip = isImagePreviewFile(QFileInfo(node_->path)) ? 36.0 : 18.0;
+        return QRectF(rect.right() - grip, rect.bottom() - grip, grip, grip);
     }
 
     void paintFolder(QPainter* painter, const QPointF& at, const QColor& fill)
@@ -1469,6 +1650,22 @@ private:
                                  header.width() - 48.0, header.height()),
                           Qt::AlignVCenter | Qt::AlignLeft, shortLabel(node_->name));
 
+        const QFileInfo info(node_->path);
+        if (isImagePreviewFile(info)) {
+            const QRectF imageArea = body.adjusted(2.0, 2.0, -38.0, -38.0);
+            const QPixmap pixmap(info.absoluteFilePath());
+            if (!pixmap.isNull() && imageArea.width() > 1.0 && imageArea.height() > 1.0) {
+                painter->save();
+                painter->setRenderHint(QPainter::SmoothPixmapTransform);
+                const QSizeF scaled = pixmap.size().scaled(imageArea.size().toSize(), Qt::KeepAspectRatio);
+                const QRectF target(QPointF(imageArea.left() + (imageArea.width() - scaled.width()) / 2.0,
+                                            imageArea.top() + (imageArea.height() - scaled.height()) / 2.0),
+                                    scaled);
+                painter->drawPixmap(target, pixmap, QRectF(QPointF(0.0, 0.0), pixmap.size()));
+                painter->restore();
+            }
+        }
+
         painter->setPen(QPen(QColor("#9aa5aa"), 1.2));
         const QPointF corner(body.right() - 12.0, body.bottom() - 4.0);
         painter->drawLine(corner, QPointF(body.right() - 4.0, body.bottom() - 12.0));
@@ -1480,7 +1677,11 @@ private:
     MainWindow* window_;
     QPointF layoutCenter_;
     QPointF dragStart_;
+    QPointF pressStartScene_;
     bool resizingPreview_ = false;
+    bool resizePreferHeight_ = false;
+    qreal resizeStartScale_ = 1.0;
+    qreal resizeCurrentScale_ = 1.0;
     bool externalDropHover_ = false;
     bool internalDropHover_ = false;
     bool linkDropHover_ = false;
@@ -1699,6 +1900,37 @@ protected:
 
     void mousePressEvent(QMouseEvent* event) override
     {
+        if (event->button() == Qt::LeftButton) {
+            const bool directItemHit = itemAt(event->pos()) != nullptr;
+            notifyDebug(QStringLiteral("view mouse press itemAt: %1")
+                            .arg(directItemHit ? QStringLiteral("item") : QStringLiteral("none")));
+            if (NodeItem* nodeItem = nodeItemAt(event->pos())) {
+                notifyDebug(QStringLiteral("image resize candidate: %1")
+                                .arg(nodeItem->imageResizeDebugAtScene(mapToScene(event->pos()))));
+                const QPointF scenePos = mapToScene(event->pos());
+                if (nodeItem->canResizeImagePreviewAtScene(scenePos)) {
+                    imageResizePath_ = nodeItem->path();
+                    imageResizeStartScene_ = scenePos;
+                    imageResizeStartSize_ = nodeItem->currentPreviewSize();
+                    imageResizeStartScale_ = nodeItem->currentImageResizeScale();
+                    imageResizeCurrentScale_ = imageResizeStartScale_;
+                    notifyDebug(QStringLiteral("image resize begin scale=%1 size=(%2,%3)")
+                                    .arg(imageResizeCurrentScale_, 0, 'f', 4)
+                                    .arg(nodeItem->currentPreviewSize().width(), 0, 'f', 1)
+                                    .arg(nodeItem->currentPreviewSize().height(), 0, 'f', 1));
+                    event->accept();
+                    return;
+                }
+                if (!directItemHit) {
+                    selectNodeItemFromFallbackHit(nodeItem);
+                    notifyDebug(QStringLiteral("view fallback selected node: %1").arg(nodeItem->path()));
+                    event->accept();
+                    return;
+                }
+            } else {
+                notifyDebug(QStringLiteral("image resize candidate: no NodeItem"));
+            }
+        }
         const bool rightButtonCanvasPan = event->button() == Qt::RightButton && itemAt(event->pos()) == nullptr;
         if ((event->button() == Qt::MiddleButton) ||
             rightButtonCanvasPan ||
@@ -1722,6 +1954,32 @@ protected:
 
     void mouseMoveEvent(QMouseEvent* event) override
     {
+        if (!imageResizePath_.isEmpty()) {
+            NodeItem* resizeItem = nodeItemForPath(imageResizePath_);
+            if (!resizeItem) {
+                notifyDebug(QStringLiteral("image resize move canceled: item missing"));
+                imageResizePath_.clear();
+                event->accept();
+                return;
+            }
+            const QPointF delta = mapToScene(event->pos()) - imageResizeStartScene_;
+            const QSizeF targetSize = std::abs(delta.x()) >= std::abs(delta.y())
+                                          ? QSizeF(imageResizeStartSize_.width() + delta.x(),
+                                                   imageResizeStartSize_.height())
+                                          : QSizeF(imageResizeStartSize_.width(),
+                                                   imageResizeStartSize_.height() + delta.y());
+            imageResizeCurrentScale_ = imagePreviewScaleForSize(QFileInfo(imageResizePath_),
+                                                                targetSize,
+                                                                std::abs(delta.y()) > std::abs(delta.x()));
+            resizeItem->applyImagePreviewScale(imageResizeCurrentScale_);
+            imageResizeCurrentScale_ = resizeItem->currentImageResizeScale();
+            notifyDebug(QStringLiteral("image resize move scale=%1 size=(%2,%3)")
+                            .arg(imageResizeCurrentScale_, 0, 'f', 4)
+                            .arg(resizeItem->currentPreviewSize().width(), 0, 'f', 1)
+                            .arg(resizeItem->currentPreviewSize().height(), 0, 'f', 1));
+            event->accept();
+            return;
+        }
         if (panning_) {
             const QPoint delta = event->pos() - lastPanPoint_;
             lastPanPoint_ = event->pos();
@@ -1735,6 +1993,17 @@ protected:
 
     void mouseReleaseEvent(QMouseEvent* event) override
     {
+        if (event->button() == Qt::LeftButton && !imageResizePath_.isEmpty()) {
+            if (NodeItem* resizeItem = nodeItemForPath(imageResizePath_)) {
+                resizeItem->saveImagePreviewScale(imageResizeCurrentScale_);
+            } else {
+                notifyDebug(QStringLiteral("image resize finish canceled: item missing"));
+            }
+            imageResizePath_.clear();
+            notifyDebug(QStringLiteral("image resize finish"));
+            event->accept();
+            return;
+        }
         if (event->button() == Qt::LeftButton && rubberBandSelecting_) {
             QGraphicsView::mouseReleaseEvent(event);
             rememberRubberBandRect(event->pos());
@@ -1794,6 +2063,55 @@ protected:
     }
 
 private:
+    NodeItem* nodeItemAt(const QPoint& pos) const
+    {
+        for (QGraphicsItem* item = itemAt(pos); item; item = item->parentItem()) {
+            if (auto* nodeItem = dynamic_cast<NodeItem*>(item)) {
+                return nodeItem;
+            }
+        }
+        if (!scene()) {
+            return nullptr;
+        }
+        const QPointF scenePos = mapToScene(pos);
+        for (QGraphicsItem* item : scene()->items()) {
+            auto* nodeItem = dynamic_cast<NodeItem*>(item);
+            if (!nodeItem || !nodeItem->isVisible()) {
+                continue;
+            }
+            const QPointF localPos = nodeItem->mapFromScene(scenePos);
+            if (nodeItem->contains(localPos) ||
+                nodeItem->boundingRect().adjusted(-2.0, -2.0, 2.0, 2.0).contains(localPos)) {
+                return nodeItem;
+            }
+        }
+        return nullptr;
+    }
+
+    void selectNodeItemFromFallbackHit(NodeItem* nodeItem)
+    {
+        if (!nodeItem || !scene()) {
+            return;
+        }
+        scene()->clearSelection();
+        nodeItem->setSelected(true);
+        setFocus(Qt::MouseFocusReason);
+    }
+
+    NodeItem* nodeItemForPath(const QString& path) const
+    {
+        if (!scene()) {
+            return nullptr;
+        }
+        for (QGraphicsItem* item : scene()->items()) {
+            auto* nodeItem = dynamic_cast<NodeItem*>(item);
+            if (nodeItem && nodeItem->path() == path) {
+                return nodeItem;
+            }
+        }
+        return nullptr;
+    }
+
     void rememberRubberBandRect(const QPoint& endPos)
     {
         const QRect viewportRect = QRect(rubberBandStart_, endPos).normalized();
@@ -1943,6 +2261,11 @@ private:
     }
 
     bool panning_ = false;
+    QString imageResizePath_;
+    QPointF imageResizeStartScene_;
+    QSizeF imageResizeStartSize_;
+    qreal imageResizeStartScale_ = 1.0;
+    qreal imageResizeCurrentScale_ = 1.0;
     bool rubberBandSelecting_ = false;
     Qt::MouseButton panningButton_ = Qt::NoButton;
     QPoint lastPanPoint_;
@@ -2707,6 +3030,7 @@ public:
                 collapsedPaths_.clear();
                 previewPaths_.clear();
                 previewSizes_.clear();
+                previewImageScales_.clear();
                 loadOrderFile();
                 loadColorFile();
                 loadPreviewFile();
@@ -3958,13 +4282,37 @@ public:
         openInlinePreviewPath(path);
     }
 
-    void setPreviewSize(Node* node, const QSizeF& size)
+    void setPreviewSize(Node* node, const QSizeF& size, bool preferHeight = false)
     {
         if (!node || node->isDir) {
             return;
         }
-        previewSizes_[node->path] = QSizeF(std::clamp(size.width(), 260.0, 900.0),
-                                           std::clamp(size.height(), 110.0, 520.0));
+        const QFileInfo info(node->path);
+        if (isImagePreviewFile(info)) {
+            const qreal scale = imagePreviewScaleForSize(info, size, preferHeight);
+            previewImageScales_[node->path] = scale;
+            previewSizes_[node->path] = imagePreviewSizeForScale(info, scale);
+        } else {
+            previewImageScales_.erase(node->path);
+            previewSizes_[node->path] = clampedPreviewSizeForFile(info, size, preferHeight);
+        }
+        savePreviewFile();
+        rebuild(false);
+    }
+
+    void setImagePreviewScale(Node* node, qreal scale)
+    {
+        if (!node || node->isDir) {
+            return;
+        }
+        const QFileInfo info(node->path);
+        if (!isImagePreviewFile(info)) {
+            return;
+        }
+        const QSizeF size = imagePreviewSizeForScale(info, scale);
+        const qreal normalizedScale = imagePreviewScaleForSize(info, size, false);
+        previewImageScales_[node->path] = normalizedScale;
+        previewSizes_[node->path] = size;
         savePreviewFile();
         rebuild(false);
     }
@@ -4228,17 +4576,18 @@ public:
         if (!node || node->isDir) {
             return;
         }
-        const QString message = QStringLiteral("このファイルを削除しますか？\n%1").arg(node->path);
+        const QString filePath = node->path;
+        const QString message = QStringLiteral("このファイルを削除しますか？\n%1").arg(filePath);
         if (QMessageBox::question(this, QStringLiteral("Mycel"), message,
                                   QMessageBox::Yes | QMessageBox::Cancel,
                                   QMessageBox::Cancel) != QMessageBox::Yes) {
             return;
         }
-        if (!QFile::remove(node->path)) {
+        if (!QFile::remove(filePath)) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("ファイルを削除できませんでした。"));
             return;
         }
-        removeDeletedPathMetadata(node->path, false);
+        removeDeletedPathMetadata(filePath, false);
         saveColorFile();
         saveOrderFile();
         savePreviewFile();
@@ -4257,14 +4606,14 @@ public:
         if (!node || !node->isDir || node == root_.get()) {
             return;
         }
-        const QString message = QStringLiteral("このフォルダと配下の項目を削除しますか？\n%1").arg(node->path);
+        const QString folderPath = node->path;
+        const QString message = QStringLiteral("このフォルダと配下の項目を削除しますか？\n%1").arg(folderPath);
         if (QMessageBox::question(this, QStringLiteral("Mycel"), message,
                                   QMessageBox::Yes | QMessageBox::Cancel,
                                   QMessageBox::Cancel) != QMessageBox::Yes) {
             return;
         }
 
-        const QString folderPath = node->path;
         QDir dir(folderPath);
         if (!dir.removeRecursively()) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("フォルダを削除できませんでした。"));
@@ -6035,6 +6384,7 @@ public:
         userColors_ = std::move(importedColors);
         previewPaths_ = std::move(importedPreviewPaths);
         previewSizes_ = std::move(importedPreviewSizes);
+        previewImageScales_.clear();
         fileLinks_ = std::move(importedLinks);
         fileOrders_.clear();
         for (auto& [key, entries] : importedOrderEntries) {
@@ -6199,6 +6549,7 @@ private:
         return false;
     }
 
+public:
     void recordDebugEvent(const QString& message)
     {
         if (!debugText_ || !debugDock_ || !debugDock_->isVisible()) {
@@ -6212,6 +6563,7 @@ private:
         refreshDebugPane();
     }
 
+private:
     void copyDebugPaneToClipboard()
     {
         if (!debugText_) {
@@ -6514,6 +6866,10 @@ private:
             object.insert(QStringLiteral("width"), previewSize->second.width());
             object.insert(QStringLiteral("height"), previewSize->second.height());
         }
+        const auto previewScale = previewImageScales_.find(fileInfo.absoluteFilePath());
+        if (previewScale != previewImageScales_.end()) {
+            object.insert(QStringLiteral("scale"), previewScale->second);
+        }
 
         output += QString();
         if (isTextPreviewFile(fileInfo)) {
@@ -6620,8 +6976,7 @@ private:
         const qreal width = object.value(QStringLiteral("width")).toDouble(0.0);
         const qreal height = object.value(QStringLiteral("height")).toDouble(0.0);
         if (width > 0.0 && height > 0.0) {
-            previewSizes[path] = QSizeF(std::clamp(width, 260.0, 900.0),
-                                        std::clamp(height, 110.0, 520.0));
+            previewSizes[path] = clampedPreviewSizeForFile(QFileInfo(path), QSizeF(width, height));
         }
     }
 
@@ -6826,6 +7181,14 @@ private:
         for (auto it = previewSizes_.begin(); it != previewSizes_.end();) {
             if (it->first == deletedPath || (wasDir && isDescendantPath(deletedPath, it->first))) {
                 it = previewSizes_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        for (auto it = previewImageScales_.begin(); it != previewImageScales_.end();) {
+            if (it->first == deletedPath || (wasDir && isDescendantPath(deletedPath, it->first))) {
+                it = previewImageScales_.erase(it);
             } else {
                 ++it;
             }
@@ -7047,6 +7410,12 @@ private:
         }
         previewSizes_ = std::move(updatedPreviewSizes);
 
+        std::map<QString, qreal> updatedPreviewImageScales;
+        for (const auto& [path, scale] : previewImageScales_) {
+            updatedPreviewImageScales[rekeyPathAfterRename(path, oldPath, newPath, wasDir)] = scale;
+        }
+        previewImageScales_ = std::move(updatedPreviewImageScales);
+
         QSet<QString> updatedPreviewPaths;
         for (const QString& path : previewPaths_.values()) {
             updatedPreviewPaths.insert(rekeyPathAfterRename(path, oldPath, newPath, wasDir));
@@ -7244,6 +7613,7 @@ private:
     {
         previewPaths_.clear();
         previewSizes_.clear();
+        previewImageScales_.clear();
         if (!mycelStorageEnabled_) {
             return;
         }
@@ -7266,11 +7636,23 @@ private:
                 }
             }
 
-            const qreal width = preview.value(QStringLiteral("width")).toDouble(0.0);
-            const qreal height = preview.value(QStringLiteral("height")).toDouble(0.0);
-            if (width > 0.0 && height > 0.0) {
-                previewSizes_[absolutePath] = QSizeF(std::clamp(width, 260.0, 900.0),
-                                                     std::clamp(height, 110.0, 520.0));
+            const QFileInfo info(absolutePath);
+            const qreal scale = preview.value(QStringLiteral("scale")).toDouble(0.0);
+            if (isImagePreviewFile(info) && scale > 0.0) {
+                previewImageScales_[absolutePath] = imagePreviewScaleForSize(info, imagePreviewSizeForScale(info, scale), false);
+                previewSizes_[absolutePath] = imagePreviewSizeForScale(info, previewImageScales_[absolutePath]);
+            } else {
+                const qreal width = preview.value(QStringLiteral("width")).toDouble(0.0);
+                const qreal height = preview.value(QStringLiteral("height")).toDouble(0.0);
+                if (width > 0.0 && height > 0.0) {
+                    if (isImagePreviewFile(info)) {
+                        const qreal legacyScale = imagePreviewScaleForSize(info, QSizeF(width, height), width < height);
+                        previewImageScales_[absolutePath] = legacyScale;
+                        previewSizes_[absolutePath] = imagePreviewSizeForScale(info, legacyScale);
+                    } else {
+                        previewSizes_[absolutePath] = clampedPreviewSizeForFile(info, QSizeF(width, height));
+                    }
+                }
             }
         }
     }
@@ -7291,6 +7673,9 @@ private:
         for (const auto& [path, size] : previewSizes_) {
             paths.insert(path);
         }
+        for (const auto& [path, scale] : previewImageScales_) {
+            paths.insert(path);
+        }
 
         QJsonObject previews;
         for (const QString& path : paths.values()) {
@@ -7300,6 +7685,10 @@ private:
             if (size != previewSizes_.end()) {
                 preview.insert(QStringLiteral("width"), size->second.width());
                 preview.insert(QStringLiteral("height"), size->second.height());
+            }
+            const auto scale = previewImageScales_.find(path);
+            if (scale != previewImageScales_.end()) {
+                preview.insert(QStringLiteral("scale"), scale->second);
             }
             previews.insert(relativeKeyForPath(path), preview);
         }
@@ -7753,6 +8142,7 @@ private:
     QTimer fileSystemRefreshTimer_;
     QSet<QString> pendingFileSystemPaths_;
     std::map<QString, QSizeF> previewSizes_;
+    std::map<QString, qreal> previewImageScales_;
     std::map<QString, QStringList> fileOrders_;
     QGraphicsProxyWidget* renameProxy_ = nullptr;
     QLineEdit* renameEdit_ = nullptr;
@@ -8043,9 +8433,14 @@ QString NodeItem::windowMarkdownPreviewText() const
     return window_->inlineMarkdownPreviewText(node_);
 }
 
-void NodeItem::resizePreview(const QSizeF& size)
+void NodeItem::resizePreview(const QSizeF& size, bool preferHeight)
 {
-    window_->setPreviewSize(node_, size);
+    window_->setPreviewSize(node_, size, preferHeight);
+}
+
+void NodeItem::resizeImagePreview(qreal scale)
+{
+    window_->setImagePreviewScale(node_, scale);
 }
 
 void NodeItem::createPreviewWidget()
@@ -8069,14 +8464,6 @@ void NodeItem::createPreviewWidget()
     }
 
     if (isImagePreviewFile(info)) {
-        auto* imagePreview = new AspectImagePreview;
-        imagePreview->setProperty("mycelInlinePreview", true);
-        imagePreview->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
-        imagePreview->setPreviewPixmap(QPixmap(info.absoluteFilePath()));
-        previewProxy_ = new QGraphicsProxyWidget(this);
-        previewProxy_->setWidget(imagePreview);
-        previewProxy_->setZValue(1.0);
-        syncPreviewWidgetGeometry();
         return;
     }
 
@@ -8146,7 +8533,9 @@ void NodeItem::syncPreviewWidgetGeometry()
     if (!previewProxy_) {
         return;
     }
-    const QRectF contentRect = previewRect().adjusted(2.0, 2.0, -18.0, -18.0);
+    const bool imagePreview = isImagePreviewFile(QFileInfo(node_->path));
+    const qreal gripInset = imagePreview ? 38.0 : 18.0;
+    const QRectF contentRect = previewRect().adjusted(2.0, 2.0, -gripInset, -gripInset);
     previewProxy_->setPos(contentRect.topLeft());
     previewProxy_->resize(contentRect.size());
     if (QWidget* widget = previewProxy_->widget()) {
@@ -8208,18 +8597,58 @@ void NodeItem::dropEvent(QGraphicsSceneDragDropEvent* event)
     event->accept();
 }
 
+void NodeItem::mousePressEvent(QGraphicsSceneMouseEvent* event)
+{
+    if (node_->previewOpen && previewResizeHandle().contains(event->pos())) {
+        resizingPreview_ = true;
+        resizePreferHeight_ = false;
+        resizeStartScene_ = event->scenePos();
+        resizeStartSize_ = node_->previewSize;
+        resizeStartScale_ = imagePreviewScaleForSize(QFileInfo(node_->path), node_->previewSize, false);
+        resizeCurrentScale_ = resizeStartScale_;
+        setFlag(QGraphicsItem::ItemIsMovable, false);
+        event->accept();
+        return;
+    }
+
+    dragStart_ = pos();
+    pressStartScene_ = event->scenePos();
+    if (event->button() == Qt::LeftButton) {
+        window_->recordDebugEvent(QStringLiteral("node press: %1 local=(%2,%3) scene=(%4,%5)")
+                                      .arg(node_ ? node_->path : QStringLiteral("(null)"))
+                                      .arg(event->pos().x(), 0, 'f', 1)
+                                      .arg(event->pos().y(), 0, 'f', 1)
+                                      .arg(event->scenePos().x(), 0, 'f', 1)
+                                      .arg(event->scenePos().y(), 0, 'f', 1));
+        setOpacity(0.72);
+        setZValue(100.0);
+    }
+    QGraphicsItem::mousePressEvent(event);
+}
+
 void NodeItem::mouseReleaseEvent(QGraphicsSceneMouseEvent* event)
 {
     if (resizingPreview_) {
         resizingPreview_ = false;
         setFlag(QGraphicsItem::ItemIsMovable, true);
-        resizePreview(node_->previewSize);
+        if (isImagePreviewFile(QFileInfo(node_->path))) {
+            resizeImagePreview(resizeCurrentScale_);
+        } else {
+            resizePreview(node_->previewSize, resizePreferHeight_);
+        }
         event->accept();
         return;
     }
 
     QGraphicsItem::mouseReleaseEvent(event);
-    if ((pos() - dragStart_).manhattanLength() < 16.0) {
+    const qreal mouseMoveDistance = QLineF(pressStartScene_, event->scenePos()).length();
+    if (event->button() == Qt::LeftButton) {
+        window_->recordDebugEvent(QStringLiteral("node release: %1 mouseMove=%2 itemMove=%3")
+                                      .arg(node_ ? node_->path : QStringLiteral("(null)"))
+                                      .arg(mouseMoveDistance, 0, 'f', 1)
+                                      .arg(QLineF(dragStart_, pos()).length(), 0, 'f', 1));
+    }
+    if (mouseMoveDistance < 8.0) {
         window_->clearInternalDropHover();
         window_->clearLinkDropHover();
         window_->clearDragPreview();
@@ -8273,8 +8702,24 @@ void NodeItem::mouseMoveEvent(QGraphicsSceneMouseEvent* event)
     if (resizingPreview_) {
         prepareGeometryChange();
         const QPointF delta = event->scenePos() - resizeStartScene_;
-        node_->previewSize = QSizeF(std::clamp(resizeStartSize_.width() + delta.x(), 260.0, 900.0),
-                                    std::clamp(resizeStartSize_.height() + delta.y(), 110.0, 520.0));
+        const QFileInfo info(node_->path);
+        if (isImagePreviewFile(info)) {
+            const bool preferHeight = std::abs(delta.y()) > std::abs(delta.x());
+            const QSizeF targetSize = preferHeight
+                                          ? QSizeF(resizeStartSize_.width(),
+                                                   resizeStartSize_.height() + delta.y())
+                                          : QSizeF(resizeStartSize_.width() + delta.x(),
+                                                   resizeStartSize_.height());
+            resizeCurrentScale_ = imagePreviewScaleForSize(info, targetSize, preferHeight);
+            node_->previewSize = imagePreviewSizeForScale(info, resizeCurrentScale_);
+            resizeCurrentScale_ = imagePreviewScaleForSize(info, node_->previewSize, false);
+        } else {
+            resizePreferHeight_ = std::abs(delta.y()) > std::abs(delta.x());
+            node_->previewSize = clampedPreviewSizeForFile(info,
+                                                           QSizeF(resizeStartSize_.width() + delta.x(),
+                                                                  resizeStartSize_.height() + delta.y()),
+                                                           resizePreferHeight_);
+        }
         syncPreviewWidgetGeometry();
         update();
         event->accept();
