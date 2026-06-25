@@ -28,5 +28,14 @@ elif [[ -d "/Users/fuk/Qt/6.11.1/macos" ]]; then
     CMAKE_ARGS+=(-DCMAKE_PREFIX_PATH="/Users/fuk/Qt/6.11.1/macos")
 fi
 
+APP_BUNDLE="$BUILD_DIR/Mycel.app"
+if [[ -e "$APP_BUNDLE" && ! -w "$APP_BUNDLE" ]]; then
+    echo "$APP_BUNDLE is not writable by the current user." >&2
+    echo "Run one of these commands, then build again:" >&2
+    echo "  sudo chown -R \"\$USER\":staff \"$APP_BUNDLE\"" >&2
+    echo "  sudo rm -rf \"$APP_BUNDLE\"" >&2
+    exit 1
+fi
+
 "$CMAKE_BIN" "${CMAKE_ARGS[@]}"
 "$CMAKE_BIN" --build "$BUILD_DIR" --config "$BUILD_TYPE"

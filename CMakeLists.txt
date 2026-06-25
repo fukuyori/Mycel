@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(Mycel VERSION 0.3.3 LANGUAGES CXX)
+project(Mycel VERSION 0.3.4 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,6 +15,23 @@ add_executable(mycel
     src/main.cpp
     assets/mycel.qrc
 )
+
+if(APPLE)
+    target_sources(mycel PRIVATE assets/mycel.icns)
+    set_source_files_properties(assets/mycel.icns PROPERTIES
+        MACOSX_PACKAGE_LOCATION Resources
+    )
+    set_target_properties(mycel PROPERTIES
+        MACOSX_BUNDLE TRUE
+        OUTPUT_NAME Mycel
+        MACOSX_BUNDLE_BUNDLE_NAME Mycel
+        MACOSX_BUNDLE_GUI_IDENTIFIER org.spumoni.mycel
+        MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
+        MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION}
+        MACOSX_BUNDLE_ICON_FILE mycel.icns
+        MACOSX_BUNDLE_COPYRIGHT "Copyright (c) 2026 Noriaki Fukuyori"
+    )
+endif()
 
 if(WIN32)
     target_sources(mycel PRIVATE assets/mycel.rc)

@@ -1,7 +1,7 @@
 {
     "scroll": {
-        "horizontal": -676,
-        "vertical": -499
+        "horizontal": -717,
+        "vertical": 618
     },
     "transform": {
         "m11": 0.9780260050392205,
@@ -21,7 +21,7 @@
             "height": 820,
             "width": 1280,
             "x": 245,
-            "y": 230
+            "y": 262
         },
         "maximized": true
     }

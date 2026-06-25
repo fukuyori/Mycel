@@ -1686,6 +1686,11 @@ public:
         setConfiguredPointSize(configuredPointSize() + delta);
     }
 
+    static void resetConfiguredPointSize()
+    {
+        setConfiguredPointSize(DefaultPointSize);
+    }
+
 private:
     static constexpr int DefaultPointSize = 10;
     static constexpr int MinPointSize = 7;
@@ -1732,6 +1737,52 @@ private:
     }
 };
 
+bool handleTextZoomKey(QKeyEvent* event)
+{
+    if (!event || !(event->modifiers() & Qt::ControlModifier)) {
+        return false;
+    }
+
+    switch (event->key()) {
+    case Qt::Key_Plus:
+    case Qt::Key_Equal:
+        TextFontSettings::changeConfiguredPointSize(1);
+        event->accept();
+        return true;
+    case Qt::Key_Minus:
+    case Qt::Key_Underscore:
+        TextFontSettings::changeConfiguredPointSize(-1);
+        event->accept();
+        return true;
+    case Qt::Key_0:
+        TextFontSettings::resetConfiguredPointSize();
+        event->accept();
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool handleTextZoomGesture(QEvent* event, qreal& accumulatedZoom)
+{
+    if (!event || event->type() != QEvent::NativeGesture) {
+        return false;
+    }
+
+    auto* gesture = static_cast<QNativeGestureEvent*>(event);
+    if (gesture->gestureType() != Qt::ZoomNativeGesture) {
+        return false;
+    }
+
+    accumulatedZoom += gesture->value();
+    if (std::abs(accumulatedZoom) >= 0.08) {
+        TextFontSettings::changeConfiguredPointSize(accumulatedZoom > 0.0 ? 1 : -1);
+        accumulatedZoom = 0.0;
+    }
+    event->accept();
+    return true;
+}
+
 class PreviewText final : public QTextEdit {
 public:
     explicit PreviewText(QWidget* parent = nullptr) : QTextEdit(parent)
@@ -1745,6 +1796,22 @@ public:
     }
 
 protected:
+    bool event(QEvent* event) override
+    {
+        if (handleTextZoomGesture(event, accumulatedZoom_)) {
+            return true;
+        }
+        return QTextEdit::event(event);
+    }
+
+    void keyPressEvent(QKeyEvent* event) override
+    {
+        if (handleTextZoomKey(event)) {
+            return;
+        }
+        QTextEdit::keyPressEvent(event);
+    }
+
     void wheelEvent(QWheelEvent* event) override
     {
         if (event->modifiers() & Qt::ControlModifier) {
@@ -1759,6 +1826,9 @@ protected:
         }
         QTextEdit::wheelEvent(event);
     }
+
+private:
+    qreal accumulatedZoom_ = 0.0;
 };
 
 class TextEditor final : public QPlainTextEdit {
@@ -1774,6 +1844,22 @@ public:
     }
 
 protected:
+    bool event(QEvent* event) override
+    {
+        if (handleTextZoomGesture(event, accumulatedZoom_)) {
+            return true;
+        }
+        return QPlainTextEdit::event(event);
+    }
+
+    void keyPressEvent(QKeyEvent* event) override
+    {
+        if (handleTextZoomKey(event)) {
+            return;
+        }
+        QPlainTextEdit::keyPressEvent(event);
+    }
+
     void wheelEvent(QWheelEvent* event) override
     {
         if (event->modifiers() & Qt::ControlModifier) {
@@ -1788,6 +1874,9 @@ protected:
         }
         QPlainTextEdit::wheelEvent(event);
     }
+
+private:
+    qreal accumulatedZoom_ = 0.0;
 };
 
 class TextEditorDialog final : public QDialog {
@@ -1984,6 +2073,10 @@ public:
         sidePreviewStack_->addWidget(sidePreviewImage_);
         sidePreviewStack_->addWidget(sidePreviewVideo_);
         sidePreviewStack_->addWidget(sideEditor_);
+        sidePreviewText_->installEventFilter(this);
+        sidePreviewText_->viewport()->installEventFilter(this);
+        sidePreviewImage_->installEventFilter(this);
+        sidePreviewVideo_->installEventFilter(this);
         sidePreviewAudioOutput_ = new QAudioOutput(this);
         sidePreviewAudioOutput_->setMuted(true);
         sidePreviewPlayer_ = new QMediaPlayer(this);
@@ -2353,21 +2446,48 @@ public:
     bool focusEditorForSelectedFile()
     {
         Node* node = singleSelectedNode();
+        if (!node) {
+            return false;
+        }
+        return focusEditorForNode(node);
+    }
+
+    bool focusEditorForNode(Node* node)
+    {
         if (!canEditTextFile(node)) {
             return false;
         }
+        return focusEditorForPath(node->path);
+    }
 
+    bool focusEditorForPath(const QString& path)
+    {
+        if (path.isEmpty()) {
+            return false;
+        }
+        const QFileInfo info(path);
+        if (!info.exists() || !info.isFile() || !isTextPreviewFile(info) || info.size() > 4 * 1024 * 1024) {
+            return false;
+        }
         if (editorPaneAction_ && !editorPaneAction_->isChecked()) {
             editorPaneAction_->setChecked(true);
         } else {
             sideEditorPanel_->setVisible(true);
             updateSideEditorForSelection();
         }
-        loadSideEditorFile(node->path);
+        selectNodePath(path);
+        loadSideEditorFile(path);
         sideEditorStatusLabel_->setText(QStringLiteral("編集中"));
-        sideEditor_->setFocus(Qt::ShortcutFocusReason);
+        sideEditor_->setFocus(Qt::MouseFocusReason);
         sideEditor_->moveCursor(QTextCursor::End);
         return true;
+    }
+
+    void focusBoard()
+    {
+        if (view_) {
+            view_->setFocus(Qt::MouseFocusReason);
+        }
     }
 
     void saveSideEditorFromShortcut(bool returnFocusToFile)
@@ -4892,6 +5012,19 @@ public:
 
     bool eventFilter(QObject* watched, QEvent* event) override
     {
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (mouseEvent->button() == Qt::LeftButton) {
+                const QString inlinePreviewPath = watched->property("mycelPreviewPath").toString();
+                if (!inlinePreviewPath.isEmpty()) {
+                    return focusEditorForPath(inlinePreviewPath);
+                }
+                if ((watched == sidePreviewText_ || watched == sidePreviewText_->viewport()) &&
+                    !sideEditorPath_.isEmpty()) {
+                    return focusEditorForPath(sideEditorPath_);
+                }
+            }
+        }
         if (watched == renameEdit_ && event->type() == QEvent::KeyPress) {
             auto* keyEvent = static_cast<QKeyEvent*>(event);
             if (keyEvent->key() == Qt::Key_Escape) {
@@ -6481,6 +6614,7 @@ void NodeItem::createPreviewWidget()
     }
 
     auto* textEdit = new QTextEdit;
+    textEdit->setProperty("mycelPreviewPath", node_->path);
     textEdit->setReadOnly(true);
     textEdit->setUndoRedoEnabled(false);
     textEdit->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
@@ -6490,6 +6624,9 @@ void NodeItem::createPreviewWidget()
     textEdit->setFrameStyle(0);
     textEdit->setAttribute(Qt::WA_TranslucentBackground);
     textEdit->viewport()->setAttribute(Qt::WA_TranslucentBackground);
+    textEdit->viewport()->setProperty("mycelPreviewPath", node_->path);
+    textEdit->installEventFilter(window_);
+    textEdit->viewport()->installEventFilter(window_);
     textEdit->viewport()->setAutoFillBackground(false);
     textEdit->document()->setDocumentMargin(8.0);
     textEdit->document()->setDefaultStyleSheet(QStringLiteral("* { color: #243036; } a { color: #1168b3; }"));
@@ -6617,6 +6754,7 @@ void NodeItem::mouseReleaseEvent(QGraphicsSceneMouseEvent* event)
         if (event->button() == Qt::LeftButton && scene()) {
             scene()->clearSelection();
             setSelected(true);
+            window_->focusBoard();
             event->accept();
             return;
         }
@@ -6700,12 +6838,17 @@ void NodeItem::mouseMoveEvent(QGraphicsSceneMouseEvent* event)
 void NodeItem::mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event)
 {
     window_->cancelQueuedInlinePreviewToggle();
-    QGraphicsItem::mouseDoubleClickEvent(event);
+    if (scene()) {
+        scene()->clearSelection();
+        setSelected(true);
+    }
     if (node_->isDir) {
         window_->toggleCollapsed(node_);
     } else {
         window_->toggleInlinePreview(node_);
     }
+    window_->focusBoard();
+    event->accept();
 }
 
 }  // namespace
