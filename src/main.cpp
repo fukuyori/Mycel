@@ -32,6 +32,7 @@
 #include <QtGui/QBrush>
 #include <QtGui/QActionGroup>
 #include <QtGui/QColor>
+#include <QtGui/QContextMenuEvent>
 #include <QtGui/QDesktopServices>
 #include <QtGui/QFont>
 #include <QtGui/QFontMetricsF>
@@ -1248,9 +1249,9 @@ public:
                          node_->size.width(), node_->size.height());
         return mapRectToScene(QRectF(box.right() - 28.0, box.top() - 3.0, 34.0, box.height() + 6.0));
     }
-    bool containsLinkDropScenePoint(const QPointF& scenePos) const
+    bool containsLinkDropScenePoint(const QPointF& scenePos, qreal margin = 0.0) const
     {
-        return linkDropSceneRect().contains(scenePos);
+        return linkDropSceneRect().adjusted(-margin, -margin, margin, margin).contains(scenePos);
     }
     bool canResizeImagePreviewAtScene(const QPointF& scenePos) const
     {
@@ -1292,6 +1293,10 @@ public:
     {
         return node_ ? node_->previewSize : QSizeF();
     }
+    void showContextMenuAt(const QPoint& screenPos);
+    void beginFallbackDragAtScene(const QPointF& scenePos);
+    void updateFallbackDragAtScene(const QPointF& scenePos);
+    void finishFallbackDragAtScene(Qt::MouseButton button, const QPointF& scenePos);
     void applyImagePreviewScale(qreal scale)
     {
         if (!node_ || node_->isDir || !isImagePreviewFile(QFileInfo(node_->path))) {
@@ -1495,6 +1500,8 @@ private:
     bool hasUserFill() const;
     QStringList windowInlinePreviewLines() const;
     QString windowMarkdownPreviewText() const;
+    void updateDragAtScene(const QPointF& scenePos);
+    void finishDragAtScene(Qt::MouseButton button, const QPointF& scenePos);
     void resizePreview(const QSizeF& size, bool preferHeight);
     void resizeImagePreview(qreal scale);
     void createPreviewWidget();
@@ -1891,6 +1898,22 @@ protected:
         return QGraphicsView::event(event);
     }
 
+    void contextMenuEvent(QContextMenuEvent* event) override
+    {
+        if (itemAt(event->pos()) == nullptr) {
+            if (NodeItem* nodeItem = nodeItemAt(event->pos())) {
+                if (!nodeItem->isSelected()) {
+                    selectNodeItemFromFallbackHit(nodeItem);
+                    notifyDebug(QStringLiteral("view fallback context selected node: %1").arg(nodeItem->path()));
+                }
+                nodeItem->showContextMenuAt(event->globalPos());
+                event->accept();
+                return;
+            }
+        }
+        QGraphicsView::contextMenuEvent(event);
+    }
+
     void mousePressEvent(QMouseEvent* event) override
     {
         if (event->button() == Qt::LeftButton) {
@@ -1916,6 +1939,8 @@ protected:
                 }
                 if (!directItemHit) {
                     selectNodeItemFromFallbackHit(nodeItem);
+                    fallbackDragPath_ = nodeItem->path();
+                    nodeItem->beginFallbackDragAtScene(scenePos);
                     notifyDebug(QStringLiteral("view fallback selected node: %1").arg(nodeItem->path()));
                     event->accept();
                     return;
@@ -1924,7 +1949,9 @@ protected:
                 notifyDebug(QStringLiteral("image resize candidate: no NodeItem"));
             }
         }
-        const bool rightButtonCanvasPan = event->button() == Qt::RightButton && itemAt(event->pos()) == nullptr;
+        const bool rightButtonCanvasPan = event->button() == Qt::RightButton &&
+                                          itemAt(event->pos()) == nullptr &&
+                                          nodeItemAt(event->pos()) == nullptr;
         if ((event->button() == Qt::MiddleButton) ||
             rightButtonCanvasPan ||
             (event->button() == Qt::LeftButton && (event->modifiers() & Qt::AltModifier))) {
@@ -1947,6 +1974,15 @@ protected:
 
     void mouseMoveEvent(QMouseEvent* event) override
     {
+        if (!fallbackDragPath_.isEmpty()) {
+            if (NodeItem* dragItem = nodeItemForPath(fallbackDragPath_)) {
+                dragItem->updateFallbackDragAtScene(mapToScene(event->pos()));
+            } else {
+                fallbackDragPath_.clear();
+            }
+            event->accept();
+            return;
+        }
         if (!imageResizePath_.isEmpty()) {
             NodeItem* resizeItem = nodeItemForPath(imageResizePath_);
             if (!resizeItem) {
@@ -1986,6 +2022,14 @@ protected:
 
     void mouseReleaseEvent(QMouseEvent* event) override
     {
+        if (event->button() == Qt::LeftButton && !fallbackDragPath_.isEmpty()) {
+            if (NodeItem* dragItem = nodeItemForPath(fallbackDragPath_)) {
+                dragItem->finishFallbackDragAtScene(event->button(), mapToScene(event->pos()));
+            }
+            fallbackDragPath_.clear();
+            event->accept();
+            return;
+        }
         if (event->button() == Qt::LeftButton && !imageResizePath_.isEmpty()) {
             if (NodeItem* resizeItem = nodeItemForPath(imageResizePath_)) {
                 resizeItem->saveImagePreviewScale(imageResizeCurrentScale_);
@@ -2255,6 +2299,7 @@ private:
 
     bool panning_ = false;
     QString imageResizePath_;
+    QString fallbackDragPath_;
     QPointF imageResizeStartScene_;
     QSizeF imageResizeStartSize_;
     qreal imageResizeStartScale_ = 1.0;
@@ -5080,17 +5125,18 @@ public:
 
     NodeItem* linkTargetItemForDrop(const NodeItem* source, const QPointF& scenePos) const
     {
+        constexpr qreal LinkDropIntentMargin = 72.0;
         if (!mycelStorageEnabled_ || !source || !source->node() || source->node()->isDir ||
             isMultiDragSelection(source)) {
             return nullptr;
         }
 
-        for (QGraphicsItem* item : scene_.items(scenePos)) {
+        for (QGraphicsItem* item : scene_.items()) {
             auto* candidate = dynamic_cast<NodeItem*>(item);
             if (!candidate || candidate == source || !candidate->node() || candidate->node()->isDir) {
                 continue;
             }
-            if (candidate->containsLinkDropScenePoint(scenePos)) {
+            if (candidate->containsLinkDropScenePoint(scenePos, LinkDropIntentMargin)) {
                 return candidate;
             }
         }
@@ -8185,6 +8231,12 @@ private:
 
 void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
 {
+    showContextMenuAt(event->screenPos());
+    event->accept();
+}
+
+void NodeItem::showContextMenuAt(const QPoint& screenPos)
+{
     QPointer<MainWindow> window = window_;
     if (!window) {
         return;
@@ -8216,7 +8268,7 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
         QAction* copySelectionAction = menu.addAction(QStringLiteral("コピー"));
         QAction* deleteSelectionAction = menu.addAction(QStringLiteral("削除"));
 
-        QAction* selected = menu.exec(event->screenPos());
+        QAction* selected = menu.exec(screenPos);
         if (selected == previewSelectionAction) {
             QTimer::singleShot(0, window, [window, selectedFilePaths] {
                 if (window) {
@@ -8259,7 +8311,7 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
         QAction* clearColorAction = nullptr;
         addColorMenu(menu, colorActions, clearColorAction);
         QAction* openAction = menu.addAction(QStringLiteral("開く"));
-        QAction* selected = menu.exec(event->screenPos());
+        QAction* selected = menu.exec(screenPos);
         const QString command = selected ? selected->data().toString() : QString();
         if (command == QStringLiteral("create-file")) {
             QTimer::singleShot(0, window, [window, folderPath] {
@@ -8341,7 +8393,7 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
         QAction* clearColorAction = nullptr;
         addColorMenu(menu, colorActions, clearColorAction);
         QAction* openAction = menu.addAction(QStringLiteral("開く"));
-        QAction* selected = menu.exec(event->screenPos());
+        QAction* selected = menu.exec(screenPos);
         if (selected == previewAction) {
             QTimer::singleShot(0, window, [window, filePath] {
                 if (window) {
@@ -8434,6 +8486,25 @@ void NodeItem::resizePreview(const QSizeF& size, bool preferHeight)
 void NodeItem::resizeImagePreview(qreal scale)
 {
     window_->setImagePreviewScale(node_, scale);
+}
+
+void NodeItem::beginFallbackDragAtScene(const QPointF& scenePos)
+{
+    dragStart_ = pos();
+    pressStartScene_ = scenePos;
+    setOpacity(0.72);
+    setZValue(100.0);
+}
+
+void NodeItem::updateFallbackDragAtScene(const QPointF& scenePos)
+{
+    setPos(dragStart_ + (scenePos - pressStartScene_));
+    updateDragAtScene(scenePos);
+}
+
+void NodeItem::finishFallbackDragAtScene(Qt::MouseButton button, const QPointF& scenePos)
+{
+    finishDragAtScene(button, scenePos);
 }
 
 void NodeItem::createPreviewWidget()
@@ -8634,8 +8705,13 @@ void NodeItem::mouseReleaseEvent(QGraphicsSceneMouseEvent* event)
     }
 
     QGraphicsItem::mouseReleaseEvent(event);
-    const qreal mouseMoveDistance = QLineF(pressStartScene_, event->scenePos()).length();
-    if (event->button() == Qt::LeftButton) {
+    finishDragAtScene(event->button(), event->scenePos());
+}
+
+void NodeItem::finishDragAtScene(Qt::MouseButton button, const QPointF& scenePos)
+{
+    const qreal mouseMoveDistance = QLineF(pressStartScene_, scenePos).length();
+    if (button == Qt::LeftButton) {
         window_->recordDebugEvent(QStringLiteral("node release: %1 mouseMove=%2 itemMove=%3")
                                       .arg(node_ ? node_->path : QStringLiteral("(null)"))
                                       .arg(mouseMoveDistance, 0, 'f', 1)
@@ -8646,17 +8722,16 @@ void NodeItem::mouseReleaseEvent(QGraphicsSceneMouseEvent* event)
         window_->clearLinkDropHover();
         window_->clearDragPreview();
         window_->setDragVisuals(this, 1.0, 10.0);
-        if (event->button() == Qt::LeftButton && scene()) {
+        if (button == Qt::LeftButton && scene()) {
             scene()->clearSelection();
             setSelected(true);
             window_->focusBoard();
-            event->accept();
             return;
         }
         return;
     }
 
-    NodeItem* linkTarget = window_->linkTargetItemForDrop(this, event->scenePos());
+    NodeItem* linkTarget = window_->linkTargetItemForDrop(this, scenePos);
     if (linkTarget) {
         window_->clearInternalDropHover();
         window_->clearLinkDropHover();
@@ -8720,6 +8795,11 @@ void NodeItem::mouseMoveEvent(QGraphicsSceneMouseEvent* event)
     }
 
     QGraphicsItem::mouseMoveEvent(event);
+    updateDragAtScene(event->scenePos());
+}
+
+void NodeItem::updateDragAtScene(const QPointF& scenePos)
+{
     if ((pos() - dragStart_).manhattanLength() >= 16.0) {
         const bool multiDrag = window_->isMultiDragSelection(this);
         if (multiDrag) {
@@ -8728,7 +8808,7 @@ void NodeItem::mouseMoveEvent(QGraphicsSceneMouseEvent* event)
         } else if (node_->isDir) {
             window_->previewMoveDescendants(node_, pos() - layoutCenter_);
         }
-        if (window_->updateLinkDropHover(this, event->scenePos())) {
+        if (window_->updateLinkDropHover(this, scenePos)) {
             window_->clearInternalDropHover();
             window_->clearDragPreviewForSource(this);
             return;
