@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(Mycel VERSION 0.3.5 LANGUAGES CXX)
+project(Mycel VERSION 0.3.6 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,7 +9,14 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia MultimediaWidgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Network Multimedia MultimediaWidgets)
+find_package(Qt6Quick QUIET CONFIG)
+find_package(Qt6QuickWidgets QUIET CONFIG)
+find_package(Qt6PrintSupport QUIET CONFIG)
+find_package(Qt6WebChannel QUIET CONFIG)
+find_package(Qt6Positioning QUIET CONFIG)
+find_package(Qt6WebEngineCore QUIET CONFIG)
+find_package(Qt6WebEngineWidgets QUIET CONFIG)
 
 add_executable(mycel
     src/main.cpp
@@ -38,7 +45,14 @@ if(WIN32)
     set_target_properties(mycel PROPERTIES WIN32_EXECUTABLE ON)
 endif()
 
-target_link_libraries(mycel PRIVATE Qt6::Widgets Qt6::Multimedia Qt6::MultimediaWidgets)
+target_link_libraries(mycel PRIVATE Qt6::Widgets Qt6::Network Qt6::Multimedia Qt6::MultimediaWidgets)
+
+if(TARGET Qt6::WebEngineWidgets)
+    target_link_libraries(mycel PRIVATE Qt6::WebEngineWidgets)
+    target_compile_definitions(mycel PRIVATE MYCEL_HAS_WEBENGINE=1)
+else()
+    target_compile_definitions(mycel PRIVATE MYCEL_HAS_WEBENGINE=0)
+endif()
 
 target_compile_definitions(mycel PRIVATE
     MYCEL_VERSION=\"${PROJECT_VERSION}\"

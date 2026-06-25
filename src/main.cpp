@@ -12,17 +12,22 @@
 #include <QtCore/QJsonObject>
 #include <QtCore/QMimeData>
 #include <QtCore/QPointF>
+#include <QtCore/QPointer>
 #include <QtCore/QRectF>
+#include <QtCore/QRegularExpression>
 #include <QtCore/QSettings>
 #include <QtCore/QSet>
 #include <QtCore/QSizeF>
 #include <QtCore/QString>
 #include <QtCore/QStringList>
 #include <QtCore/QTextStream>
+#include <QtCore/QTime>
 #include <QtCore/QTimer>
 #include <QtCore/QUrl>
+#include <QtCore/QUrlQuery>
 #include <QtCore/QVariant>
 #include <QtCore/QVector>
+#include <QtCore/qtenvironmentvariables.h>
 #include <QtGui/QTransform>
 #include <QtGui/QBrush>
 #include <QtGui/QActionGroup>
@@ -38,6 +43,7 @@
 #include <QtGui/QKeySequence>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QNativeGestureEvent>
+#include <QtGui/QPaintEvent>
 #include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
 #include <QtGui/QPen>
@@ -52,8 +58,16 @@
 #include <QtMultimedia/QAudioOutput>
 #include <QtMultimedia/QMediaPlayer>
 #include <QtMultimediaWidgets/QVideoWidget>
+#include <QtNetwork/QNetworkAccessManager>
+#include <QtNetwork/QNetworkReply>
+#include <QtNetwork/QNetworkRequest>
+#if MYCEL_HAS_WEBENGINE
+#include <QtWebEngineCore/QWebEngineSettings>
+#include <QtWebEngineWidgets/QWebEngineView>
+#endif
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QDialog>
+#include <QtWidgets/QDockWidget>
 #include <QtWidgets/QFileDialog>
 #include <QtWidgets/QGraphicsItem>
 #include <QtWidgets/QGraphicsProxyWidget>
@@ -72,6 +86,7 @@
 #include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QScrollBar>
+#include <QtWidgets/QSlider>
 #include <QtWidgets/QSplitter>
 #include <QtWidgets/QStackedWidget>
 #include <QtWidgets/QTextEdit>
@@ -83,6 +98,7 @@
 #include <cmath>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -235,12 +251,49 @@ bool isHtmlPreviewFile(const QFileInfo& info);
 bool isCsvPreviewFile(const QFileInfo& info);
 bool isImagePreviewFile(const QFileInfo& info);
 bool isVideoPreviewFile(const QFileInfo& info);
+std::optional<QString> youtubeEmbedUrlForFile(const QFileInfo& info);
 
 QSizeF automaticPreviewSize(const QFileInfo& info)
 {
     constexpr qreal width = 460.0;
     constexpr qreal minHeight = 46.0;
     constexpr qreal maxHeight = 320.0;
+
+    if (isImagePreviewFile(info)) {
+        QImageReader reader(info.absoluteFilePath());
+        QSize imageSize = reader.size();
+        if (!imageSize.isValid()) {
+            const QPixmap pixmap(info.absoluteFilePath());
+            imageSize = pixmap.size();
+        }
+        if (!imageSize.isValid() || imageSize.isEmpty()) {
+            return QSizeF(width, 260.0);
+        }
+
+        constexpr qreal minWidth = 260.0;
+        constexpr qreal minImageHeight = 150.0;
+        constexpr qreal maxWidth = 720.0;
+        constexpr qreal maxImageHeight = 440.0;
+        const qreal imageWidth = imageSize.width();
+        const qreal imageHeight = imageSize.height();
+        qreal scale = std::min(maxWidth / imageWidth, maxImageHeight / imageHeight);
+        if (imageWidth < minWidth || imageHeight < minImageHeight) {
+            scale = std::max(scale, std::max(minWidth / imageWidth, minImageHeight / imageHeight));
+        }
+        scale = std::clamp(scale, 0.05, 3.0);
+
+        qreal previewWidth = std::clamp(imageWidth * scale, minWidth, maxWidth);
+        qreal previewHeight = std::clamp(imageHeight * scale, minImageHeight, maxImageHeight);
+        return QSizeF(previewWidth, previewHeight);
+    }
+
+    if (isVideoPreviewFile(info)) {
+        return QSizeF(520.0, 300.0);
+    }
+
+    if (youtubeEmbedUrlForFile(info)) {
+        return QSizeF(560.0, 340.0);
+    }
 
     if (isMarkdownPreviewFile(info)) {
         QFile file(info.absoluteFilePath());
@@ -269,7 +322,7 @@ QSizeF automaticPreviewSize(const QFileInfo& info)
         return QSizeF(width, std::clamp(doc.size().height() + 24.0, minHeight, maxHeight));
     }
 
-    if (isImagePreviewFile(info) || info.suffix().compare(QStringLiteral("pdf"), Qt::CaseInsensitive) == 0 ||
+    if (info.suffix().compare(QStringLiteral("pdf"), Qt::CaseInsensitive) == 0 ||
         !isTextPreviewFile(info) || info.size() > 1024 * 1024) {
         return QSizeF(width, minHeight);
     }
@@ -441,7 +494,8 @@ qreal nodeContentRightX(const Node& node)
 {
     qreal right = node.center.x() + node.size.width() / 2.0;
     if (node.previewOpen) {
-        const qreal previewRight = node.center.x() - node.size.width() / 2.0 + 40.0 + node.previewSize.width();
+        const qreal previewRight = node.center.x() - node.size.width() / 2.0 +
+                                   std::max(node.size.width(), node.previewSize.width());
         right = std::max(right, previewRight);
     }
     return right;
@@ -493,6 +547,115 @@ bool isDescendantPath(const QString& ancestor, const QString& candidate)
     return !base.isEmpty() && !child.isEmpty() && child != base && child.startsWith(base + QLatin1Char('/'));
 }
 
+QString youtubeVideoIdFromUrl(const QUrl& url)
+{
+    if (!url.isValid()) {
+        return {};
+    }
+
+    QString host = url.host().toLower();
+    if (host.startsWith(QStringLiteral("www."))) {
+        host.remove(0, 4);
+    }
+    const QStringList parts = url.path().split(QLatin1Char('/'), Qt::SkipEmptyParts);
+
+    QString videoId;
+    if (host == QStringLiteral("youtu.be")) {
+        if (!parts.isEmpty()) {
+            videoId = parts.first();
+        }
+    } else if (host == QStringLiteral("youtube.com") || host.endsWith(QStringLiteral(".youtube.com"))) {
+        if (url.path() == QStringLiteral("/watch")) {
+            videoId = QUrlQuery(url).queryItemValue(QStringLiteral("v"));
+        } else if (parts.size() >= 2 &&
+                   (parts[0] == QStringLiteral("shorts") ||
+                    parts[0] == QStringLiteral("embed") ||
+                    parts[0] == QStringLiteral("live"))) {
+            videoId = parts[1];
+        }
+    }
+
+    videoId = videoId.trimmed();
+    if (videoId.contains(QLatin1Char('?')) || videoId.contains(QLatin1Char('&'))) {
+        videoId = videoId.left(videoId.indexOf(QRegularExpression(QStringLiteral("[?&]"))));
+    }
+    if (videoId.size() < 6 || videoId.size() > 32) {
+        return {};
+    }
+    return videoId;
+}
+
+std::optional<QString> youtubeEmbedUrlFromText(const QString& text)
+{
+    static const QRegularExpression urlPattern(
+        QStringLiteral(R"((?:URL\s*=\s*)?(https?://[^\s<>"'\]\)]+))"),
+        QRegularExpression::CaseInsensitiveOption);
+
+    QRegularExpressionMatchIterator it = urlPattern.globalMatch(text);
+    while (it.hasNext()) {
+        QString token = it.next().captured(1).trimmed();
+        token.remove(QRegularExpression(QStringLiteral("[>,。]+$")));
+        QUrl url(token);
+        if (!url.isValid() || url.scheme().isEmpty()) {
+            continue;
+        }
+        const QString videoId = youtubeVideoIdFromUrl(url);
+        if (!videoId.isEmpty()) {
+            return QStringLiteral("https://www.youtube.com/embed/%1").arg(videoId);
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<QUrl> firstUrlFromText(const QString& text)
+{
+    static const QRegularExpression urlPattern(
+        QStringLiteral(R"((?:URL\s*=\s*)?(https?://[^\s<>"'\]\)]+))"),
+        QRegularExpression::CaseInsensitiveOption);
+
+    const QRegularExpressionMatch match = urlPattern.match(text);
+    if (!match.hasMatch()) {
+        return std::nullopt;
+    }
+
+    QString token = match.captured(1).trimmed();
+    token.remove(QRegularExpression(QStringLiteral("[>,。]+$")));
+    QUrl url(token);
+    if (!url.isValid() || url.scheme().isEmpty()) {
+        return std::nullopt;
+    }
+    return url;
+}
+
+QString youtubeWatchUrlFromEmbedUrl(const QString& embedUrl)
+{
+    const QString videoId = youtubeVideoIdFromUrl(QUrl(embedUrl));
+    return videoId.isEmpty() ? embedUrl : QStringLiteral("https://www.youtube.com/watch?v=%1").arg(videoId);
+}
+
+QString youtubeThumbnailUrlFromEmbedUrl(const QString& embedUrl)
+{
+    const QString videoId = youtubeVideoIdFromUrl(QUrl(embedUrl));
+    return videoId.isEmpty() ? QString() : QStringLiteral("https://img.youtube.com/vi/%1/hqdefault.jpg").arg(videoId);
+}
+
+QString youtubeVideoIdFromEmbedUrl(const QString& embedUrl)
+{
+    return youtubeVideoIdFromUrl(QUrl(embedUrl));
+}
+
+std::optional<QString> youtubeEmbedUrlForFile(const QFileInfo& info)
+{
+    if (!info.exists() || !info.isFile() || info.size() > 64 * 1024) {
+        return std::nullopt;
+    }
+    QFile file(info.absoluteFilePath());
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return std::nullopt;
+    }
+    return youtubeEmbedUrlFromText(QString::fromUtf8(file.read(64 * 1024)));
+}
+
 bool isTextPreviewFile(const QFileInfo& info)
 {
     static const QSet<QString> extensions = {
@@ -503,7 +666,7 @@ bool isTextPreviewFile(const QFileInfo& info)
         QStringLiteral("yaml"), QStringLiteral("yml"), QStringLiteral("toml"),
         QStringLiteral("js"), QStringLiteral("ts"), QStringLiteral("css"),
         QStringLiteral("html"), QStringLiteral("htm"), QStringLiteral("markdown"),
-        QStringLiteral("csv"), QStringLiteral("sh")
+        QStringLiteral("csv"), QStringLiteral("sh"), QStringLiteral("url")
     };
     return extensions.contains(info.suffix().toLower()) || info.fileName() == QStringLiteral("CMakeLists.txt");
 }
@@ -736,10 +899,11 @@ QString normalizedDirectoryPath(const QString& path)
 bool textInputWidgetHasFocus()
 {
     for (QWidget* widget = QApplication::focusWidget(); widget; widget = widget->parentWidget()) {
-        if (qobject_cast<QLineEdit*>(widget) ||
-            qobject_cast<QPlainTextEdit*>(widget) ||
-            qobject_cast<QTextEdit*>(widget)) {
+        if (qobject_cast<QLineEdit*>(widget) || qobject_cast<QPlainTextEdit*>(widget)) {
             return true;
+        }
+        if (auto* textEdit = qobject_cast<QTextEdit*>(widget)) {
+            return !textEdit->isReadOnly();
         }
     }
     return false;
@@ -1047,9 +1211,8 @@ public:
         if (node_->collapsed && node_->hiddenChildren > 0) {
             rect.setRight(rect.right() + 104.0);
         }
-        if (node_->previewOpen) {
-            rect = rect.united(QRectF(rect.left() + 40.0, rect.bottom() + 8.0,
-                                      node_->previewSize.width(), node_->previewSize.height()));
+        if (node_->previewOpen && !node_->isDir) {
+            rect = rect.united(previewFrameRect());
         }
         return rect;
     }
@@ -1059,6 +1222,11 @@ public:
         painter->setRenderHint(QPainter::Antialiasing);
         const QRectF box(-node_->size.width() / 2.0, -node_->size.height() / 2.0,
                          node_->size.width(), node_->size.height());
+        if (!node_->isDir && node_->previewOpen) {
+            paintPreviewFrame(painter);
+            return;
+        }
+
         if (hasUserFill()) {
             painter->setPen(Qt::NoPen);
             painter->setBrush(windowFill());
@@ -1117,8 +1285,7 @@ public:
         }
 
         if (node_->previewOpen) {
-            paintInlinePreview(painter, QRectF(box.left() + 40.0, box.bottom() + 8.0,
-                                               node_->previewSize.width(), node_->previewSize.height()));
+            paintInlinePreview(painter, previewRect());
         }
     }
 
@@ -1160,11 +1327,24 @@ private:
     void createPreviewWidget();
     void syncPreviewWidgetGeometry();
 
-    QRectF previewRect() const
+    static constexpr qreal PreviewHeaderHeight = 34.0;
+
+    QRectF previewFrameRect() const
+    {
+        return previewHeaderRect().united(previewRect());
+    }
+
+    QRectF previewHeaderRect() const
     {
         const QRectF box(-node_->size.width() / 2.0, -node_->size.height() / 2.0,
                          node_->size.width(), node_->size.height());
-        return QRectF(box.left() + 40.0, box.bottom() + 8.0,
+        return QRectF(box.left(), box.top(), node_->size.width(), PreviewHeaderHeight);
+    }
+
+    QRectF previewRect() const
+    {
+        const QRectF header = previewHeaderRect();
+        return QRectF(header.left(), header.bottom(),
                       node_->previewSize.width(), node_->previewSize.height());
     }
 
@@ -1244,13 +1424,56 @@ private:
     {
         painter->setPen(QPen(hasUserFill() ? QColor(154, 162, 168, 160) : QColor("#c4ccd1"), 1.1));
         painter->setBrush(hasUserFill() ? windowFill() : QColor("#ffffff"));
-        painter->drawRoundedRect(rect, 8.0, 8.0);
+        painter->drawRect(rect);
 
         painter->setPen(QPen(QColor("#9aa5aa"), 1.2));
         const QPointF corner(rect.right() - 12.0, rect.bottom() - 4.0);
         painter->drawLine(corner, QPointF(rect.right() - 4.0, rect.bottom() - 12.0));
         painter->drawLine(QPointF(rect.right() - 8.0, rect.bottom() - 4.0),
                           QPointF(rect.right() - 4.0, rect.bottom() - 8.0));
+    }
+
+    void paintPreviewFrame(QPainter* painter)
+    {
+        const QRectF header = previewHeaderRect();
+        const QRectF body = previewRect();
+        const bool selected = isSelected();
+        const QColor border = selected ? QColor("#0b63ce") : (hasUserFill() ? windowColor() : QColor("#879198"));
+        const QColor bodyFill = selected ? QColor("#eef6ff") : QColor("#ffffff");
+        const QColor headerFill = selected ? QColor("#dbeafe") : (hasUserFill() ? windowFill() : QColor("#f7fafb"));
+        constexpr qreal radius = 4.0;
+
+        painter->setPen(QPen(border, selected ? 2.0 : 1.4));
+        painter->setBrush(bodyFill);
+        painter->drawRoundedRect(body, radius, radius);
+
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(headerFill);
+        painter->drawRoundedRect(header.adjusted(1.0, 1.0, -1.0, -1.0), radius, radius);
+
+        painter->setPen(QPen(border, selected ? 2.0 : 1.4));
+        painter->drawRoundedRect(header, radius, radius);
+
+        painter->save();
+        painter->translate(QPointF(header.left() + 12.0, header.top() + 6.0));
+        painter->scale(0.68, 0.68);
+        paintFile(painter, QPointF(0.0, 0.0), QFileInfo(node_->path));
+        painter->restore();
+
+        QFont font = painter->font();
+        font.setPointSize(node_->depth == 0 ? 14 : 11);
+        font.setBold(true);
+        painter->setFont(font);
+        painter->setPen(QColor("#172321"));
+        painter->drawText(QRectF(header.left() + 40.0, header.top(),
+                                 header.width() - 48.0, header.height()),
+                          Qt::AlignVCenter | Qt::AlignLeft, shortLabel(node_->name));
+
+        painter->setPen(QPen(QColor("#9aa5aa"), 1.2));
+        const QPointF corner(body.right() - 12.0, body.bottom() - 4.0);
+        painter->drawLine(corner, QPointF(body.right() - 4.0, body.bottom() - 12.0));
+        painter->drawLine(QPointF(body.right() - 8.0, body.bottom() - 4.0),
+                          QPointF(body.right() - 4.0, body.bottom() - 8.0));
     }
 
     Node* node_;
@@ -1414,6 +1637,11 @@ public:
         viewChangedHandler_ = std::move(handler);
     }
 
+    void setDebugHandler(std::function<void(const QString&)> handler)
+    {
+        debugHandler_ = std::move(handler);
+    }
+
 protected:
     void wheelEvent(QWheelEvent* event) override
     {
@@ -1443,10 +1671,16 @@ protected:
     {
         if (event->type() == QEvent::KeyPress) {
             auto* keyEvent = static_cast<QKeyEvent*>(event);
-            if ((keyEvent->key() == Qt::Key_Tab || keyEvent->key() == Qt::Key_Backtab) &&
-                !textInputWidgetHasFocus() && keyHandler_ && keyHandler_(keyEvent)) {
-                event->accept();
-                return true;
+            if (!textInputWidgetHasFocus() && isBoardNavigationKey(keyEvent)) {
+                if (keyHandler_ && keyHandler_(keyEvent)) {
+                    notifyDebug(QStringLiteral("board event key handled by node navigation: %1").arg(debugKeyName(keyEvent)));
+                    event->accept();
+                    return true;
+                }
+                if (scrollWithArrowKey(keyEvent)) {
+                    event->accept();
+                    return true;
+                }
             }
         }
         if (event->type() == QEvent::NativeGesture) {
@@ -1548,6 +1782,11 @@ protected:
             return;
         }
         if (keyHandler_ && keyHandler_(event)) {
+            notifyDebug(QStringLiteral("board keyPress handled by node navigation: %1").arg(debugKeyName(event)));
+            event->accept();
+            return;
+        }
+        if (scrollWithArrowKey(event)) {
             event->accept();
             return;
         }
@@ -1569,7 +1808,14 @@ private:
     void applyRubberBandSelection(Qt::KeyboardModifiers modifiers)
     {
         QGraphicsScene* currentScene = scene();
-        if (!currentScene || !lastRubberBandSceneRect_.isValid()) {
+        if (!currentScene) {
+            return;
+        }
+
+        if (!lastRubberBandSceneRect_.isValid()) {
+            if (!(modifiers & Qt::ControlModifier)) {
+                currentScene->clearSelection();
+            }
             return;
         }
 
@@ -1621,6 +1867,81 @@ private:
         }
     }
 
+    void notifyDebug(const QString& message)
+    {
+        if (debugHandler_) {
+            debugHandler_(message);
+        }
+    }
+
+    bool scrollWithArrowKey(QKeyEvent* event)
+    {
+        if (!event || event->modifiers() != Qt::NoModifier || !isArrowKey(event->key())) {
+            return false;
+        }
+
+        constexpr int scrollStep = 56;
+        const int oldH = horizontalScrollBar()->value();
+        const int oldV = verticalScrollBar()->value();
+        switch (event->key()) {
+        case Qt::Key_Up:
+            verticalScrollBar()->setValue(verticalScrollBar()->value() - scrollStep);
+            break;
+        case Qt::Key_Down:
+            verticalScrollBar()->setValue(verticalScrollBar()->value() + scrollStep);
+            break;
+        case Qt::Key_Left:
+            horizontalScrollBar()->setValue(horizontalScrollBar()->value() - scrollStep);
+            break;
+        case Qt::Key_Right:
+            horizontalScrollBar()->setValue(horizontalScrollBar()->value() + scrollStep);
+            break;
+        default:
+            return false;
+        }
+        const int newH = horizontalScrollBar()->value();
+        const int newV = verticalScrollBar()->value();
+        notifyDebug(QStringLiteral("arrow scroll %1: h %2 -> %3 / %4, v %5 -> %6 / %7%8")
+                        .arg(debugKeyName(event))
+                        .arg(oldH)
+                        .arg(newH)
+                        .arg(horizontalScrollBar()->maximum())
+                        .arg(oldV)
+                        .arg(newV)
+                        .arg(verticalScrollBar()->maximum())
+                        .arg(oldH == newH && oldV == newV ? QStringLiteral(" (unchanged)") : QString()));
+        notifyViewChanged();
+        return true;
+    }
+
+    static QString debugKeyName(QKeyEvent* event)
+    {
+        if (!event) {
+            return QStringLiteral("(none)");
+        }
+        QString key = QKeySequence(event->key()).toString(QKeySequence::NativeText);
+        if (key.isEmpty()) {
+            key = QStringLiteral("key=%1").arg(event->key());
+        }
+        return key;
+    }
+
+    static bool isArrowKey(int key)
+    {
+        return key == Qt::Key_Up || key == Qt::Key_Down ||
+               key == Qt::Key_Left || key == Qt::Key_Right;
+    }
+
+    static bool isBoardNavigationKey(QKeyEvent* event)
+    {
+        if (!event) {
+            return false;
+        }
+        const int key = event->key();
+        return isArrowKey(key) || key == Qt::Key_Tab || key == Qt::Key_Backtab ||
+               key == Qt::Key_Return || key == Qt::Key_Enter;
+    }
+
     bool panning_ = false;
     bool rubberBandSelecting_ = false;
     Qt::MouseButton panningButton_ = Qt::NoButton;
@@ -1630,6 +1951,7 @@ private:
     std::function<void()> cheatSheetHandler_;
     std::function<bool(QKeyEvent*)> keyHandler_;
     std::function<void()> viewChangedHandler_;
+    std::function<void(const QString&)> debugHandler_;
 };
 
 class TextFontSettings {
@@ -1829,6 +2151,194 @@ protected:
 
 private:
     qreal accumulatedZoom_ = 0.0;
+};
+
+class YouTubePreview final : public QWidget {
+public:
+    explicit YouTubePreview(const QString& embedUrl, const QString& thumbnailPath, QWidget* parent = nullptr) : QWidget(parent)
+    {
+        setProperty("mycelInlinePreview", true);
+        setAutoFillBackground(false);
+        watchUrl_ = youtubeWatchUrlFromEmbedUrl(embedUrl);
+
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(4);
+
+        thumbnailLabel_ = new QLabel(this);
+        thumbnailLabel_->setProperty("mycelInlinePreview", true);
+        thumbnailLabel_->setAlignment(Qt::AlignCenter);
+        thumbnailLabel_->setMinimumSize(1, 1);
+        thumbnailLabel_->setStyleSheet(QStringLiteral("background: #111827; color: #e5e7eb;"));
+        thumbnailLabel_->setCursor(Qt::PointingHandCursor);
+        layout->addWidget(thumbnailLabel_, 1);
+
+        auto* footer = new QWidget(this);
+        footer->setProperty("mycelInlinePreview", true);
+        auto* footerLayout = new QHBoxLayout(footer);
+        footerLayout->setContentsMargins(4, 0, 4, 2);
+        footerLayout->addStretch(1);
+        auto* openButton = new QPushButton(QStringLiteral("YouTubeで開く"), footer);
+        openButton->setCursor(Qt::PointingHandCursor);
+        footerLayout->addWidget(openButton);
+        layout->addWidget(footer, 0);
+
+        connect(openButton, &QPushButton::clicked, this, [this] {
+            QDesktopServices::openUrl(QUrl(watchUrl_));
+        });
+        thumbnailLabel_->installEventFilter(this);
+        originalThumbnail_.load(thumbnailPath);
+        if (originalThumbnail_.isNull()) {
+            thumbnailLabel_->setText(QStringLiteral("サムネイルがありません"));
+        } else {
+            updateThumbnailPixmap();
+        }
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (watched == thumbnailLabel_ && event->type() == QEvent::MouseButtonRelease) {
+            QDesktopServices::openUrl(QUrl(watchUrl_));
+            return true;
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+
+    void resizeEvent(QResizeEvent* event) override
+    {
+        QWidget::resizeEvent(event);
+        updateThumbnailPixmap();
+    }
+
+private:
+    void updateThumbnailPixmap()
+    {
+        if (!thumbnailLabel_ || originalThumbnail_.isNull()) {
+            return;
+        }
+        const QSize target = thumbnailLabel_->size();
+        if (target.isEmpty()) {
+            return;
+        }
+        thumbnailLabel_->setPixmap(originalThumbnail_.scaled(target, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+
+    QLabel* thumbnailLabel_ = nullptr;
+    QString watchUrl_;
+    QPixmap originalThumbnail_;
+};
+
+class AspectImagePreview final : public QLabel {
+public:
+    explicit AspectImagePreview(QWidget* parent = nullptr) : QLabel(parent)
+    {
+        setAlignment(Qt::AlignCenter);
+        setMinimumSize(1, 1);
+        setAutoFillBackground(false);
+    }
+
+    void setPreviewPixmap(const QPixmap& pixmap)
+    {
+        pixmap_ = pixmap;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent* event) override
+    {
+        if (pixmap_.isNull()) {
+            QLabel::paintEvent(event);
+            return;
+        }
+
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        const QSize targetSize = pixmap_.size().scaled(size(), Qt::KeepAspectRatio);
+        const QPoint topLeft((width() - targetSize.width()) / 2,
+                             (height() - targetSize.height()) / 2);
+        painter.drawPixmap(QRect(topLeft, targetSize), pixmap_);
+    }
+
+private:
+    QPixmap pixmap_;
+};
+
+class InlineVideoPreview final : public QWidget {
+public:
+    explicit InlineVideoPreview(const QString& path, QWidget* parent = nullptr) : QWidget(parent)
+    {
+        setProperty("mycelInlinePreview", true);
+        setAutoFillBackground(false);
+
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(4);
+
+        videoWidget_ = new QVideoWidget(this);
+        videoWidget_->setMinimumSize(1, 1);
+        layout->addWidget(videoWidget_, 1);
+
+        auto* controls = new QWidget(this);
+        controls->setProperty("mycelInlinePreview", true);
+        auto* controlsLayout = new QHBoxLayout(controls);
+        controlsLayout->setContentsMargins(4, 0, 4, 2);
+        controlsLayout->setSpacing(6);
+
+        playButton_ = new QPushButton(QStringLiteral("再生"), controls);
+        playButton_->setFixedWidth(54);
+        positionSlider_ = new QSlider(Qt::Horizontal, controls);
+        positionSlider_->setRange(0, 0);
+        controlsLayout->addWidget(playButton_);
+        controlsLayout->addWidget(positionSlider_, 1);
+        layout->addWidget(controls, 0);
+
+        audioOutput_ = new QAudioOutput(this);
+        player_ = new QMediaPlayer(this);
+        player_->setAudioOutput(audioOutput_);
+        player_->setVideoOutput(videoWidget_);
+        player_->setSource(QUrl::fromLocalFile(path));
+
+        connect(playButton_, &QPushButton::clicked, this, [this] {
+            if (player_->playbackState() == QMediaPlayer::PlayingState) {
+                player_->pause();
+            } else {
+                player_->play();
+            }
+        });
+        connect(player_, &QMediaPlayer::playbackStateChanged, this, [this](QMediaPlayer::PlaybackState state) {
+            playButton_->setText(state == QMediaPlayer::PlayingState ? QStringLiteral("停止") : QStringLiteral("再生"));
+        });
+        connect(player_, &QMediaPlayer::durationChanged, this, [this](qint64 duration) {
+            positionSlider_->setRange(0, static_cast<int>(std::min<qint64>(duration, std::numeric_limits<int>::max())));
+        });
+        connect(player_, &QMediaPlayer::positionChanged, this, [this](qint64 position) {
+            if (!sliderPressed_) {
+                positionSlider_->setValue(static_cast<int>(std::min<qint64>(position, std::numeric_limits<int>::max())));
+            }
+        });
+        connect(positionSlider_, &QSlider::sliderPressed, this, [this] { sliderPressed_ = true; });
+        connect(positionSlider_, &QSlider::sliderReleased, this, [this] {
+            sliderPressed_ = false;
+            player_->setPosition(positionSlider_->value());
+        });
+    }
+
+    ~InlineVideoPreview() override
+    {
+        if (player_) {
+            player_->stop();
+            player_->setSource(QUrl());
+        }
+    }
+
+private:
+    QVideoWidget* videoWidget_ = nullptr;
+    QPushButton* playButton_ = nullptr;
+    QSlider* positionSlider_ = nullptr;
+    QAudioOutput* audioOutput_ = nullptr;
+    QMediaPlayer* player_ = nullptr;
+    bool sliderPressed_ = false;
 };
 
 class TextEditor final : public QPlainTextEdit {
@@ -2036,6 +2546,7 @@ public:
         view_->setCheatSheetHandler([this] { showCheatSheet(); });
         view_->setKeyHandler([this](QKeyEvent* event) { return handleBoardShortcut(event); });
         view_->setViewChangedHandler([this] { scheduleViewStateSave(); });
+        view_->setDebugHandler([this](const QString& message) { recordDebugEvent(message); });
 
         sideEditorPanel_ = new QWidget(editorSplitter_);
         sideEditorPanel_->setObjectName(QStringLiteral("SideEditorPanel"));
@@ -2055,9 +2566,12 @@ public:
         sidePreviewText_->setUndoRedoEnabled(false);
         sidePreviewText_->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
         sidePreviewText_->setLineWrapMode(QTextEdit::WidgetWidth);
-        sidePreviewImage_ = new QLabel(sidePreviewStack_);
+        sidePreviewImage_ = new AspectImagePreview(sidePreviewStack_);
         sidePreviewImage_->setAlignment(Qt::AlignCenter);
-        sidePreviewImage_->setScaledContents(true);
+#if MYCEL_HAS_WEBENGINE
+        sideHtmlWeb_ = new QWebEngineView(sidePreviewStack_);
+        sideHtmlWeb_->settings()->setAttribute(QWebEngineSettings::JavascriptEnabled, true);
+#endif
         sidePreviewVideo_ = new QVideoWidget(sidePreviewStack_);
         sideEditor_ = new TextEditor(sideEditorPanel_);
         sideEditor_->setReadOnly(true);
@@ -2071,11 +2585,23 @@ public:
             "selection-color: #ffffff; }"));
         sidePreviewStack_->addWidget(sidePreviewText_);
         sidePreviewStack_->addWidget(sidePreviewImage_);
+#if MYCEL_HAS_WEBENGINE
+        sidePreviewStack_->addWidget(sideHtmlWeb_);
+#endif
         sidePreviewStack_->addWidget(sidePreviewVideo_);
         sidePreviewStack_->addWidget(sideEditor_);
         sidePreviewText_->installEventFilter(this);
         sidePreviewText_->viewport()->installEventFilter(this);
         sidePreviewImage_->installEventFilter(this);
+#if MYCEL_HAS_WEBENGINE
+        sideHtmlWeb_->installEventFilter(this);
+        connect(sideHtmlWeb_, &QWebEngineView::loadStarted, this, [this] {
+            recordDebugEvent(QStringLiteral("html preview load started"));
+        });
+        connect(sideHtmlWeb_, &QWebEngineView::loadFinished, this, [this](bool ok) {
+            recordDebugEvent(QStringLiteral("html preview load finished: %1").arg(ok ? QStringLiteral("ok") : QStringLiteral("failed")));
+        });
+#endif
         sidePreviewVideo_->installEventFilter(this);
         sidePreviewAudioOutput_ = new QAudioOutput(this);
         sidePreviewAudioOutput_->setMuted(true);
@@ -2090,6 +2616,27 @@ public:
         editorSplitter_->addWidget(view_);
         editorSplitter_->addWidget(sideEditorPanel_);
         setCentralWidget(editorSplitter_);
+
+        debugDock_ = new QDockWidget(QStringLiteral("Debug"), this);
+        debugDock_->setObjectName(QStringLiteral("DebugDock"));
+        auto* debugPanel = new QWidget(debugDock_);
+        auto* debugLayout = new QVBoxLayout(debugPanel);
+        debugLayout->setContentsMargins(6, 6, 6, 6);
+        debugLayout->setSpacing(4);
+        auto* copyDebugButton = new QPushButton(QStringLiteral("Copy"), debugPanel);
+        copyDebugButton->setFixedWidth(88);
+        debugText_ = new QPlainTextEdit(debugPanel);
+        debugText_->setReadOnly(true);
+        debugText_->setFocusPolicy(Qt::StrongFocus);
+        debugText_->setMaximumBlockCount(600);
+        debugText_->setStyleSheet(QStringLiteral(
+            "QPlainTextEdit { background: #111827; color: #e5e7eb; border: none; "
+            "font-family: Menlo, Consolas, monospace; font-size: 11px; }"));
+        debugLayout->addWidget(copyDebugButton, 0, Qt::AlignLeft);
+        debugLayout->addWidget(debugText_, 1);
+        debugDock_->setWidget(debugPanel);
+        addDockWidget(Qt::BottomDockWidgetArea, debugDock_);
+        debugDock_->hide();
 
         auto* toolbar = addToolBar(QStringLiteral("Mycel"));
         QAction* openAction = toolbar->addAction(QStringLiteral("Open"));
@@ -2107,6 +2654,10 @@ public:
         editorPaneAction_->setShortcutContext(Qt::ApplicationShortcut);
         editorPaneAction_->setChecked(QSettings().value(QStringLiteral("editor/paneVisible"), true).toBool());
         sideEditorPanel_->setVisible(editorPaneAction_->isChecked());
+        debugPaneAction_ = toolbar->addAction(QStringLiteral("Debug"));
+        debugPaneAction_->setCheckable(true);
+        debugPaneAction_->setShortcut(QKeySequence(QStringLiteral("F12")));
+        debugPaneAction_->setShortcutContext(Qt::ApplicationShortcut);
         auto* editorPositionButton = new QToolButton(this);
         editorPositionButton->setText(QStringLiteral("Preview Place"));
         editorPositionButton->setPopupMode(QToolButton::InstantPopup);
@@ -2174,6 +2725,16 @@ public:
         connect(importAction, &QAction::triggered, this, [this] { importArchive(); });
         connect(openSelectedPreviewsAction, &QAction::triggered, this, [this] { setSelectedFilePreviews(true); });
         connect(closeSelectedPreviewsAction, &QAction::triggered, this, [this] { setSelectedFilePreviews(false); });
+        connect(debugPaneAction_, &QAction::toggled, debugDock_, &QDockWidget::setVisible);
+        connect(debugDock_, &QDockWidget::visibilityChanged, this, [this](bool visible) {
+            if (debugPaneAction_ && debugPaneAction_->isChecked() != visible) {
+                debugPaneAction_->setChecked(visible);
+            }
+            if (visible) {
+                refreshDebugPane(QStringLiteral("debug pane opened"));
+            }
+        });
+        connect(copyDebugButton, &QPushButton::clicked, this, [this] { copyDebugPaneToClipboard(); });
         connect(editorPositionGroup, &QActionGroup::triggered, this, [this](QAction* action) {
             applyEditorPanePosition(action->data().toString(), true);
         });
@@ -2204,6 +2765,7 @@ public:
             if (!suppressSideEditorSelectionUpdate_) {
                 updateSideEditorForSelection();
             }
+            refreshDebugPane(QStringLiteral("selection changed"));
         });
         connect(view_->horizontalScrollBar(), &QScrollBar::valueChanged, this, [this] { scheduleViewStateSave(); });
         connect(view_->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] { scheduleViewStateSave(); });
@@ -2261,6 +2823,26 @@ public:
         restoreWindowStateFromSettingsFile();
         rebuild(true);
         QTimer::singleShot(0, this, [this] { syncEditorPaneVisibility(); });
+        qApp->installEventFilter(this);
+    }
+
+    ~MainWindow() override
+    {
+        if (qApp) {
+            qApp->removeEventFilter(this);
+        }
+        previewClickTimer_.stop();
+        fileSystemRefreshTimer_.stop();
+        sideEditorSaveTimer_.stop();
+        viewStateSaveTimer_.stop();
+        if (fileSystemWatcher_) {
+            fileSystemWatcher_->removePaths(fileSystemWatcher_->files());
+            fileSystemWatcher_->removePaths(fileSystemWatcher_->directories());
+        }
+        if (view_) {
+            view_->setScene(nullptr);
+        }
+        scene_.clear();
     }
 
     bool mycelStorageEnabled() const
@@ -2273,9 +2855,15 @@ public:
         return root_.get();
     }
 
+    Node* nodeForPath(const QString& path) const
+    {
+        return root_ ? findNodeByPath(*root_, path) : nullptr;
+    }
+
     void createFolder(Node* parent)
     {
         if (!parent || !parent->isDir) {
+            recordDebugEvent(QStringLiteral("create folder: invalid parent"));
             return;
         }
 
@@ -2289,9 +2877,11 @@ public:
         }
 
         if (!dir.mkdir(name)) {
+            recordDebugEvent(QStringLiteral("create folder failed: %1").arg(QDir::toNativeSeparators(path)));
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("フォルダを作成できませんでした。"));
             return;
         }
+        recordDebugEvent(QStringLiteral("created folder: %1").arg(relativeKeyForPath(path)));
         appendCreatedItemToOrder(parent->path, name, true);
         saveOrderFile();
         rebuild(false);
@@ -2301,6 +2891,7 @@ public:
     void createFile(Node* parent, const QString& selectionPathAfterCreate = {})
     {
         if (!parent || !parent->isDir) {
+            recordDebugEvent(QStringLiteral("create file: invalid parent"));
             return;
         }
 
@@ -2316,30 +2907,95 @@ public:
 
         QFile file(path);
         if (!file.open(QIODevice::WriteOnly)) {
+            recordDebugEvent(QStringLiteral("create file failed: %1").arg(QDir::toNativeSeparators(path)));
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("ファイルを作成できませんでした。"));
             return;
         }
+        recordDebugEvent(QStringLiteral("created file: %1").arg(relativeKeyForPath(path)));
         appendCreatedItemToOrder(parent->path, name, false);
         saveOrderFile();
         rebuild(false);
         selectNodePath(restorePath);
     }
 
+    void createFileInFolderPath(const QString& folderPath)
+    {
+        QFileInfo folderInfo(folderPath);
+        if (!folderInfo.exists() || !folderInfo.isDir()) {
+            recordDebugEvent(QStringLiteral("context create file: folder path is not a directory: %1").arg(QDir::toNativeSeparators(folderPath)));
+            return;
+        }
+
+        QDir dir(folderInfo.absoluteFilePath());
+        QString name = QStringLiteral("NewFile.txt");
+        QString path = dir.filePath(name);
+        for (int number = 2; QFileInfo::exists(path); ++number) {
+            name = QStringLiteral("NewFile %1.txt").arg(number);
+            path = dir.filePath(name);
+        }
+
+        recordDebugEvent(QStringLiteral("context create file in: %1").arg(relativeKeyForPath(folderPath)));
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly)) {
+            recordDebugEvent(QStringLiteral("context create file failed: %1").arg(QDir::toNativeSeparators(path)));
+            QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("ファイルを作成できませんでした。"));
+            return;
+        }
+        appendCreatedItemToOrder(folderInfo.absoluteFilePath(), name, false);
+        saveOrderFile();
+        rebuild(false);
+        selectNodePath(folderInfo.absoluteFilePath(), true);
+        recordDebugEvent(QStringLiteral("context created file: %1").arg(relativeKeyForPath(path)));
+    }
+
+    void createFolderInFolderPath(const QString& folderPath)
+    {
+        QFileInfo folderInfo(folderPath);
+        if (!folderInfo.exists() || !folderInfo.isDir()) {
+            recordDebugEvent(QStringLiteral("context create folder: folder path is not a directory: %1").arg(QDir::toNativeSeparators(folderPath)));
+            return;
+        }
+
+        QDir dir(folderInfo.absoluteFilePath());
+        QString name = QStringLiteral("NewFolder");
+        QString path = dir.filePath(name);
+        for (int number = 2; QFileInfo::exists(path); ++number) {
+            name = QStringLiteral("NewFolder %1").arg(number);
+            path = dir.filePath(name);
+        }
+
+        recordDebugEvent(QStringLiteral("context create folder in: %1").arg(relativeKeyForPath(folderPath)));
+        if (!dir.mkdir(name)) {
+            recordDebugEvent(QStringLiteral("context create folder failed: %1").arg(QDir::toNativeSeparators(path)));
+            QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("フォルダを作成できませんでした。"));
+            return;
+        }
+        appendCreatedItemToOrder(folderInfo.absoluteFilePath(), name, true);
+        saveOrderFile();
+        rebuild(false);
+        selectNodePath(folderInfo.absoluteFilePath(), true);
+        recordDebugEvent(QStringLiteral("context created folder: %1").arg(relativeKeyForPath(path)));
+    }
+
     void createFileInSelectedFolder()
     {
         Node* node = singleSelectedNode();
         if (!node) {
+            recordDebugEvent(QStringLiteral("create file: no selected node"));
             return;
         }
         if (node->isDir) {
+            recordDebugEvent(QStringLiteral("create file in selected folder: %1").arg(relativeKeyForPath(node->path)));
             createFile(node);
             return;
         }
 
         Node* parent = findVisibleNodeByPath(root_.get(), node->parentPath);
         if (!parent || !parent->isDir) {
+            recordDebugEvent(QStringLiteral("create file: selected file has no visible parent"));
             return;
         }
+        recordDebugEvent(QStringLiteral("create file beside selected file: %1").arg(relativeKeyForPath(parent->path)));
         createFile(parent, node->path);
     }
 
@@ -2347,8 +3003,10 @@ public:
     {
         Node* node = singleSelectedNode();
         if (!node || !node->isDir) {
+            recordDebugEvent(QStringLiteral("create folder: selected node is not a folder"));
             return;
         }
+        recordDebugEvent(QStringLiteral("create folder in selected folder: %1").arg(relativeKeyForPath(node->path)));
         createFolder(node);
     }
 
@@ -2389,6 +3047,16 @@ public:
 
     bool copyNode(Node* node)
     {
+        if (!node || node == root_.get()) {
+            return false;
+        }
+        copiedPaths_ = {node->path};
+        return true;
+    }
+
+    bool copyPath(const QString& path)
+    {
+        Node* node = nodeForPath(path);
         if (!node || node == root_.get()) {
             return false;
         }
@@ -2490,6 +3158,14 @@ public:
         }
     }
 
+    void activateMainWindow()
+    {
+        show();
+        raise();
+        activateWindow();
+        focusBoard();
+    }
+
     void saveSideEditorFromShortcut(bool returnFocusToFile)
     {
         const QString path = sideEditorPath_;
@@ -2531,6 +3207,7 @@ public:
             resetFileSystemWatcher();
             loadSidePreviewFile(focusPath);
             selectNodePath(focusPath);
+            focusBoard();
             return;
         }
         view_->setFocus(Qt::ShortcutFocusReason);
@@ -2564,23 +3241,11 @@ public:
 
     bool toggleSelectedFilePreviews()
     {
-        bool hasSelectedFile = false;
-        bool allPreviewsOpen = true;
-        for (QGraphicsItem* item : scene_.selectedItems()) {
-            auto* nodeItem = dynamic_cast<NodeItem*>(item);
-            if (!nodeItem || !nodeItem->node() || nodeItem->node()->isDir) {
-                continue;
-            }
-            hasSelectedFile = true;
-            if (!previewPaths_.contains(nodeItem->node()->path)) {
-                allPreviewsOpen = false;
-            }
-        }
-
-        if (!hasSelectedFile) {
+        const QStringList paths = selectedFilePaths();
+        if (paths.isEmpty()) {
             return false;
         }
-        setSelectedFilePreviews(!allPreviewsOpen);
+        toggleFilePreviewsForPaths(paths);
         view_->setFocus(Qt::ShortcutFocusReason);
         return true;
     }
@@ -2632,7 +3297,7 @@ public:
         if (changed) {
             saveCollapsedFile();
             rebuild(false);
-            restoreSelection(selectedPaths);
+            restoreSelection(selectedPaths, true);
         } else {
             view_->setFocus(Qt::ShortcutFocusReason);
         }
@@ -2656,7 +3321,8 @@ public:
             return false;
         }
 
-        const Qt::KeyboardModifiers modifiers = event->modifiers();
+        Qt::KeyboardModifiers modifiers = event->modifiers();
+        modifiers &= ~Qt::KeypadModifier;
         if (event->key() == Qt::Key_E && modifiers == Qt::NoModifier) {
             return focusEditorForSelectedFile();
         }
@@ -2674,16 +3340,24 @@ public:
             return moveSelectionWithTab(true);
         }
         if (event->key() == Qt::Key_Up && modifiers == Qt::NoModifier) {
-            return moveSelectionVertically(true);
+            const bool handled = moveSelectionVertically(true);
+            recordDebugEvent(QStringLiteral("node navigation Up: %1").arg(handled ? QStringLiteral("handled") : QStringLiteral("not handled")));
+            return handled;
         }
         if (event->key() == Qt::Key_Down && modifiers == Qt::NoModifier) {
-            return moveSelectionVertically(false);
+            const bool handled = moveSelectionVertically(false);
+            recordDebugEvent(QStringLiteral("node navigation Down: %1").arg(handled ? QStringLiteral("handled") : QStringLiteral("not handled")));
+            return handled;
         }
         if (event->key() == Qt::Key_Left && modifiers == Qt::NoModifier) {
-            return moveSelectionToParent();
+            const bool handled = moveSelectionToParent();
+            recordDebugEvent(QStringLiteral("node navigation Left: %1").arg(handled ? QStringLiteral("handled") : QStringLiteral("not handled")));
+            return handled;
         }
         if (event->key() == Qt::Key_Right && modifiers == Qt::NoModifier) {
-            return moveSelectionToFirstChild();
+            const bool handled = moveSelectionToFirstChild();
+            recordDebugEvent(QStringLiteral("node navigation Right: %1").arg(handled ? QStringLiteral("handled") : QStringLiteral("not handled")));
+            return handled;
         }
         if (event->key() == Qt::Key_N && modifiers == Qt::NoModifier) {
             createFileInSelectedFolder();
@@ -2693,12 +3367,16 @@ public:
             createFolderInSelectedFolder();
             return true;
         }
-        if (event->key() == Qt::Key_D && modifiers == Qt::NoModifier) {
+        if ((event->key() == Qt::Key_D && modifiers == Qt::NoModifier) ||
+            isDeleteShortcut(event->key(), modifiers)) {
             if (selectedDeletableItemCount() <= 0) {
                 return false;
             }
             deleteSelectedItems();
             return true;
+        }
+        if (isSelectAllShortcut(event->key(), modifiers)) {
+            return selectAllVisibleNodes();
         }
         if (event->key() == Qt::Key_C && modifiers == Qt::ControlModifier) {
             return copySelectedItems();
@@ -2707,6 +3385,45 @@ public:
             return pasteCopiedItems();
         }
         return false;
+    }
+
+    bool isDeleteShortcut(int key, Qt::KeyboardModifiers modifiers) const
+    {
+#ifdef Q_OS_MACOS
+        return (key == Qt::Key_Delete && modifiers == Qt::NoModifier) ||
+               (key == Qt::Key_Backspace && modifiers == Qt::NoModifier) ||
+               (key == Qt::Key_Backspace && modifiers == Qt::MetaModifier);
+#else
+        return key == Qt::Key_Delete && modifiers == Qt::NoModifier;
+#endif
+    }
+
+    bool isSelectAllShortcut(int key, Qt::KeyboardModifiers modifiers) const
+    {
+#ifdef Q_OS_MACOS
+        return key == Qt::Key_A && modifiers == Qt::MetaModifier;
+#else
+        return key == Qt::Key_A && modifiers == Qt::ControlModifier;
+#endif
+    }
+
+    bool selectAllVisibleNodes()
+    {
+        bool selectedAny = false;
+        scene_.clearSelection();
+        for (QGraphicsItem* item : scene_.items()) {
+            auto* nodeItem = dynamic_cast<NodeItem*>(item);
+            if (!nodeItem || !nodeItem->node()) {
+                continue;
+            }
+            nodeItem->setSelected(true);
+            selectedAny = true;
+        }
+        if (selectedAny) {
+            view_->setFocus(Qt::ShortcutFocusReason);
+            recordDebugEvent(QStringLiteral("selected all visible nodes"));
+        }
+        return selectedAny;
     }
 
     bool textInputHasFocus() const
@@ -2719,7 +3436,31 @@ public:
         if (!node) {
             return;
         }
-        QDesktopServices::openUrl(QUrl::fromLocalFile(node->path));
+        openPath(node->path);
+    }
+
+    void openPath(const QString& path)
+    {
+        if (path.isEmpty()) {
+            return;
+        }
+
+        const QFileInfo info(path);
+        if (const auto embedUrl = youtubeEmbedUrlForFile(info)) {
+            QDesktopServices::openUrl(QUrl(youtubeWatchUrlFromEmbedUrl(*embedUrl)));
+            return;
+        }
+        if (info.exists() && info.isFile() && isTextPreviewFile(info) && info.size() <= 64 * 1024) {
+            QFile file(info.absoluteFilePath());
+            if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                const auto url = firstUrlFromText(QString::fromUtf8(file.read(64 * 1024)));
+                if (url && url->isValid()) {
+                    QDesktopServices::openUrl(*url);
+                    return;
+                }
+            }
+        }
+        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
     }
 
     bool openSelectedNode()
@@ -2742,6 +3483,12 @@ public:
         return info.exists() && info.isFile() && isTextPreviewFile(info) && info.size() <= 4 * 1024 * 1024;
     }
 
+    bool canEditTextFilePath(const QString& path) const
+    {
+        const QFileInfo info(path);
+        return info.exists() && info.isFile() && isTextPreviewFile(info) && info.size() <= 4 * 1024 * 1024;
+    }
+
     void editTextFile(Node* node)
     {
         if (!canEditTextFile(node)) {
@@ -2750,6 +3497,25 @@ public:
         }
 
         TextEditorDialog dialog(node->path, this);
+        dialog.exec();
+        if (dialog.wasSaved()) {
+            rebuild(false);
+        }
+    }
+
+    void editTextFilePath(const QString& path)
+    {
+        Node* node = nodeForPath(path);
+        if (node) {
+            editTextFile(node);
+            return;
+        }
+        if (!canEditTextFilePath(path)) {
+            QMessageBox::information(this, QStringLiteral("Mycel"), QStringLiteral("このファイルは内蔵エディタで編集できません。"));
+            return;
+        }
+
+        TextEditorDialog dialog(path, this);
         dialog.exec();
         if (dialog.wasSaved()) {
             rebuild(false);
@@ -2766,6 +3532,9 @@ public:
         }
         Node* node = singleSelectedNode();
         if (node && !node->isDir) {
+            if (sideEditorPath_ == node->path && !sideEditorEditing_) {
+                return;
+            }
             loadSidePreviewFile(node->path);
             return;
         }
@@ -2811,7 +3580,16 @@ public:
         sideEditorLoading_ = false;
         sidePreviewText_->clear();
         sidePreviewText_->setPlainText(message);
-        sidePreviewImage_->clear();
+        if (auto* imagePreview = dynamic_cast<AspectImagePreview*>(sidePreviewImage_)) {
+            imagePreview->setPreviewPixmap({});
+        } else {
+            sidePreviewImage_->clear();
+        }
+#if MYCEL_HAS_WEBENGINE
+        if (sideHtmlWeb_) {
+            sideHtmlWeb_->setUrl(QUrl(QStringLiteral("about:blank")));
+        }
+#endif
         sidePreviewStack_->setCurrentWidget(sidePreviewText_);
         setSidePaneMode(false, status);
         sideEditorPathLabel_->setText(message);
@@ -2884,7 +3662,11 @@ public:
                 showSidePreviewText(QStringLiteral("画像を読み込めませんでした。"), QStringLiteral("画像プレビュー失敗"));
                 return;
             }
-            sidePreviewImage_->setPixmap(pixmap);
+            if (auto* imagePreview = dynamic_cast<AspectImagePreview*>(sidePreviewImage_)) {
+                imagePreview->setPreviewPixmap(pixmap);
+            } else {
+                sidePreviewImage_->setPixmap(pixmap);
+            }
             sidePreviewStack_->setCurrentWidget(sidePreviewImage_);
             setSidePaneMode(false, QStringLiteral("画像プレビュー"));
             sideEditorStatusLabel_->setText(QStringLiteral("画像プレビュー"));
@@ -2918,9 +3700,16 @@ public:
             setSidePaneMode(false, QStringLiteral("Markdown プレビュー"));
             sideEditorStatusLabel_->setText(QStringLiteral("Markdown プレビュー"));
         } else if (isHtmlPreviewFile(info)) {
+#if MYCEL_HAS_WEBENGINE
+            sideHtmlWeb_->setHtml(text, QUrl::fromLocalFile(info.absolutePath() + QStringLiteral("/")));
+            sidePreviewStack_->setCurrentWidget(sideHtmlWeb_);
+#else
             sidePreviewText_->setHtml(text);
+            sidePreviewStack_->setCurrentWidget(sidePreviewText_);
+#endif
             setSidePaneMode(false, QStringLiteral("HTML プレビュー"));
             sideEditorStatusLabel_->setText(QStringLiteral("HTML プレビュー"));
+            return;
         } else if (isCsvPreviewFile(info)) {
             sidePreviewText_->setHtml(csvToHtmlTable(text));
             setSidePaneMode(false, QStringLiteral("CSV プレビュー"));
@@ -2976,6 +3765,11 @@ public:
             sidePreviewPlayer_->stop();
             sidePreviewPlayer_->setSource(QUrl());
         }
+#if MYCEL_HAS_WEBENGINE
+        if (sideHtmlWeb_) {
+            sideHtmlWeb_->setUrl(QUrl(QStringLiteral("about:blank")));
+        }
+#endif
     }
 
     bool saveSideEditorNow()
@@ -3122,13 +3916,10 @@ public:
             return;
         }
         if (open) {
-            previewPaths_.insert(node->path);
+            openInlinePreviewPath(node->path);
         } else {
-            previewPaths_.remove(node->path);
+            closeInlinePreviewPath(node->path);
         }
-        savePreviewFile();
-        rebuild(false);
-        selectNodePath(node->path);
     }
 
     void queueInlinePreviewToggle(Node* node)
@@ -3161,13 +3952,10 @@ public:
     void toggleInlinePreviewPath(const QString& path)
     {
         if (previewPaths_.contains(path)) {
-            previewPaths_.remove(path);
-        } else {
-            previewPaths_.insert(path);
+            closeInlinePreviewPath(path);
+            return;
         }
-        savePreviewFile();
-        rebuild(false);
-        selectNodePath(path);
+        openInlinePreviewPath(path);
     }
 
     void setPreviewSize(Node* node, const QSizeF& size)
@@ -3198,7 +3986,7 @@ public:
         }
         saveCollapsedFile();
         rebuild(false);
-        selectNodePath(path);
+        selectNodePath(path, true);
     }
 
     QColor colorForNode(const Node* node) const
@@ -3224,6 +4012,11 @@ public:
         return mycelStorageEnabled_ && node && userColors_.find(node->path) != userColors_.end();
     }
 
+    bool hasUserColorPath(const QString& path) const
+    {
+        return mycelStorageEnabled_ && userColors_.find(path) != userColors_.end();
+    }
+
     bool hasUserColorForNode(const Node* node) const
     {
         return node && userColors_.find(node->path) != userColors_.end();
@@ -3244,6 +4037,17 @@ public:
         rebuild(false);
     }
 
+    void setNodeColorPath(const QString& path, const QColor& color)
+    {
+        if (path.isEmpty() || !mycelStorageEnabled_ || !color.isValid()) {
+            return;
+        }
+        userColors_[path] = color;
+        saveColorFile();
+        rebuild(false);
+        selectNodePath(path, true);
+    }
+
     void clearNodeColor(Node* node)
     {
         if (!node || !mycelStorageEnabled_) {
@@ -3254,6 +4058,17 @@ public:
         rebuild(false);
     }
 
+    void clearNodeColorPath(const QString& path)
+    {
+        if (path.isEmpty() || !mycelStorageEnabled_) {
+            return;
+        }
+        userColors_.erase(path);
+        saveColorFile();
+        rebuild(false);
+        selectNodePath(path, true);
+    }
+
     void beginInlineRename(Node* node)
     {
         if (!node || node == root_.get()) {
@@ -3261,6 +4076,7 @@ public:
         }
 
         finishInlineRename(false);
+        suspendInlineRenameActivity();
 
         NodeItem* target = nullptr;
         for (QGraphicsItem* item : scene_.items()) {
@@ -3271,6 +4087,7 @@ public:
             }
         }
         if (!target) {
+            resumeInlineRenameActivity();
             return;
         }
 
@@ -3296,16 +4113,29 @@ public:
         } else {
             renameEdit_->selectAll();
         }
-        renameEdit_->setFocus(Qt::OtherFocusReason);
-
-        connect(renameEdit_, &QLineEdit::editingFinished, this, [this] {
-            finishInlineRename(true);
+        QTimer::singleShot(0, this, [this] {
+            if (!renameEdit_) {
+                return;
+            }
+            renameEdit_->setFocus(Qt::OtherFocusReason);
+            const QFileInfo info(renamingPath_);
+            const int dot = info.fileName().lastIndexOf(QLatin1Char('.'));
+            if (!info.isDir() && dot > 0) {
+                renameEdit_->setSelection(0, dot);
+            } else {
+                renameEdit_->selectAll();
+            }
         });
     }
 
     void renameFile(Node* node)
     {
         beginInlineRename(node);
+    }
+
+    void renamePathInline(const QString& path)
+    {
+        beginInlineRename(nodeForPath(path));
     }
 
     void renameSelectedItem()
@@ -3417,6 +4247,11 @@ public:
         rebuild(false);
     }
 
+    void deleteFilePath(const QString& path)
+    {
+        deleteFile(nodeForPath(path));
+    }
+
     void deleteFolder(Node* node)
     {
         if (!node || !node->isDir || node == root_.get()) {
@@ -3443,6 +4278,11 @@ public:
         saveLinkFile();
         saveCollapsedFile();
         rebuild(false);
+    }
+
+    void deleteFolderPath(const QString& path)
+    {
+        deleteFolder(nodeForPath(path));
     }
 
     void moveNode(Node* source, Node* targetDir)
@@ -3681,6 +4521,23 @@ public:
                mimeData->hasHtml() || mimeData->hasText() || pasteableBinaryFormat(mimeData).has_value();
     }
 
+    bool canPasteClipboardToFolderPath(const QString& folderPath) const
+    {
+        const QFileInfo folderInfo(folderPath);
+        if (!folderInfo.exists() || !folderInfo.isDir()) {
+            return false;
+        }
+
+        const QClipboard* clipboard = QApplication::clipboard();
+        const QMimeData* mimeData = clipboard ? clipboard->mimeData() : nullptr;
+        if (!mimeData) {
+            return false;
+        }
+
+        return mimeData->hasUrls() || mimeData->hasImage() || mimeData->hasHtml() ||
+               mimeData->hasText() || pasteableBinaryFormat(mimeData).has_value();
+    }
+
     void pasteClipboardToFolder(Node* targetDir)
     {
         if (!targetDir || !targetDir->isDir) {
@@ -3700,22 +4557,37 @@ public:
 
         QString destinationPath;
         bool saved = false;
-        if (mimeData->hasImage()) {
+        if (mimeData->hasText()) {
+            if (const auto embedUrl = youtubeEmbedUrlFromText(mimeData->text())) {
+                const QString videoId = youtubeVideoIdFromUrl(QUrl(*embedUrl));
+                const QString preferredName = videoId.isEmpty()
+                                                  ? QStringLiteral("YouTube.url")
+                                                  : QStringLiteral("YouTube %1.url").arg(videoId);
+                destinationPath = availableImportPath(targetDir->path, preferredName, false);
+                saved = writeBytes(destinationPath, (*embedUrl + QLatin1Char('\n')).toUtf8());
+            }
+        }
+        if (!saved && mimeData->hasImage()) {
             const QImage image = qvariant_cast<QImage>(mimeData->imageData());
             if (!image.isNull()) {
                 destinationPath = availableImportPath(targetDir->path, QStringLiteral("貼り付け画像.png"), false);
                 saved = image.save(destinationPath, "PNG");
             }
-        } else if (mimeData->hasHtml()) {
+        } else if (!saved && mimeData->hasHtml()) {
             destinationPath = availableImportPath(targetDir->path, QStringLiteral("貼り付け.html"), false);
             saved = writeBytes(destinationPath, mimeData->html().toUtf8());
-        } else if (mimeData->hasText()) {
+        } else if (!saved && mimeData->hasText()) {
             destinationPath = availableImportPath(targetDir->path, QStringLiteral("貼り付け.txt"), false);
             saved = writeBytes(destinationPath, mimeData->text().toUtf8());
-        } else if (const auto binaryFormat = pasteableBinaryFormat(mimeData)) {
+        } else if (!saved) {
+            const auto binaryFormat = pasteableBinaryFormat(mimeData);
+            if (!binaryFormat) {
+                saved = false;
+            } else {
             const QString extension = extensionForMimeFormat(*binaryFormat);
             destinationPath = availableImportPath(targetDir->path, QStringLiteral("貼り付け.%1").arg(extension), false);
             saved = writeBytes(destinationPath, mimeData->data(*binaryFormat));
+            }
         }
 
         if (!saved || destinationPath.isEmpty()) {
@@ -3727,6 +4599,11 @@ public:
         appendCreatedItemToOrder(targetDir->path, fileName, false);
         saveOrderFile();
         rebuild(false);
+    }
+
+    void pasteClipboardToFolderPathAction(const QString& folderPath)
+    {
+        pasteClipboardToFolder(nodeForPath(folderPath));
     }
 
     NodeItem* folderItemAt(const QPointF& scenePos, const NodeItem* exclude) const
@@ -3962,6 +4839,19 @@ public:
         return false;
     }
 
+    bool hasIncomingFileLinkPath(const QString& path) const
+    {
+        if (!mycelStorageEnabled_ || path.isEmpty()) {
+            return false;
+        }
+        for (const FileLink& link : fileLinks_) {
+            if (link.to == path) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void removeIncomingFileLinks(Node* node)
     {
         if (!mycelStorageEnabled_ || !node || node->isDir) {
@@ -3979,6 +4869,14 @@ public:
 
         saveLinkFile();
         rebuild(false);
+    }
+
+    void removeIncomingFileLinksPath(const QString& path)
+    {
+        Node* node = nodeForPath(path);
+        if (node) {
+            removeIncomingFileLinks(node);
+        }
     }
 
     bool reorderNodeByY(Node* source, const NodeItem* sourceItem, qreal dropCenterY)
@@ -4206,22 +5104,59 @@ public:
 
     void setSelectedFilePreviews(bool open)
     {
-        bool changed = false;
-        QStringList selectedPaths;
+        setFilePreviewsForPaths(selectedNodePaths(), open);
+    }
+
+    QStringList selectedFilePaths() const
+    {
+        QStringList paths;
         for (QGraphicsItem* item : scene_.selectedItems()) {
             auto* nodeItem = dynamic_cast<NodeItem*>(item);
-            if (!nodeItem || !nodeItem->node()) {
+            if (!nodeItem || !nodeItem->node() || nodeItem->node()->isDir) {
                 continue;
             }
+            paths.append(nodeItem->node()->path);
+        }
+        paths.removeDuplicates();
+        return paths;
+    }
 
-            selectedPaths.append(nodeItem->node()->path);
-            if (nodeItem->node()->isDir) {
+    bool toggleFilePreviewsForPaths(const QStringList& paths)
+    {
+        QStringList filePaths;
+        bool allPreviewsOpen = true;
+        for (const QString& path : paths) {
+            Node* node = findVisibleNodeByPath(root_.get(), path);
+            if (!node || node->isDir) {
                 continue;
             }
+            filePaths.append(path);
+            if (!previewPaths_.contains(path)) {
+                allPreviewsOpen = false;
+            }
+        }
+        if (filePaths.isEmpty()) {
+            return false;
+        }
+        setFilePreviewsForPaths(filePaths, !allPreviewsOpen);
+        return true;
+    }
 
-            const QString path = nodeItem->node()->path;
+    void setFilePreviewsForPaths(const QStringList& paths, bool open)
+    {
+        bool changed = false;
+        QStringList selectedPaths;
+        for (const QString& path : paths) {
+            Node* node = findVisibleNodeByPath(root_.get(), path);
+            if (!node) {
+                continue;
+            }
+            selectedPaths.append(path);
+            if (node->isDir) {
+                continue;
+            }
             if (open) {
-                if (!previewPaths_.contains(path)) {
+                if (!previewPaths_.contains(path) && prepareInlinePreviewOpenPath(path)) {
                     previewPaths_.insert(path);
                     changed = true;
                 }
@@ -4236,6 +5171,123 @@ public:
             rebuild(false);
             restoreSelection(selectedPaths);
         }
+    }
+
+    bool openInlinePreviewPath(const QString& path)
+    {
+        if (previewPaths_.contains(path) || !prepareInlinePreviewOpenPath(path)) {
+            return false;
+        }
+        previewPaths_.insert(path);
+        savePreviewFile();
+        rebuild(false);
+        selectNodePath(path);
+        return true;
+    }
+
+    bool closeInlinePreviewPath(const QString& path)
+    {
+        if (!previewPaths_.contains(path)) {
+            return false;
+        }
+        previewPaths_.remove(path);
+        savePreviewFile();
+        rebuild(false);
+        selectNodePath(path);
+        return true;
+    }
+
+    bool prepareInlinePreviewOpenPath(const QString& path)
+    {
+        const QFileInfo info(path);
+        const auto embedUrl = youtubeEmbedUrlForFile(info);
+        if (!embedUrl) {
+            return true;
+        }
+
+        const QString cachePath = youtubeThumbnailCachePathForEmbedUrl(*embedUrl);
+        if (!cachePath.isEmpty() && QFileInfo::exists(cachePath)) {
+            return true;
+        }
+
+        fetchYouTubeThumbnailForInlinePreview(path, *embedUrl);
+        return false;
+    }
+
+    QString youtubeThumbnailCacheDirectoryPath() const
+    {
+        return QDir(rootPath_).filePath(QStringLiteral(".mycel/youtube-thumbnails"));
+    }
+
+    QString youtubeThumbnailCachePathForEmbedUrl(const QString& embedUrl) const
+    {
+        const QString videoId = youtubeVideoIdFromEmbedUrl(embedUrl);
+        if (videoId.isEmpty()) {
+            return {};
+        }
+        return QDir(youtubeThumbnailCacheDirectoryPath()).filePath(videoId + QStringLiteral(".jpg"));
+    }
+
+    void fetchYouTubeThumbnailForInlinePreview(const QString& path, const QString& embedUrl)
+    {
+        if (!mycelStorageEnabled_) {
+            recordDebugEvent(QStringLiteral("youtube thumbnail skipped: .mycel disabled"));
+            return;
+        }
+
+        const QString thumbnailUrl = youtubeThumbnailUrlFromEmbedUrl(embedUrl);
+        const QString cachePath = youtubeThumbnailCachePathForEmbedUrl(embedUrl);
+        if (thumbnailUrl.isEmpty() || cachePath.isEmpty()) {
+            recordDebugEvent(QStringLiteral("youtube thumbnail skipped: invalid url"));
+            return;
+        }
+        if (pendingYouTubeThumbnailPaths_.contains(path)) {
+            return;
+        }
+
+        QDir dir;
+        if (!dir.mkpath(youtubeThumbnailCacheDirectoryPath())) {
+            recordDebugEvent(QStringLiteral("youtube thumbnail cache mkdir failed"));
+            return;
+        }
+
+        pendingYouTubeThumbnailPaths_.insert(path);
+        recordDebugEvent(QStringLiteral("youtube thumbnail fetch: %1").arg(relativeKeyForPath(path)));
+
+        auto* manager = new QNetworkAccessManager(this);
+        QNetworkRequest request{QUrl(thumbnailUrl)};
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkReply* reply = manager->get(request);
+        connect(reply, &QNetworkReply::finished, this, [this, manager, reply, path, cachePath] {
+            const QNetworkReply::NetworkError error = reply->error();
+            const QByteArray data = reply->readAll();
+            reply->deleteLater();
+            manager->deleteLater();
+            pendingYouTubeThumbnailPaths_.remove(path);
+
+            QPixmap pixmap;
+            if (error != QNetworkReply::NoError || !pixmap.loadFromData(data)) {
+                recordDebugEvent(QStringLiteral("youtube thumbnail fetch failed: %1").arg(relativeKeyForPath(path)));
+                return;
+            }
+
+            QFile file(cachePath);
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+                file.write(data) != data.size()) {
+                recordDebugEvent(QStringLiteral("youtube thumbnail cache write failed"));
+                return;
+            }
+            file.close();
+
+            if (!QFileInfo::exists(path)) {
+                return;
+            }
+            previewPaths_.insert(path);
+            savePreviewFile();
+            rebuild(false);
+            selectNodePath(path);
+            recordDebugEvent(QStringLiteral("youtube thumbnail cached: %1").arg(relativeKeyForPath(path)));
+        });
     }
 
     void deleteSelectedItems()
@@ -4359,35 +5411,75 @@ public:
         selectNodePath(folderPath);
     }
 
-    bool selectNodePath(const QString& path)
+    bool selectNodePath(const QString& path, bool ensureVisible = false)
     {
         scene_.clearSelection();
         bool selected = false;
+        NodeItem* selectedItem = nullptr;
         for (QGraphicsItem* item : scene_.items()) {
             auto* nodeItem = dynamic_cast<NodeItem*>(item);
             if (nodeItem && nodeItem->node() && nodeItem->node()->path == path) {
                 nodeItem->setSelected(true);
+                selectedItem = nodeItem;
                 selected = true;
                 break;
             }
         }
         view_->setFocus(Qt::ShortcutFocusReason);
+        if (ensureVisible) {
+            ensureNodeItemVisible(selectedItem);
+        }
+        if (selected && ensureVisible) {
+            QTimer::singleShot(0, this, [this, path] { ensureNodePathVisible(path); });
+        }
         return selected;
     }
 
-    bool restoreSelection(const QStringList& paths)
+    bool restoreSelection(const QStringList& paths, bool ensureVisible = false)
     {
         scene_.clearSelection();
         bool selected = false;
+        NodeItem* firstSelectedItem = nullptr;
         for (QGraphicsItem* item : scene_.items()) {
             auto* nodeItem = dynamic_cast<NodeItem*>(item);
             if (nodeItem && nodeItem->node() && paths.contains(nodeItem->node()->path)) {
                 nodeItem->setSelected(true);
+                if (!firstSelectedItem) {
+                    firstSelectedItem = nodeItem;
+                }
                 selected = true;
             }
         }
         view_->setFocus(Qt::ShortcutFocusReason);
+        if (ensureVisible) {
+            ensureNodeItemVisible(firstSelectedItem);
+        }
+        if (ensureVisible && firstSelectedItem && firstSelectedItem->node()) {
+            const QString path = firstSelectedItem->node()->path;
+            QTimer::singleShot(0, this, [this, path] { ensureNodePathVisible(path); });
+        }
         return selected;
+    }
+
+    void ensureNodeItemVisible(NodeItem* item)
+    {
+        if (!item || !view_) {
+            return;
+        }
+        const QRectF rect = item->sceneBoundingRect().adjusted(-36.0, -36.0, 36.0, 36.0);
+        view_->ensureVisible(rect, 80, 80);
+        scheduleViewStateSave();
+    }
+
+    void ensureNodePathVisible(const QString& path)
+    {
+        for (QGraphicsItem* item : scene_.items()) {
+            auto* nodeItem = dynamic_cast<NodeItem*>(item);
+            if (nodeItem && nodeItem->node() && nodeItem->node()->path == path) {
+                ensureNodeItemVisible(nodeItem);
+                return;
+            }
+        }
     }
 
     bool moveSelectionWithTab(bool reverse)
@@ -4399,7 +5491,7 @@ public:
         Node* current = singleSelectedNode();
         if (!current) {
             if (!root_->children.empty()) {
-                return selectNodePath(reverse ? root_->children.back()->path : root_->children.front()->path);
+                return selectNodePath(reverse ? root_->children.back()->path : root_->children.front()->path, true);
             }
             view_->setFocus(Qt::ShortcutFocusReason);
             return true;
@@ -4417,19 +5509,19 @@ public:
             }
             if (reverse) {
                 if (index > 0) {
-                    return selectNodePath(parent->children[index - 1]->path);
+                    return selectNodePath(parent->children[index - 1]->path, true);
                 }
                 if (parent != root_.get()) {
-                    return selectNodePath(parent->path);
+                    return selectNodePath(parent->path, true);
                 }
                 view_->setFocus(Qt::ShortcutFocusReason);
                 return true;
             }
             if (index + 1 < parent->children.size()) {
-                return selectNodePath(parent->children[index + 1]->path);
+                return selectNodePath(parent->children[index + 1]->path, true);
             }
             if (!current->children.empty()) {
-                return selectNodePath(current->children.front()->path);
+                return selectNodePath(current->children.front()->path, true);
             }
             view_->setFocus(Qt::ShortcutFocusReason);
             return true;
@@ -4447,11 +5539,7 @@ public:
 
         Node* current = singleSelectedNode();
         if (!current) {
-            if (!root_->children.empty()) {
-                return selectNodePath(upward ? root_->children.back()->path : root_->children.front()->path);
-            }
-            view_->setFocus(Qt::ShortcutFocusReason);
-            return true;
+            return false;
         }
 
         Node* parent = findVisibleNodeByPath(root_.get(), current->parentPath);
@@ -4464,10 +5552,10 @@ public:
                 continue;
             }
             if (upward && index > 0) {
-                return selectNodePath(parent->children[index - 1]->path);
+                return selectNodePath(parent->children[index - 1]->path, true);
             }
             if (!upward && index + 1 < parent->children.size()) {
-                return selectNodePath(parent->children[index + 1]->path);
+                return selectNodePath(parent->children[index + 1]->path, true);
             }
             view_->setFocus(Qt::ShortcutFocusReason);
             return true;
@@ -4480,7 +5568,10 @@ public:
     bool moveSelectionToParent()
     {
         Node* current = singleSelectedNode();
-        if (!root_ || !current || current == root_.get()) {
+        if (!root_ || !current) {
+            return false;
+        }
+        if (current == root_.get()) {
             view_->setFocus(Qt::ShortcutFocusReason);
             return root_ != nullptr;
         }
@@ -4490,13 +5581,16 @@ public:
             view_->setFocus(Qt::ShortcutFocusReason);
             return true;
         }
-        return selectNodePath(parent->path);
+        return selectNodePath(parent->path, true);
     }
 
     bool moveSelectionToFirstChild()
     {
         Node* current = singleSelectedNode();
-        if (!root_ || !current || !current->isDir) {
+        if (!root_ || !current) {
+            return false;
+        }
+        if (!current->isDir) {
             view_->setFocus(Qt::ShortcutFocusReason);
             return root_ != nullptr;
         }
@@ -4510,7 +5604,7 @@ public:
 
         Node* folder = findVisibleNodeByPath(root_.get(), folderPath);
         if (folder && !folder->children.empty()) {
-            return selectNodePath(folder->children.front()->path);
+            return selectNodePath(folder->children.front()->path, true);
         }
         view_->setFocus(Qt::ShortcutFocusReason);
         return true;
@@ -4624,7 +5718,7 @@ public:
 
     void resetFileSystemWatcher()
     {
-        if (!fileSystemWatcher_) {
+        if (!fileSystemWatcher_ || inlineRenameActivitySuspended_) {
             return;
         }
 
@@ -4649,6 +5743,9 @@ public:
 
     void scheduleFileSystemRefresh(const QString& path)
     {
+        if (inlineRenameActivitySuspended_ || renameEdit_) {
+            return;
+        }
         if (sideEditorEditing_) {
             return;
         }
@@ -5009,13 +6106,47 @@ public:
 
     bool eventFilter(QObject* watched, QEvent* event) override
     {
+        if (event->type() == QEvent::KeyPress && isInlinePreviewObject(watched)) {
+            auto* keyEvent = static_cast<QKeyEvent*>(event);
+            recordDebugEvent(QStringLiteral("inline preview key: %1").arg(debugKeyName(keyEvent)));
+            if (keyEvent->modifiers() == Qt::NoModifier &&
+                (keyEvent->key() == Qt::Key_Up || keyEvent->key() == Qt::Key_Down ||
+                 keyEvent->key() == Qt::Key_Left || keyEvent->key() == Qt::Key_Right) &&
+                singleSelectedNode() && handleBoardShortcut(keyEvent)) {
+                recordDebugEvent(QStringLiteral("inline preview key handled by board: %1").arg(debugKeyName(keyEvent)));
+                return true;
+            }
+        }
+        if (event->type() == QEvent::KeyPress && watched == view_) {
+            auto* keyEvent = static_cast<QKeyEvent*>(event);
+            recordDebugEvent(QStringLiteral("board key: %1").arg(debugKeyName(keyEvent)));
+            Qt::KeyboardModifiers modifiers = keyEvent->modifiers();
+            modifiers &= ~Qt::KeypadModifier;
+            const bool boardShortcut =
+                (modifiers == Qt::NoModifier &&
+                 (keyEvent->key() == Qt::Key_Up || keyEvent->key() == Qt::Key_Down ||
+                  keyEvent->key() == Qt::Key_Left || keyEvent->key() == Qt::Key_Right ||
+                  keyEvent->key() == Qt::Key_N || keyEvent->key() == Qt::Key_O ||
+                  keyEvent->key() == Qt::Key_D || keyEvent->key() == Qt::Key_Return ||
+                  keyEvent->key() == Qt::Key_Enter ||
+                  isDeleteShortcut(keyEvent->key(), modifiers))) ||
+                (modifiers == Qt::ShiftModifier &&
+                 (keyEvent->key() == Qt::Key_N || keyEvent->key() == Qt::Key_Tab)) ||
+                (modifiers == Qt::ControlModifier &&
+                 (keyEvent->key() == Qt::Key_C || keyEvent->key() == Qt::Key_V)) ||
+                isDeleteShortcut(keyEvent->key(), modifiers) ||
+                isSelectAllShortcut(keyEvent->key(), modifiers);
+            if (!textInputWidgetHasFocus() && boardShortcut) {
+                if (handleBoardShortcut(keyEvent)) {
+                    recordDebugEvent(QStringLiteral("board key handled by main filter: %1").arg(debugKeyName(keyEvent)));
+                    return true;
+                }
+                recordDebugEvent(QStringLiteral("board key not handled by main filter: %1").arg(debugKeyName(keyEvent)));
+            }
+        }
         if (event->type() == QEvent::MouseButtonPress) {
             auto* mouseEvent = static_cast<QMouseEvent*>(event);
             if (mouseEvent->button() == Qt::LeftButton) {
-                const QString inlinePreviewPath = watched->property("mycelPreviewPath").toString();
-                if (!inlinePreviewPath.isEmpty()) {
-                    return focusEditorForPath(inlinePreviewPath);
-                }
                 if ((watched == sidePreviewText_ || watched == sidePreviewText_->viewport()) &&
                     !sideEditorPath_.isEmpty()) {
                     return focusEditorForPath(sideEditorPath_);
@@ -5025,15 +6156,24 @@ public:
         if (watched == renameEdit_ && event->type() == QEvent::KeyPress) {
             auto* keyEvent = static_cast<QKeyEvent*>(event);
             if (keyEvent->key() == Qt::Key_Escape) {
-                finishInlineRename(false);
+                QTimer::singleShot(0, this, [this] { finishInlineRename(false); });
                 return true;
             }
             if (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter) {
-                finishInlineRename(true);
+                QTimer::singleShot(0, this, [this] { finishInlineRename(true); });
                 return true;
             }
         }
         return QMainWindow::eventFilter(watched, event);
+    }
+
+    QString cachedYouTubeThumbnailPathForFile(const QString& path) const
+    {
+        const auto embedUrl = youtubeEmbedUrlForFile(QFileInfo(path));
+        if (!embedUrl) {
+            return {};
+        }
+        return youtubeThumbnailCachePathForEmbedUrl(*embedUrl);
     }
 
 protected:
@@ -5049,6 +6189,133 @@ protected:
     }
 
 private:
+    bool isInlinePreviewObject(QObject* watched) const
+    {
+        for (QObject* object = watched; object; object = object->parent()) {
+            if (object->property("mycelInlinePreview").toBool()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void recordDebugEvent(const QString& message)
+    {
+        if (!debugText_ || !debugDock_ || !debugDock_->isVisible()) {
+            return;
+        }
+        debugEvents_.append(QStringLiteral("%1  %2")
+                                .arg(QTime::currentTime().toString(QStringLiteral("HH:mm:ss.zzz")), message));
+        while (debugEvents_.size() > 80) {
+            debugEvents_.removeFirst();
+        }
+        refreshDebugPane();
+    }
+
+    void copyDebugPaneToClipboard()
+    {
+        if (!debugText_) {
+            return;
+        }
+        refreshDebugPane(QStringLiteral("debug copied"));
+        QApplication::clipboard()->setText(debugText_->toPlainText());
+    }
+
+    void refreshDebugPane(const QString& eventMessage = QString())
+    {
+        if (!debugText_ || !debugDock_ || !debugDock_->isVisible()) {
+            return;
+        }
+        if (!eventMessage.isEmpty()) {
+            debugEvents_.append(QStringLiteral("%1  %2")
+                                    .arg(QTime::currentTime().toString(QStringLiteral("HH:mm:ss.zzz")), eventMessage));
+            while (debugEvents_.size() > 80) {
+                debugEvents_.removeFirst();
+            }
+        }
+
+        QWidget* focusWidget = QApplication::focusWidget();
+        Node* selectedNode = singleSelectedNode();
+        const QList<QGraphicsItem*> selectedItems = scene_.selectedItems();
+
+        QStringList lines;
+        lines << QStringLiteral("Mycel Debug");
+        lines << QStringLiteral("----------");
+        lines << QStringLiteral("focusWidget: %1").arg(debugObjectName(focusWidget));
+        lines << QStringLiteral("focusWidgetIsInlinePreview: %1").arg(isInlinePreviewObject(focusWidget) ? QStringLiteral("true") : QStringLiteral("false"));
+        lines << QStringLiteral("textInputWidgetHasFocus: %1").arg(textInputWidgetHasFocus() ? QStringLiteral("true") : QStringLiteral("false"));
+        lines << QStringLiteral("viewHasFocus: %1").arg(view_ && view_->hasFocus() ? QStringLiteral("true") : QStringLiteral("false"));
+        lines << QStringLiteral("sceneSelectedItems: %1").arg(selectedItems.size());
+        lines << QStringLiteral("singleSelectedNode: %1").arg(selectedNode ? relativeKeyForPath(selectedNode->path) : QStringLiteral("(none)"));
+        lines << QStringLiteral("singleSelectedIsDir: %1").arg(selectedNode ? (selectedNode->isDir ? QStringLiteral("true") : QStringLiteral("false")) : QStringLiteral("(none)"));
+        lines << QStringLiteral("sideEditorEditing: %1").arg(sideEditorEditing_ ? QStringLiteral("true") : QStringLiteral("false"));
+        lines << QStringLiteral("sideEditorPath: %1").arg(sideEditorPath_.isEmpty() ? QStringLiteral("(none)") : relativeKeyForPath(sideEditorPath_));
+        lines << QStringLiteral("");
+        lines << QStringLiteral("Selected Paths");
+        lines << QStringLiteral("--------------");
+        const QStringList selectedPaths = selectedNodePaths();
+        if (selectedPaths.isEmpty()) {
+            lines << QStringLiteral("(none)");
+        } else {
+            for (const QString& path : selectedPaths) {
+                lines << relativeKeyForPath(path);
+            }
+        }
+        lines << QStringLiteral("");
+        lines << QStringLiteral("Recent Events");
+        lines << QStringLiteral("-------------");
+        if (debugEvents_.isEmpty()) {
+            lines << QStringLiteral("(none)");
+        } else {
+            for (auto it = debugEvents_.crbegin(); it != debugEvents_.crend(); ++it) {
+                lines << *it;
+            }
+        }
+        debugText_->setPlainText(lines.join(QLatin1Char('\n')));
+        debugText_->moveCursor(QTextCursor::Start);
+    }
+
+    QString debugObjectName(QObject* object) const
+    {
+        if (!object) {
+            return QStringLiteral("(none)");
+        }
+        QString text = QString::fromLatin1(object->metaObject()->className());
+        if (!object->objectName().isEmpty()) {
+            text += QStringLiteral(" objectName=%1").arg(object->objectName());
+        }
+        return text;
+    }
+
+    QString debugKeyName(QKeyEvent* event) const
+    {
+        if (!event) {
+            return QStringLiteral("(none)");
+        }
+        QString key = QKeySequence(event->key()).toString(QKeySequence::NativeText);
+        if (key.isEmpty()) {
+            key = QStringLiteral("key=%1").arg(event->key());
+        }
+        QStringList modifiers;
+        const Qt::KeyboardModifiers mods = event->modifiers();
+        if (mods & Qt::ControlModifier) {
+            modifiers << QStringLiteral("Ctrl");
+        }
+        if (mods & Qt::ShiftModifier) {
+            modifiers << QStringLiteral("Shift");
+        }
+        if (mods & Qt::AltModifier) {
+            modifiers << QStringLiteral("Alt");
+        }
+        if (mods & Qt::MetaModifier) {
+            modifiers << QStringLiteral("Meta");
+        }
+        if (mods & Qt::KeypadModifier) {
+            modifiers << QStringLiteral("Keypad");
+        }
+        return modifiers.isEmpty() ? key : modifiers.join(QLatin1Char('+')) + QLatin1Char('+') + key;
+    }
+
     void finishInlineRename(bool commit)
     {
         if (finishingRename_ || !renameProxy_ || !renameEdit_) {
@@ -5074,6 +6341,60 @@ private:
                 selectNodePath(path);
             }
         }
+        resumeInlineRenameActivity();
+    }
+
+    void suspendInlineRenameActivity()
+    {
+        if (inlineRenameActivitySuspended_) {
+            return;
+        }
+
+        inlineRenameActivitySuspended_ = true;
+        previewClickTimer_.stop();
+        queuedPreviewPath_.clear();
+        queuedCollapsePath_.clear();
+        fileSystemRefreshTimer_.stop();
+        pendingFileSystemPaths_.clear();
+        viewStateSaveTimer_.stop();
+        sideEditorSaveTimer_.stop();
+
+        pausedWatcherFiles_.clear();
+        pausedWatcherDirectories_.clear();
+        if (!fileSystemWatcher_) {
+            return;
+        }
+
+        pausedWatcherFiles_ = fileSystemWatcher_->files();
+        pausedWatcherDirectories_ = fileSystemWatcher_->directories();
+        if (!pausedWatcherFiles_.isEmpty()) {
+            fileSystemWatcher_->removePaths(pausedWatcherFiles_);
+        }
+        if (!pausedWatcherDirectories_.isEmpty()) {
+            fileSystemWatcher_->removePaths(pausedWatcherDirectories_);
+        }
+        recordDebugEvent(QStringLiteral("inline rename suspended timers and watcher"));
+    }
+
+    void resumeInlineRenameActivity()
+    {
+        if (!inlineRenameActivitySuspended_) {
+            return;
+        }
+
+        inlineRenameActivitySuspended_ = false;
+        if (fileSystemWatcher_) {
+            if (!pausedWatcherDirectories_.isEmpty()) {
+                fileSystemWatcher_->addPaths(pausedWatcherDirectories_);
+            }
+            if (!pausedWatcherFiles_.isEmpty()) {
+                fileSystemWatcher_->addPaths(pausedWatcherFiles_);
+            }
+        }
+        pausedWatcherFiles_.clear();
+        pausedWatcherDirectories_.clear();
+        resetFileSystemWatcher();
+        recordDebugEvent(QStringLiteral("inline rename resumed timers and watcher"));
     }
 
     void setVisualPosition(NodeItem* item, const QPointF& position)
@@ -5938,7 +7259,11 @@ private:
             const QString absolutePath = absolutePathForKey(it.key());
             const QJsonObject preview = it.value().toObject();
             if (preview.value(QStringLiteral("open")).toBool(false)) {
-                previewPaths_.insert(absolutePath);
+                const QFileInfo info(absolutePath);
+                const auto embedUrl = youtubeEmbedUrlForFile(info);
+                if (!embedUrl || QFileInfo::exists(youtubeThumbnailCachePathForEmbedUrl(*embedUrl))) {
+                    previewPaths_.insert(absolutePath);
+                }
             }
 
             const qreal width = preview.value(QStringLiteral("width")).toDouble(0.0);
@@ -6264,7 +7589,7 @@ private:
 
     void scheduleViewStateSave()
     {
-        if (restoringViewState_ || !mycelStorageEnabled_) {
+        if (inlineRenameActivitySuspended_ || restoringViewState_ || !mycelStorageEnabled_) {
             return;
         }
         viewStateSaveTimer_.start();
@@ -6308,10 +7633,11 @@ private:
                             node.size.width() + 440.0,
                             node.size.height() + 160.0);
             if (node.previewOpen) {
-                const QRectF previewRect(node.center.x() - node.size.width() / 2.0 + 40.0,
-                                         node.center.y() + node.size.height() / 2.0 + 8.0,
-                                         node.previewSize.width(),
-                                         node.previewSize.height());
+                const qreal previewWidth = std::max(node.size.width(), node.previewSize.width());
+                const QRectF previewRect(node.center.x() - node.size.width() / 2.0,
+                                         node.center.y() - node.size.height() / 2.0,
+                                         previewWidth,
+                                         34.0 + node.previewSize.height());
                 nodeRect = nodeRect.united(previewRect.adjusted(-40.0, -40.0, 80.0, 40.0));
             }
             bounds = bounds.isNull() ? nodeRect : bounds.united(nodeRect);
@@ -6419,6 +7745,7 @@ private:
     QSet<QString> collapsedPaths_;
     std::map<QString, QColor> userColors_;
     QSet<QString> previewPaths_;
+    QSet<QString> pendingYouTubeThumbnailPaths_;
     QString queuedPreviewPath_;
     QString queuedCollapsePath_;
     QTimer previewClickTimer_;
@@ -6431,18 +7758,28 @@ private:
     QLineEdit* renameEdit_ = nullptr;
     QString renamingPath_;
     bool finishingRename_ = false;
+    bool inlineRenameActivitySuspended_ = false;
+    QStringList pausedWatcherFiles_;
+    QStringList pausedWatcherDirectories_;
     MindMapScene scene_;
     QSplitter* editorSplitter_ = nullptr;
     BoardView* view_ = nullptr;
+    QDockWidget* debugDock_ = nullptr;
+    QPlainTextEdit* debugText_ = nullptr;
     NodeItem* dragHoverFolder_ = nullptr;
     NodeItem* dragHoverLinkTarget_ = nullptr;
     QStringList copiedPaths_;
     std::vector<FileLink> fileLinks_;
     QAction* editorPaneAction_ = nullptr;
+    QAction* debugPaneAction_ = nullptr;
+    QStringList debugEvents_;
     QWidget* sideEditorPanel_ = nullptr;
     QStackedWidget* sidePreviewStack_ = nullptr;
     PreviewText* sidePreviewText_ = nullptr;
     QLabel* sidePreviewImage_ = nullptr;
+#if MYCEL_HAS_WEBENGINE
+    QWebEngineView* sideHtmlWeb_ = nullptr;
+#endif
     QVideoWidget* sidePreviewVideo_ = nullptr;
     QMediaPlayer* sidePreviewPlayer_ = nullptr;
     QAudioOutput* sidePreviewAudioOutput_ = nullptr;
@@ -6465,10 +7802,16 @@ private:
 
 void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
 {
+    QPointer<MainWindow> window = window_;
+    if (!window) {
+        return;
+    }
+
     QMenu menu;
-    const bool multiItemSelection = isSelected() && window_->selectedDeletableItemCount() > 1;
-    auto addColorMenu = [this](QMenu& parentMenu, std::vector<QAction*>& colorActions, QAction*& clearColorAction) {
-        if (!window_->mycelStorageEnabled()) {
+    const bool multiItemSelection = isSelected() && window->selectedDeletableItemCount() > 1;
+    const QString itemPath = node_->path;
+    auto addColorMenu = [window, itemPath](QMenu& parentMenu, std::vector<QAction*>& colorActions, QAction*& clearColorAction) {
+        if (!window || !window->mycelStorageEnabled()) {
             return;
         }
         QMenu* colorMenu = parentMenu.addMenu(QStringLiteral("色"));
@@ -6480,70 +7823,134 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
         }
         colorMenu->addSeparator();
         clearColorAction = colorMenu->addAction(QStringLiteral("色をクリア"));
-        clearColorAction->setEnabled(window_->hasUserColor(node_));
+        clearColorAction->setEnabled(window->hasUserColorPath(itemPath));
     };
 
     if (multiItemSelection) {
+        const QStringList selectedFilePaths = window->selectedFilePaths();
         QAction* previewSelectionAction = menu.addAction(QStringLiteral("プレビューを開く/閉じる"));
-        previewSelectionAction->setEnabled(window_->hasSelectedFiles());
+        previewSelectionAction->setEnabled(!selectedFilePaths.isEmpty());
         QAction* copySelectionAction = menu.addAction(QStringLiteral("コピー"));
         QAction* deleteSelectionAction = menu.addAction(QStringLiteral("削除"));
 
         QAction* selected = menu.exec(event->screenPos());
         if (selected == previewSelectionAction) {
-            window_->toggleSelectedFilePreviews();
+            QTimer::singleShot(0, window, [window, selectedFilePaths] {
+                if (window) {
+                    window->toggleFilePreviewsForPaths(selectedFilePaths);
+                }
+            });
         } else if (selected == copySelectionAction) {
-            window_->copySelectedItems();
+            QTimer::singleShot(0, window, [window] {
+                if (window) {
+                    window->copySelectedItems();
+                }
+            });
         } else if (selected == deleteSelectionAction) {
-            window_->deleteSelectedItems();
+            QTimer::singleShot(0, window, [window] {
+                if (window) {
+                    window->deleteSelectedItems();
+                }
+            });
         }
         return;
     }
 
     if (node_->isDir) {
+        const QString folderPath = itemPath;
+        const bool isRootFolder = node_ == window->rootNode();
         QAction* collapseAction = menu.addAction(node_->collapsed ? QStringLiteral("展開") : QStringLiteral("折りたたむ"));
         QAction* fileAction = menu.addAction(QStringLiteral("ファイルを作成"));
+        fileAction->setData(QStringLiteral("create-file"));
         QAction* folderAction = menu.addAction(QStringLiteral("フォルダを作成"));
+        folderAction->setData(QStringLiteral("create-folder"));
         QAction* renameAction = menu.addAction(QStringLiteral("名前変更"));
-        renameAction->setEnabled(node_ != window_->rootNode());
+        renameAction->setEnabled(!isRootFolder);
         QAction* copyAction = menu.addAction(QStringLiteral("コピー"));
-        copyAction->setEnabled(node_ != window_->rootNode());
+        copyAction->setEnabled(!isRootFolder);
         QAction* pasteAction = menu.addAction(QStringLiteral("貼り付け"));
-        pasteAction->setEnabled(window_->canPasteClipboardToFolder(node_));
+        pasteAction->setEnabled(window->canPasteClipboardToFolderPath(folderPath));
         QAction* deleteAction = menu.addAction(QStringLiteral("削除"));
-        deleteAction->setEnabled(window_->canDeleteFolder(node_));
+        deleteAction->setEnabled(!isRootFolder);
         std::vector<QAction*> colorActions;
         QAction* clearColorAction = nullptr;
         addColorMenu(menu, colorActions, clearColorAction);
         QAction* openAction = menu.addAction(QStringLiteral("開く"));
         QAction* selected = menu.exec(event->screenPos());
+        const QString command = selected ? selected->data().toString() : QString();
+        if (command == QStringLiteral("create-file")) {
+            QTimer::singleShot(0, window, [window, folderPath] {
+                if (window) {
+                    window->createFileInFolderPath(folderPath);
+                }
+            });
+            return;
+        }
+        if (command == QStringLiteral("create-folder")) {
+            QTimer::singleShot(0, window, [window, folderPath] {
+                if (window) {
+                    window->createFolderInFolderPath(folderPath);
+                }
+            });
+            return;
+        }
         if (selected == collapseAction) {
-            window_->toggleCollapsed(node_);
-        } else if (selected == fileAction) {
-            window_->createFile(node_);
-        } else if (selected == folderAction) {
-            window_->createFolder(node_);
+            QTimer::singleShot(0, window, [window, folderPath] {
+                if (window) {
+                    window->toggleCollapsedPath(folderPath);
+                }
+            });
         } else if (selected == renameAction) {
-            window_->renameFile(node_);
+            QTimer::singleShot(0, window, [window, folderPath] {
+                if (window) {
+                    window->renamePathInline(folderPath);
+                }
+            });
         } else if (selected == copyAction) {
-            window_->copyNode(node_);
+            QTimer::singleShot(0, window, [window, folderPath] {
+                if (window) {
+                    window->copyPath(folderPath);
+                }
+            });
         } else if (selected == pasteAction) {
-            window_->pasteClipboardToFolder(node_);
+            QTimer::singleShot(0, window, [window, folderPath] {
+                if (window) {
+                    window->pasteClipboardToFolderPathAction(folderPath);
+                }
+            });
         } else if (selected == deleteAction) {
-            window_->deleteFolder(node_);
+            QTimer::singleShot(0, window, [window, folderPath] {
+                if (window) {
+                    window->deleteFolderPath(folderPath);
+                }
+            });
         } else if (selected && selected->data().canConvert<QColor>()) {
-            window_->setNodeColor(node_, selected->data().value<QColor>());
+            const QColor color = selected->data().value<QColor>();
+            QTimer::singleShot(0, window, [window, folderPath, color] {
+                if (window) {
+                    window->setNodeColorPath(folderPath, color);
+                }
+            });
         } else if (clearColorAction && selected == clearColorAction) {
-            window_->clearNodeColor(node_);
+            QTimer::singleShot(0, window, [window, folderPath] {
+                if (window) {
+                    window->clearNodeColorPath(folderPath);
+                }
+            });
         } else if (selected == openAction) {
-            window_->openNode(node_);
+            QTimer::singleShot(0, window, [window, folderPath] {
+                if (window) {
+                    window->openPath(folderPath);
+                }
+            });
         }
     } else {
+        const QString filePath = itemPath;
         QAction* previewAction = menu.addAction(QStringLiteral("プレビューを開く/閉じる"));
         QAction* unlinkAction = menu.addAction(QStringLiteral("関連を解除"));
-        unlinkAction->setEnabled(window_->hasIncomingFileLink(node_));
+        unlinkAction->setEnabled(window->hasIncomingFileLinkPath(filePath));
         QAction* editAction = menu.addAction(QStringLiteral("編集"));
-        editAction->setEnabled(window_->canEditTextFile(node_));
+        editAction->setEnabled(window->canEditTextFilePath(filePath));
         QAction* renameAction = menu.addAction(QStringLiteral("名前変更"));
         QAction* copyAction = menu.addAction(QStringLiteral("コピー"));
         QAction* deleteAction = menu.addAction(QStringLiteral("削除"));
@@ -6553,23 +7960,60 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event)
         QAction* openAction = menu.addAction(QStringLiteral("開く"));
         QAction* selected = menu.exec(event->screenPos());
         if (selected == previewAction) {
-            window_->toggleInlinePreview(node_);
+            QTimer::singleShot(0, window, [window, filePath] {
+                if (window) {
+                    window->toggleInlinePreviewPath(filePath);
+                }
+            });
         } else if (selected == unlinkAction) {
-            window_->removeIncomingFileLinks(node_);
+            QTimer::singleShot(0, window, [window, filePath] {
+                if (window) {
+                    window->removeIncomingFileLinksPath(filePath);
+                }
+            });
         } else if (selected == editAction) {
-            window_->editTextFile(node_);
+            QTimer::singleShot(0, window, [window, filePath] {
+                if (window) {
+                    window->editTextFilePath(filePath);
+                }
+            });
         } else if (selected == renameAction) {
-            window_->renameFile(node_);
+            QTimer::singleShot(0, window, [window, filePath] {
+                if (window) {
+                    window->renamePathInline(filePath);
+                }
+            });
         } else if (selected == copyAction) {
-            window_->copyNode(node_);
+            QTimer::singleShot(0, window, [window, filePath] {
+                if (window) {
+                    window->copyPath(filePath);
+                }
+            });
         } else if (selected == deleteAction) {
-            window_->deleteFile(node_);
+            QTimer::singleShot(0, window, [window, filePath] {
+                if (window) {
+                    window->deleteFilePath(filePath);
+                }
+            });
         } else if (selected && selected->data().canConvert<QColor>()) {
-            window_->setNodeColor(node_, selected->data().value<QColor>());
+            const QColor color = selected->data().value<QColor>();
+            QTimer::singleShot(0, window, [window, filePath, color] {
+                if (window) {
+                    window->setNodeColorPath(filePath, color);
+                }
+            });
         } else if (clearColorAction && selected == clearColorAction) {
-            window_->clearNodeColor(node_);
+            QTimer::singleShot(0, window, [window, filePath] {
+                if (window) {
+                    window->clearNodeColorPath(filePath);
+                }
+            });
         } else if (selected == openAction) {
-            window_->openNode(node_);
+            QTimer::singleShot(0, window, [window, filePath] {
+                if (window) {
+                    window->openPath(filePath);
+                }
+            });
         }
     }
 }
@@ -6610,8 +8054,43 @@ void NodeItem::createPreviewWidget()
         return;
     }
 
+    const QFileInfo info(node_->path);
+    if (const auto embedUrl = youtubeEmbedUrlForFile(info)) {
+        const QString thumbnailPath = window_->cachedYouTubeThumbnailPathForFile(node_->path);
+        if (thumbnailPath.isEmpty() || !QFileInfo::exists(thumbnailPath)) {
+            return;
+        }
+        auto* youtubePreview = new YouTubePreview(*embedUrl, thumbnailPath);
+        previewProxy_ = new QGraphicsProxyWidget(this);
+        previewProxy_->setWidget(youtubePreview);
+        previewProxy_->setZValue(1.0);
+        syncPreviewWidgetGeometry();
+        return;
+    }
+
+    if (isImagePreviewFile(info)) {
+        auto* imagePreview = new AspectImagePreview;
+        imagePreview->setProperty("mycelInlinePreview", true);
+        imagePreview->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
+        imagePreview->setPreviewPixmap(QPixmap(info.absoluteFilePath()));
+        previewProxy_ = new QGraphicsProxyWidget(this);
+        previewProxy_->setWidget(imagePreview);
+        previewProxy_->setZValue(1.0);
+        syncPreviewWidgetGeometry();
+        return;
+    }
+
+    if (isVideoPreviewFile(info)) {
+        auto* videoPreview = new InlineVideoPreview(info.absoluteFilePath());
+        previewProxy_ = new QGraphicsProxyWidget(this);
+        previewProxy_->setWidget(videoPreview);
+        previewProxy_->setZValue(1.0);
+        syncPreviewWidgetGeometry();
+        return;
+    }
+
     auto* textEdit = new QTextEdit;
-    textEdit->setProperty("mycelPreviewPath", node_->path);
+    textEdit->setProperty("mycelInlinePreview", true);
     textEdit->setReadOnly(true);
     textEdit->setUndoRedoEnabled(false);
     textEdit->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
@@ -6621,9 +8100,7 @@ void NodeItem::createPreviewWidget()
     textEdit->setFrameStyle(0);
     textEdit->setAttribute(Qt::WA_TranslucentBackground);
     textEdit->viewport()->setAttribute(Qt::WA_TranslucentBackground);
-    textEdit->viewport()->setProperty("mycelPreviewPath", node_->path);
-    textEdit->installEventFilter(window_);
-    textEdit->viewport()->installEventFilter(window_);
+    textEdit->viewport()->setProperty("mycelInlinePreview", true);
     textEdit->viewport()->setAutoFillBackground(false);
     textEdit->document()->setDocumentMargin(8.0);
     textEdit->document()->setDefaultStyleSheet(QStringLiteral("* { color: #243036; } a { color: #1168b3; }"));
@@ -6631,7 +8108,6 @@ void NodeItem::createPreviewWidget()
         "QTextEdit { background: transparent; border: none; color: #243036; "
         "selection-background-color: #bfdbfe; selection-color: #111827; }"));
 
-    const QFileInfo info(node_->path);
     QFont previewFont;
     if (isMarkdownPreviewFile(info)) {
         previewFont.setPointSize(10);
@@ -6834,24 +8310,47 @@ void NodeItem::mouseMoveEvent(QGraphicsSceneMouseEvent* event)
 
 void NodeItem::mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event)
 {
-    window_->cancelQueuedInlinePreviewToggle();
+    QPointer<MainWindow> window = window_;
+    const QString path = node_->path;
+    const bool isDir = node_->isDir;
+
+    window->cancelQueuedInlinePreviewToggle();
     if (scene()) {
         scene()->clearSelection();
         setSelected(true);
     }
-    if (node_->isDir) {
-        window_->toggleCollapsed(node_);
-    } else {
-        window_->toggleInlinePreview(node_);
-    }
-    window_->focusBoard();
     event->accept();
+
+    QTimer::singleShot(0, window, [window, path, isDir] {
+        if (!window) {
+            return;
+        }
+        if (isDir) {
+            window->toggleCollapsedPath(path);
+        } else {
+            window->toggleInlinePreviewPath(path);
+        }
+        window->focusBoard();
+    });
 }
 
 }  // namespace
 
 int main(int argc, char* argv[])
 {
+    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+#if MYCEL_HAS_WEBENGINE
+    if (qEnvironmentVariableIsEmpty("QTWEBENGINE_CHROMIUM_FLAGS")) {
+        qputenv("QTWEBENGINE_CHROMIUM_FLAGS",
+                QByteArrayLiteral("--ignore-gpu-blocklist "
+                                  "--enable-gpu-rasterization "
+                                  "--enable-zero-copy "
+                                  "--enable-accelerated-video-decode "
+                                  "--disable-background-timer-throttling "
+                                  "--disable-backgrounding-occluded-windows "
+                                  "--disable-renderer-backgrounding"));
+    }
+#endif
     QStringList rawArguments;
     rawArguments.reserve(argc);
     for (int i = 0; i < argc; ++i) {
@@ -6872,5 +8371,7 @@ int main(int argc, char* argv[])
     }
     MainWindow window(options.rootPath, options.mycelStorageEnabled);
     window.show();
+    QTimer::singleShot(0, &window, [&window] { window.activateMainWindow(); });
+    QTimer::singleShot(250, &window, [&window] { window.activateMainWindow(); });
     return app.exec();
 }
