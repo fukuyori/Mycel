@@ -347,20 +347,13 @@ QSizeF automaticPreviewSize(const QFileInfo& info)
             return QSizeF(width, 260.0);
         }
 
-        constexpr qreal minWidth = 180.0;
-        constexpr qreal minImageHeight = 100.0;
-        constexpr qreal maxWidth = 1200.0;
-        constexpr qreal maxImageHeight = 800.0;
         const qreal imageWidth = imageSize.width();
         const qreal imageHeight = imageSize.height();
-        qreal scale = std::min(maxWidth / imageWidth, maxImageHeight / imageHeight);
-        if (imageWidth < minWidth || imageHeight < minImageHeight) {
-            scale = std::max(scale, std::max(minWidth / imageWidth, minImageHeight / imageHeight));
-        }
-        scale = std::clamp(scale, 0.05, 3.0);
+        const qreal longestSide = std::max(imageWidth, imageHeight);
+        const qreal scale = longestSide > width ? width / longestSide : 1.0;
 
-        const qreal previewWidth = std::clamp(imageWidth * scale, minWidth, maxWidth);
-        const qreal previewHeight = std::clamp(imageHeight * scale, minImageHeight, maxImageHeight);
+        const qreal previewWidth = imageWidth * scale;
+        const qreal previewHeight = imageHeight * scale;
         return clampedPreviewSizeForFile(info, QSizeF(previewWidth, previewHeight));
     }
 

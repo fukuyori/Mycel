@@ -44,6 +44,7 @@ Instead of treating files as a vertical file list, Mycel lays out folders and fi
 - Automatic saving, `Ctrl + S` to save, and `Esc` to return to preview mode
 - Shared persistent preview/edit font size changed with `Ctrl + mouse wheel`
 - Preview/edit text size can also be changed with `Ctrl + +`, `Ctrl + -`, `Ctrl + 0`, or trackpad pinch on the preview/edit pane
+- Image previews open at original size unless their longest side exceeds 460 px, in which case they are scaled down to 460 px
 - File-watcher refresh is paused while editing so focus and edit mode are preserved
 - Rename by putting `Subject: filename.txt` on the first line
 - Lines starting with `Subject:` or `Key:` are hidden from inline previews
