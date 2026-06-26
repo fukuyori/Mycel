@@ -47,6 +47,7 @@
 #include <QtGui/QPaintEvent>
 #include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
+#include <QtGui/QPalette>
 #include <QtGui/QPen>
 #include <QtGui/QPixmap>
 #include <QtGui/QShortcut>
@@ -195,19 +196,181 @@ struct ArchiveOrderEntry {
     QString name;
 };
 
+enum class AppTheme {
+    Light,
+    Dark,
+};
+
+struct ThemeColors {
+    QColor window;
+    QColor windowText;
+    QColor base;
+    QColor alternateBase;
+    QColor text;
+    QColor button;
+    QColor buttonText;
+    QColor highlight;
+    QColor highlightedText;
+    QColor canvasBackground;
+    QColor nodeText;
+    QColor nodeSelectedBorder;
+    QColor nodeSelectedFill;
+    QColor nodeStroke;
+    QColor nodeFill;
+    QColor previewPanel;
+    QColor previewPanelBorder;
+    QColor previewTextBackground;
+    QColor previewTextBorder;
+    QColor previewText;
+    QColor editPanel;
+    QColor editPanelBorder;
+    QColor editTextBackground;
+    QColor editTextBorder;
+    QColor editText;
+    QColor inlinePreviewBackground;
+    QColor inlinePreviewText;
+    QColor inlinePreviewBorder;
+    QColor badgeBackground;
+    QColor badgeBorder;
+    QColor badgeText;
+    QColor filePage;
+    QColor fileStroke;
+    QColor fileInk;
+    QColor linkAccent;
+};
+
+ThemeColors themeColors(AppTheme theme)
+{
+    if (theme == AppTheme::Dark) {
+        return {
+            QColor("#151a1e"),
+            QColor("#e6edf3"),
+            QColor("#1f252b"),
+            QColor("#262d34"),
+            QColor("#e6edf3"),
+            QColor("#2a323a"),
+            QColor("#e6edf3"),
+            QColor("#4da3ff"),
+            QColor("#06111f"),
+            QColor("#11161b"),
+            QColor("#e6edf3"),
+            QColor("#4da3ff"),
+            QColor(77, 163, 255, 48),
+            QColor("#89939c"),
+            QColor("#20272d"),
+            QColor("#162234"),
+            QColor("#4da3ff"),
+            QColor("#172331"),
+            QColor("#4d7fab"),
+            QColor("#e6edf3"),
+            QColor("#14251e"),
+            QColor("#46a37b"),
+            QColor("#14241d"),
+            QColor("#46a37b"),
+            QColor("#e6edf3"),
+            QColor("#1b232b"),
+            QColor("#e6edf3"),
+            QColor("#59636d"),
+            QColor("#3a2f16"),
+            QColor("#9c7b2c"),
+            QColor("#f5d67d"),
+            QColor("#20272d"),
+            QColor("#87929c"),
+            QColor("#cdd6df"),
+            QColor("#4cc58a"),
+        };
+    }
+
+    return {
+        QColor("#f6f8fa"),
+        QColor("#172321"),
+        QColor("#ffffff"),
+        QColor("#f1f5f8"),
+        QColor("#172321"),
+        QColor("#f5f7f9"),
+        QColor("#172321"),
+        QColor("#2f7de1"),
+        QColor("#ffffff"),
+        QColor("#fdfcf8"),
+        QColor("#172321"),
+        QColor("#0b63ce"),
+        QColor("#dbeafe"),
+        QColor("#879198"),
+        QColor("#f7fafb"),
+        QColor("#eef6ff"),
+        QColor("#2f7de1"),
+        QColor("#f7fbff"),
+        QColor("#b7d4f2"),
+        QColor("#172321"),
+        QColor("#edf7f1"),
+        QColor("#2f8f68"),
+        QColor("#f4fbf7"),
+        QColor("#2f8f68"),
+        QColor("#172321"),
+        QColor("#ffffff"),
+        QColor("#243036"),
+        QColor("#c4ccd1"),
+        QColor("#fff6dd"),
+        QColor("#9b7a32"),
+        QColor("#6f561f"),
+        QColor("#ffffff"),
+        QColor("#879198"),
+        QColor("#59666d"),
+        QColor("#0f9f6e"),
+    };
+}
+
+AppTheme appThemeFromString(const QString& value)
+{
+    return value.compare(QStringLiteral("dark"), Qt::CaseInsensitive) == 0 ? AppTheme::Dark : AppTheme::Light;
+}
+
+QString appThemeToString(AppTheme theme)
+{
+    return theme == AppTheme::Dark ? QStringLiteral("dark") : QStringLiteral("light");
+}
+
+AppTheme currentAppTheme()
+{
+    if (qApp && qApp->property("mycelTheme").toString() == QStringLiteral("dark")) {
+        return AppTheme::Dark;
+    }
+    return AppTheme::Light;
+}
+
+ThemeColors currentThemeColors()
+{
+    return themeColors(currentAppTheme());
+}
+
+QString cssColor(const QColor& color)
+{
+    return color.name(QColor::HexRgb);
+}
+
 QColor neutralStroke()
 {
-    return QColor("#7f8a90");
+    return currentAppTheme() == AppTheme::Dark ? QColor("#aeb9c6") : QColor("#5f6f79");
 }
+
+int connectorLineAlpha()
+{
+    return currentAppTheme() == AppTheme::Dark ? 220 : 205;
+}
+
+constexpr qreal ConnectionLayerZ = 0.0;
+constexpr qreal NodeLayerZ = 10.0;
+constexpr qreal DragLayerZ = 100.0;
+constexpr qreal RenameLayerZ = 300.0;
 
 QColor neutralFill()
 {
-    return QColor("#f7fafb");
+    return currentThemeColors().nodeFill;
 }
 
 QColor softFillFromColor(QColor color)
 {
-    color.setAlpha(42);
+    color.setAlpha(currentAppTheme() == AppTheme::Dark ? 72 : 42);
     return color;
 }
 
@@ -519,10 +682,23 @@ void assignTopLevelBranches(Node& root)
     }
 }
 
-void layoutTree(Node& node, qreal leftX, qreal& yCursor)
+QSet<QString> linkedTargetPaths(const std::vector<FileLink>& links)
+{
+    QSet<QString> targets;
+    for (const FileLink& link : links) {
+        targets.insert(link.to);
+    }
+    return targets;
+}
+
+void layoutTree(Node& node, qreal leftX, qreal& yCursor, const QSet<QString>& linkedTargets)
 {
     node.center.setX(leftX + node.size.width() / 2.0);
-    if (node.children.empty()) {
+    const auto isTreeChild = [&linkedTargets](const std::unique_ptr<Node>& child) {
+        return !linkedTargets.contains(child->path);
+    };
+    const bool hasTreeChildren = std::any_of(node.children.begin(), node.children.end(), isTreeChild);
+    if (!hasTreeChildren) {
         node.center.setY(yCursor);
         yCursor += YStep + (node.previewOpen ? node.previewSize.height() + 28.0 : 0.0);
         return;
@@ -530,9 +706,15 @@ void layoutTree(Node& node, qreal leftX, qreal& yCursor)
 
     const qreal childLeftX = leftX + std::max(XStep, node.size.width() + ParentChildGap);
     for (auto& child : node.children) {
-        layoutTree(*child, childLeftX, yCursor);
+        if (linkedTargets.contains(child->path)) {
+            continue;
+        }
+        layoutTree(*child, childLeftX, yCursor, linkedTargets);
     }
-    node.center.setY((node.children.front()->center.y() + node.children.back()->center.y()) / 2.0);
+
+    const auto first = std::find_if(node.children.begin(), node.children.end(), isTreeChild);
+    const auto last = std::find_if(node.children.rbegin(), node.children.rend(), isTreeChild);
+    node.center.setY(((*first)->center.y() + (*last)->center.y()) / 2.0);
 }
 
 void translateTree(Node& node, const QPointF& delta)
@@ -805,13 +987,18 @@ QStringList parseCsvLine(const QString& line)
 
 QString csvToHtmlTable(const QString& text)
 {
+    const ThemeColors colors = currentThemeColors();
     QString html = QStringLiteral(
-        "<html><head><style>"
-        "body{font-family:Meiryo,Segoe UI,sans-serif;color:#243036;background:#fff;}"
-        "table{border-collapse:collapse;width:100%;font-size:13px;}"
-        "td,th{border:1px solid #d1dce3;padding:4px 6px;vertical-align:top;}"
-        "tr:nth-child(even){background:#f7fafb;}"
-        "</style></head><body><table>");
+                       "<html><head><style>"
+                       "body{font-family:Meiryo,Segoe UI,sans-serif;color:%1;background:%2;}"
+                       "table{border-collapse:collapse;width:100%;font-size:13px;}"
+                       "td,th{border:1px solid %3;padding:4px 6px;vertical-align:top;}"
+                       "tr:nth-child(even){background:%4;}"
+                       "</style></head><body><table>")
+                       .arg(cssColor(colors.previewText),
+                            cssColor(colors.previewTextBackground),
+                            cssColor(colors.previewTextBorder),
+                            cssColor(colors.alternateBase));
     const QStringList lines = text.split(QLatin1Char('\n'));
     const qsizetype rowLimit = std::min<qsizetype>(lines.size(), 400);
     for (qsizetype row = 0; row < rowLimit; ++row) {
@@ -1217,7 +1404,7 @@ public:
         setFlags(QGraphicsItem::ItemIsMovable | QGraphicsItem::ItemIsSelectable |
                  QGraphicsItem::ItemSendsGeometryChanges);
         setAcceptDrops(node_->isDir);
-        setZValue(10.0);
+        setZValue(NodeLayerZ);
         createPreviewWidget();
     }
 
@@ -1412,6 +1599,7 @@ public:
 
     void paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget*) override
     {
+        const ThemeColors colors = currentThemeColors();
         painter->setRenderHint(QPainter::Antialiasing);
         const QRectF box(-node_->size.width() / 2.0, -node_->size.height() / 2.0,
                          node_->size.width(), node_->size.height());
@@ -1426,22 +1614,23 @@ public:
             painter->drawRoundedRect(box.adjusted(-4.0, -3.0, 4.0, 3.0), 8.0, 8.0);
         }
         if (isSelected()) {
-            painter->setPen(QPen(QColor("#0b63ce"), 2.0));
-            painter->setBrush(hasUserFill() ? QColor(219, 234, 254, 190) : QColor("#dbeafe"));
+            painter->setPen(QPen(colors.nodeSelectedBorder, 2.0));
+            painter->setBrush(hasUserFill() ? QColor(colors.nodeSelectedFill.red(), colors.nodeSelectedFill.green(), colors.nodeSelectedFill.blue(), 190)
+                                            : colors.nodeSelectedFill);
             painter->drawRoundedRect(box.adjusted(-4.0, -3.0, 4.0, 3.0), 8.0, 8.0);
         }
 
         if (node_->isDir && (externalDropHover_ || internalDropHover_)) {
-            painter->setPen(QPen(QColor("#1e8cff"), 3.0, Qt::DashLine, Qt::RoundCap, Qt::RoundJoin));
-            painter->setBrush(QColor(30, 140, 255, 30));
+            painter->setPen(QPen(colors.highlight, 3.0, Qt::DashLine, Qt::RoundCap, Qt::RoundJoin));
+            painter->setBrush(QColor(colors.highlight.red(), colors.highlight.green(), colors.highlight.blue(), 34));
             painter->drawRoundedRect(box.adjusted(-5.0, -5.0, 5.0, 5.0), 15.0, 15.0);
         }
         if (!node_->isDir && linkDropHover_) {
             const QRectF zone(box.right() - 25.0, box.top() + 3.0, 30.0, box.height() - 6.0);
-            painter->setPen(QPen(QColor("#0f9f6e"), 2.4, Qt::DashLine, Qt::RoundCap, Qt::RoundJoin));
-            painter->setBrush(QColor(16, 185, 129, 38));
+            painter->setPen(QPen(colors.linkAccent, 2.4, Qt::DashLine, Qt::RoundCap, Qt::RoundJoin));
+            painter->setBrush(QColor(colors.linkAccent.red(), colors.linkAccent.green(), colors.linkAccent.blue(), 42));
             painter->drawRoundedRect(zone, 8.0, 8.0);
-            painter->setPen(QPen(QColor("#047857"), 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            painter->setPen(QPen(colors.linkAccent.darker(currentAppTheme() == AppTheme::Dark ? 90 : 130), 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
             painter->drawLine(QPointF(zone.center().x() - 5.0, zone.center().y()),
                               QPointF(zone.center().x() + 5.0, zone.center().y()));
         }
@@ -1455,24 +1644,24 @@ public:
         QFont font = painter->font();
         font.setPointSize(node_->depth == 0 ? 17 : (node_->isDir ? 12 : 11));
         painter->setFont(font);
-        painter->setPen(QColor("#172321"));
+        painter->setPen(colors.nodeText);
         painter->drawText(QRectF(box.left() + (node_->isDir ? 66.0 : 40.0), box.top(),
                                  box.width() - (node_->isDir ? 76.0 : 42.0), box.height()),
                           Qt::AlignVCenter | Qt::AlignLeft, shortLabel(node_->name));
 
         if (node_->collapsed && node_->hiddenChildren > 0) {
             const QRectF badge(box.right() + 8.0, -13.0, 88.0, 26.0);
-            painter->setPen(QPen(QColor("#9b7a32"), 1.1));
-            painter->setBrush(QColor("#fff6dd"));
+            painter->setPen(QPen(colors.badgeBorder, 1.1));
+            painter->setBrush(colors.badgeBackground);
             painter->drawRoundedRect(badge, 10.0, 10.0);
             QFont badgeFont = painter->font();
             badgeFont.setPointSize(10);
             badgeFont.setBold(true);
             painter->setFont(badgeFont);
-            painter->setPen(QColor("#6f561f"));
+            painter->setPen(colors.badgeText);
             painter->drawText(badge, Qt::AlignCenter, QStringLiteral("配下 %1 件").arg(node_->hiddenChildren));
         } else if (node_->hiddenChildren > 0) {
-            painter->setPen(QColor("#86602d"));
+            painter->setPen(colors.badgeText);
             painter->drawText(QRectF(box.right() - 50.0, box.top(), 44.0, box.height()),
                               Qt::AlignCenter, QStringLiteral("+%1").arg(node_->hiddenChildren));
         }
@@ -1559,6 +1748,7 @@ private:
 
     void paintFile(QPainter* painter, const QPointF& at, const QFileInfo& info)
     {
+        const ThemeColors colors = currentThemeColors();
         QPainterPath page;
         page.moveTo(at);
         page.lineTo(at.x() + 16.0, at.y());
@@ -1567,13 +1757,13 @@ private:
         page.lineTo(at.x(), at.y() + 32.0);
         page.closeSubpath();
 
-        painter->setPen(QPen(QColor("#879198"), 1.3));
-        painter->setBrush(QColor("#ffffff"));
+        painter->setPen(QPen(colors.fileStroke, 1.3));
+        painter->setBrush(colors.filePage);
         painter->drawPath(page);
         painter->drawLine(QPointF(at.x() + 16.0, at.y()), QPointF(at.x() + 16.0, at.y() + 10.0));
         painter->drawLine(QPointF(at.x() + 16.0, at.y() + 10.0), QPointF(at.x() + 26.0, at.y() + 10.0));
 
-        painter->setPen(QPen(QColor("#59666d"), 1.1));
+        painter->setPen(QPen(colors.fileInk, 1.1));
         const bool image = isImagePreviewFile(info);
         if (image) {
             painter->drawRect(QRectF(at.x() + 5.0, at.y() + 15.0, 15.0, 10.0));
@@ -1603,11 +1793,14 @@ private:
 
     void paintInlinePreview(QPainter* painter, const QRectF& rect)
     {
-        painter->setPen(QPen(hasUserFill() ? QColor(154, 162, 168, 160) : QColor("#c4ccd1"), 1.1));
-        painter->setBrush(hasUserFill() ? windowFill() : QColor("#ffffff"));
+        const ThemeColors colors = currentThemeColors();
+        QColor border = hasUserFill() ? colors.inlinePreviewBorder : colors.inlinePreviewBorder;
+        border.setAlpha(hasUserFill() ? 180 : 255);
+        painter->setPen(QPen(border, 1.1));
+        painter->setBrush(hasUserFill() ? windowFill() : colors.inlinePreviewBackground);
         painter->drawRect(rect);
 
-        painter->setPen(QPen(QColor("#9aa5aa"), 1.2));
+        painter->setPen(QPen(colors.inlinePreviewBorder, 1.2));
         const QPointF corner(rect.right() - 12.0, rect.bottom() - 4.0);
         painter->drawLine(corner, QPointF(rect.right() - 4.0, rect.bottom() - 12.0));
         painter->drawLine(QPointF(rect.right() - 8.0, rect.bottom() - 4.0),
@@ -1616,12 +1809,13 @@ private:
 
     void paintPreviewFrame(QPainter* painter)
     {
+        const ThemeColors colors = currentThemeColors();
         const QRectF header = previewHeaderRect();
         const QRectF body = previewRect();
         const bool selected = isSelected();
-        const QColor border = selected ? QColor("#0b63ce") : (hasUserFill() ? windowColor() : QColor("#879198"));
-        const QColor bodyFill = selected ? QColor("#eef6ff") : QColor("#ffffff");
-        const QColor headerFill = selected ? QColor("#dbeafe") : (hasUserFill() ? windowFill() : QColor("#f7fafb"));
+        const QColor border = selected ? colors.nodeSelectedBorder : (hasUserFill() ? windowColor() : colors.nodeStroke);
+        const QColor bodyFill = selected ? colors.previewPanel : colors.inlinePreviewBackground;
+        const QColor headerFill = selected ? colors.nodeSelectedFill : (hasUserFill() ? windowFill() : colors.nodeFill);
         constexpr qreal radius = 4.0;
 
         painter->setPen(QPen(border, selected ? 2.0 : 1.4));
@@ -1645,7 +1839,7 @@ private:
         font.setPointSize(node_->depth == 0 ? 14 : 11);
         font.setBold(true);
         painter->setFont(font);
-        painter->setPen(QColor("#172321"));
+        painter->setPen(colors.nodeText);
         painter->drawText(QRectF(header.left() + 40.0, header.top(),
                                  header.width() - 48.0, header.height()),
                           Qt::AlignVCenter | Qt::AlignLeft, shortLabel(node_->name));
@@ -1666,7 +1860,7 @@ private:
             }
         }
 
-        painter->setPen(QPen(QColor("#9aa5aa"), 1.2));
+        painter->setPen(QPen(colors.inlinePreviewBorder, 1.2));
         const QPointF corner(body.right() - 12.0, body.bottom() - 4.0);
         painter->drawLine(corner, QPointF(body.right() - 4.0, body.bottom() - 12.0));
         painter->drawLine(QPointF(body.right() - 8.0, body.bottom() - 4.0),
@@ -1690,55 +1884,58 @@ private:
     QGraphicsProxyWidget* previewProxy_ = nullptr;
 };
 
-class MindMapScene final : public QGraphicsScene {
+class ConnectionLayerItem final : public QGraphicsItem {
 public:
-    void setRoot(Node* root) { root_ = root; }
-    void setUserColors(const std::map<QString, QColor>* userColors) { userColors_ = userColors; }
-    void setFileLinks(const std::vector<FileLink>* links) { links_ = links; }
-
-protected:
-    void drawBackground(QPainter* painter, const QRectF& rect) override
+    ConnectionLayerItem(Node* root, const std::vector<FileLink>* links)
+        : root_(root), links_(links)
     {
-        painter->fillRect(rect, QColor("#fdfcf8"));
-        painter->setPen(QPen(QColor(216, 213, 205, 170), 1.0));
-        const int grid = 28;
-        const qreal left = std::floor(rect.left() / grid) * grid;
-        const qreal top = std::floor(rect.top() / grid) * grid;
-        for (qreal x = left; x < rect.right(); x += grid) {
-            for (qreal y = top; y < rect.bottom(); y += grid) {
-                painter->drawPoint(QPointF(x, y));
-            }
+        setZValue(ConnectionLayerZ);
+        setAcceptedMouseButtons(Qt::NoButton);
+    }
+
+    QRectF boundingRect() const override
+    {
+        return QRectF(-1000000.0, -1000000.0, 2000000.0, 2000000.0);
+    }
+
+    QPainterPath shape() const override
+    {
+        return {};
+    }
+
+    void paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget*) override
+    {
+        if (!root_) {
+            return;
         }
-        if (root_) {
-            painter->setRenderHint(QPainter::Antialiasing);
-            drawEdges(painter, *root_);
-            drawFileLinks(painter);
-        }
+        painter->setRenderHint(QPainter::Antialiasing);
+        drawEdges(painter, *root_);
+        drawFileLinks(painter);
     }
 
 private:
-    Node* findNodeByPath(Node& node, const QString& path) const
+    const Node* findNodeByPath(const Node& node, const QString& path) const
     {
         if (node.path == path) {
             return &node;
         }
-        for (auto& child : node.children) {
-            if (Node* found = findNodeByPath(*child, path)) {
+        for (const auto& child : node.children) {
+            if (const Node* found = findNodeByPath(*child, path)) {
                 return found;
             }
         }
         return nullptr;
     }
 
-    void drawFileLinks(QPainter* painter)
+    void drawFileLinks(QPainter* painter) const
     {
         if (!root_ || !links_) {
             return;
         }
 
         for (const FileLink& link : *links_) {
-            Node* from = findNodeByPath(*root_, link.from);
-            Node* to = findNodeByPath(*root_, link.to);
+            const Node* from = findNodeByPath(*root_, link.from);
+            const Node* to = findNodeByPath(*root_, link.to);
             if (!from || !to || from->isDir || to->isDir) {
                 continue;
             }
@@ -1751,8 +1948,8 @@ private:
                          QPointF(end.x() - distance * 0.45, end.y()),
                          end);
             QColor color = neutralStroke();
-            color.setAlpha(125);
-            painter->setPen(QPen(color, 1.1, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            color.setAlpha(connectorLineAlpha());
+            painter->setPen(QPen(color, 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
             painter->drawPath(path);
         }
     }
@@ -1770,7 +1967,7 @@ private:
         return false;
     }
 
-    void drawEdges(QPainter* painter, const Node& node)
+    void drawEdges(QPainter* painter, const Node& node) const
     {
         if (node.children.empty()) {
             return;
@@ -1796,8 +1993,8 @@ private:
                          QPointF(end.x() - 38.0, end.y()),
                          end);
             QColor color = neutralStroke();
-            color.setAlpha(125);
-            const qreal width = child->isDir ? (node.depth == 0 ? 2.6 : 2.1) : 1.1;
+            color.setAlpha(connectorLineAlpha());
+            const qreal width = child->isDir ? (node.depth == 0 ? 3.0 : 2.5) : 1.5;
             painter->setPen(QPen(color, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
             painter->drawPath(path);
             drawEdges(painter, *child);
@@ -1805,8 +2002,26 @@ private:
     }
 
     Node* root_ = nullptr;
-    const std::map<QString, QColor>* userColors_ = nullptr;
     const std::vector<FileLink>* links_ = nullptr;
+};
+
+class MindMapScene final : public QGraphicsScene {
+protected:
+    void drawBackground(QPainter* painter, const QRectF& rect) override
+    {
+        const ThemeColors colors = currentThemeColors();
+        painter->fillRect(rect, colors.canvasBackground);
+        QColor gridColor = currentAppTheme() == AppTheme::Dark ? QColor(69, 78, 88, 150) : QColor(216, 213, 205, 170);
+        painter->setPen(QPen(gridColor, 1.0));
+        const int grid = 28;
+        const qreal left = std::floor(rect.left() / grid) * grid;
+        const qreal top = std::floor(rect.top() / grid) * grid;
+        for (qreal x = left; x < rect.right(); x += grid) {
+            for (qreal y = top; y < rect.bottom(); y += grid) {
+                painter->drawPoint(QPointF(x, y));
+            }
+        }
+    }
 };
 
 class BoardView final : public QGraphicsView {
@@ -2899,6 +3114,10 @@ public:
         : QMainWindow(parent), rootPath_(std::move(rootPath)), mycelStorageEnabled_(mycelStorageEnabled)
     {
         resize(1280, 820);
+        uiTheme_ = appThemeFromString(QSettings().value(QStringLiteral("ui/theme"), QStringLiteral("light")).toString());
+        if (qApp) {
+            qApp->setProperty("mycelTheme", appThemeToString(uiTheme_));
+        }
 
         editorSplitter_ = new QSplitter(Qt::Horizontal, this);
 
@@ -3045,6 +3264,22 @@ public:
                 break;
             }
         }
+        auto* themeButton = new QToolButton(this);
+        themeButton->setText(QStringLiteral("Theme"));
+        themeButton->setPopupMode(QToolButton::InstantPopup);
+        auto* themeMenu = new QMenu(themeButton);
+        themeButton->setMenu(themeMenu);
+        auto* themeGroup = new QActionGroup(this);
+        themeGroup->setExclusive(true);
+        lightThemeAction_ = themeMenu->addAction(QStringLiteral("Light"));
+        darkThemeAction_ = themeMenu->addAction(QStringLiteral("Dark"));
+        for (QAction* action : {lightThemeAction_, darkThemeAction_}) {
+            action->setCheckable(true);
+            themeGroup->addAction(action);
+        }
+        lightThemeAction_->setData(QStringLiteral("light"));
+        darkThemeAction_->setData(QStringLiteral("dark"));
+        toolbar->addWidget(themeButton);
         QAction* renameSelectedAction = new QAction(this);
         renameSelectedAction->setShortcut(QKeySequence(Qt::Key_F2));
         renameSelectedAction->setShortcutContext(Qt::ApplicationShortcut);
@@ -3099,6 +3334,9 @@ public:
         connect(copyDebugButton, &QPushButton::clicked, this, [this] { copyDebugPaneToClipboard(); });
         connect(editorPositionGroup, &QActionGroup::triggered, this, [this](QAction* action) {
             applyEditorPanePosition(action->data().toString(), true);
+        });
+        connect(themeGroup, &QActionGroup::triggered, this, [this](QAction* action) {
+            applyTheme(appThemeFromString(action->data().toString()), true, true);
         });
         connect(editorPaneAction_, &QAction::toggled, this, [this](bool visible) {
             if (!visible && !saveSideEditorNow()) {
@@ -3182,6 +3420,7 @@ public:
         if (!loadCollapsedFile()) {
             applyLargeTreeStartupCollapse();
         }
+        applyTheme(uiTheme_, false, false);
         restoreWindowStateFromSettingsFile();
         rebuild(true);
         QTimer::singleShot(0, this, [this] { syncEditorPaneVisibility(); });
@@ -3499,13 +3738,18 @@ public:
         if (!info.exists() || !info.isFile() || !isTextPreviewFile(info) || info.size() > 4 * 1024 * 1024) {
             return false;
         }
+
+        const bool previousSuppressSelectionUpdate = suppressSideEditorSelectionUpdate_;
+        suppressSideEditorSelectionUpdate_ = true;
+        selectNodePath(path);
+        suppressSideEditorSelectionUpdate_ = previousSuppressSelectionUpdate;
+
         if (editorPaneAction_ && !editorPaneAction_->isChecked()) {
             editorPaneAction_->setChecked(true);
         } else {
             sideEditorPanel_->setVisible(true);
-            updateSideEditorForSelection();
         }
-        selectNodePath(path);
+
         loadSideEditorFile(path);
         sideEditorStatusLabel_->setText(QStringLiteral("編集中"));
         sideEditor_->setFocus(Qt::MouseFocusReason);
@@ -4094,30 +4338,167 @@ public:
         sideEditorStatusLabel_->setText(status);
     }
 
+    void applyTheme(AppTheme theme, bool persist, bool refreshTree)
+    {
+        uiTheme_ = theme;
+        const ThemeColors colors = themeColors(theme);
+        if (qApp) {
+            qApp->setProperty("mycelTheme", appThemeToString(theme));
+
+            QPalette palette;
+            palette.setColor(QPalette::Window, colors.window);
+            palette.setColor(QPalette::WindowText, colors.windowText);
+            palette.setColor(QPalette::Base, colors.base);
+            palette.setColor(QPalette::AlternateBase, colors.alternateBase);
+            palette.setColor(QPalette::Text, colors.text);
+            palette.setColor(QPalette::Button, colors.button);
+            palette.setColor(QPalette::ButtonText, colors.buttonText);
+            palette.setColor(QPalette::Highlight, colors.highlight);
+            palette.setColor(QPalette::HighlightedText, colors.highlightedText);
+            palette.setColor(QPalette::ToolTipBase, colors.base);
+            palette.setColor(QPalette::ToolTipText, colors.text);
+            qApp->setPalette(palette);
+            qApp->setStyleSheet(QStringLiteral(
+                                    "QMainWindow, QDialog, QWidget { color: %1; }"
+                                    "QToolBar { background: %2; border-bottom: 1px solid %3; spacing: 3px; }"
+                                    "QToolButton, QPushButton { background: %4; color: %1; border: 1px solid %3; "
+                                    "border-radius: 4px; padding: 4px 8px; }"
+                                    "QToolButton:hover, QPushButton:hover { border-color: %5; }"
+                                    "QMenu { background: %2; color: %1; border: 1px solid %3; }"
+                                    "QMenu::item:selected { background: %5; color: %6; }"
+                                    "QScrollBar { background: %2; }")
+                                    .arg(cssColor(colors.text),
+                                         cssColor(colors.window),
+                                         cssColor(colors.inlinePreviewBorder),
+                                         cssColor(colors.button),
+                                         cssColor(colors.highlight),
+                                         cssColor(colors.highlightedText)));
+        }
+
+        if (persist) {
+            QSettings settings;
+            settings.setValue(QStringLiteral("ui/theme"), appThemeToString(theme));
+            settings.sync();
+        }
+
+        updateThemeActions();
+        applyTextPaneTheme();
+        if (!sideEditorEditing_ && !sideEditorPath_.isEmpty()) {
+            loadSidePreviewFile(sideEditorPath_);
+        } else {
+            setSidePaneMode(sideEditorEditing_,
+                            sideEditorEditing_ ? QStringLiteral("編集中")
+                                               : (sideEditorStatusLabel_ ? sideEditorStatusLabel_->text() : QString()));
+        }
+        if (view_) {
+            view_->setBackgroundBrush(colors.canvasBackground);
+            view_->viewport()->update();
+        }
+        scene_.update();
+        if (refreshTree && root_) {
+            rebuild(false);
+        }
+    }
+
+    void updateThemeActions()
+    {
+        if (lightThemeAction_) {
+            lightThemeAction_->setChecked(uiTheme_ == AppTheme::Light);
+        }
+        if (darkThemeAction_) {
+            darkThemeAction_->setChecked(uiTheme_ == AppTheme::Dark);
+        }
+    }
+
+    void applyTextPaneTheme()
+    {
+        const ThemeColors colors = currentThemeColors();
+        if (sidePreviewText_) {
+            sidePreviewText_->setStyleSheet(QStringLiteral(
+                                                "QTextEdit { background: %1; color: %2; border: 1px solid %3; "
+                                                "border-radius: 4px; padding: 8px; selection-background-color: %4; "
+                                                "selection-color: %5; }")
+                                                .arg(cssColor(colors.previewTextBackground),
+                                                     cssColor(colors.previewText),
+                                                     cssColor(colors.previewTextBorder),
+                                                     cssColor(colors.highlight),
+                                                     cssColor(colors.highlightedText)));
+            sidePreviewText_->document()->setDefaultStyleSheet(QStringLiteral(
+                                                                   "* { color: %1; } a { color: %2; }")
+                                                                   .arg(cssColor(colors.previewText),
+                                                                        cssColor(colors.highlight)));
+        }
+        if (sideEditor_) {
+            sideEditor_->setStyleSheet(QStringLiteral(
+                                           "QPlainTextEdit { background: %1; color: %2; border: 2px solid %3; "
+                                           "border-radius: 4px; padding: 8px; selection-background-color: %4; "
+                                           "selection-color: %5; }")
+                                           .arg(cssColor(colors.editTextBackground),
+                                                cssColor(colors.editText),
+                                                cssColor(colors.editTextBorder),
+                                                cssColor(colors.highlight),
+                                                cssColor(colors.highlightedText)));
+        }
+        if (debugText_) {
+            const QColor debugBackground = uiTheme_ == AppTheme::Dark ? QColor("#0f1419") : QColor("#111827");
+            debugText_->setStyleSheet(QStringLiteral(
+                                          "QPlainTextEdit { background: %1; color: #e5e7eb; border: none; "
+                                          "font-family: Menlo, Consolas, monospace; font-size: 11px; }")
+                                          .arg(cssColor(debugBackground)));
+        }
+        if (renameEdit_) {
+            applyRenameEditTheme(renameEdit_);
+        }
+    }
+
+    void applyRenameEditTheme(QLineEdit* edit)
+    {
+        if (!edit) {
+            return;
+        }
+        const ThemeColors colors = currentThemeColors();
+        edit->setStyleSheet(QStringLiteral(
+                                "QLineEdit { background: %1; color: %2; border: 1px solid %3; "
+                                "border-radius: 5px; padding: 2px 5px; selection-background-color: %4; "
+                                "selection-color: %5; }")
+                                .arg(cssColor(colors.base),
+                                     cssColor(colors.text),
+                                     cssColor(colors.highlight),
+                                     cssColor(colors.highlight),
+                                     cssColor(colors.highlightedText)));
+    }
+
     void setSidePaneMode(bool editing, const QString& detail)
     {
         if (!sideModeLabel_ || !sideEditorPanel_) {
             return;
         }
 
+        const ThemeColors colors = currentThemeColors();
         if (editing) {
             sideModeLabel_->setText(detail.isEmpty()
                                         ? QStringLiteral("EDIT")
                                         : QStringLiteral("EDIT - %1").arg(detail));
             sideModeLabel_->setStyleSheet(QStringLiteral(
-                "QLabel { background: #2f8f68; color: #ffffff; border-radius: 4px; "
-                "font-weight: 700; padding: 3px 8px; }"));
+                                               "QLabel { background: %1; color: #ffffff; border-radius: 4px; "
+                                               "font-weight: 700; padding: 3px 8px; }")
+                                               .arg(cssColor(colors.editPanelBorder)));
             sideEditorPanel_->setStyleSheet(QStringLiteral(
-                "QWidget#SideEditorPanel { background: #edf7f1; border-left: 4px solid #2f8f68; }"));
+                                                 "QWidget#SideEditorPanel { background: %1; border-left: 4px solid %2; }")
+                                                 .arg(cssColor(colors.editPanel),
+                                                      cssColor(colors.editPanelBorder)));
         } else {
             sideModeLabel_->setText(detail.isEmpty()
                                         ? QStringLiteral("PREVIEW")
                                         : QStringLiteral("PREVIEW - %1").arg(detail));
             sideModeLabel_->setStyleSheet(QStringLiteral(
-                "QLabel { background: #2f7de1; color: #ffffff; border-radius: 4px; "
-                "font-weight: 700; padding: 3px 8px; }"));
+                                               "QLabel { background: %1; color: #ffffff; border-radius: 4px; "
+                                               "font-weight: 700; padding: 3px 8px; }")
+                                               .arg(cssColor(colors.previewPanelBorder)));
             sideEditorPanel_->setStyleSheet(QStringLiteral(
-                "QWidget#SideEditorPanel { background: #eef6ff; border-left: 4px solid #2f7de1; }"));
+                                                 "QWidget#SideEditorPanel { background: %1; border-left: 4px solid %2; }")
+                                                 .arg(cssColor(colors.previewPanel),
+                                                      cssColor(colors.previewPanelBorder)));
         }
     }
 
@@ -4481,14 +4862,14 @@ public:
         renamingPath_ = node->path;
         renameEdit_ = new QLineEdit(info.fileName());
         renameEdit_->setFrame(false);
-        renameEdit_->setStyleSheet(QStringLiteral(
-            "QLineEdit { background: #ffffff; color: #172321; border: 1px solid #1e8cff; "
-            "border-radius: 5px; padding: 2px 5px; selection-background-color: #1e8cff; "
-            "selection-color: #ffffff; }"));
+        applyRenameEditTheme(renameEdit_);
         renameEdit_->installEventFilter(this);
+        connect(renameEdit_, &QLineEdit::returnPressed, this, [this] {
+            QTimer::singleShot(0, this, [this] { finishInlineRename(true); });
+        });
 
         renameProxy_ = scene_.addWidget(renameEdit_);
-        renameProxy_->setZValue(300.0);
+        renameProxy_->setZValue(RenameLayerZ);
         const QRectF rect = target->labelSceneRect().adjusted(-2.0, -2.0, 8.0, 2.0);
         renameProxy_->setPos(rect.topLeft());
         renameProxy_->resize(rect.size());
@@ -5979,10 +6360,17 @@ public:
             return false;
         }
         if (!current->isDir) {
+            for (const FileLink& link : fileLinks_) {
+                if (link.from != current->path) {
+                    continue;
+                }
+                if (findVisibleNodeByPath(root_.get(), link.to)) {
+                    return selectNodePath(link.to, true);
+                }
+            }
             view_->setFocus(Qt::ShortcutFocusReason);
             return root_ != nullptr;
         }
-
         const QString folderPath = current->path;
         if (collapsedPaths_.contains(folderPath)) {
             collapsedPaths_.remove(folderPath);
@@ -6495,6 +6883,29 @@ public:
 
     bool eventFilter(QObject* watched, QEvent* event) override
     {
+        if (renameEdit_ && event->type() == QEvent::KeyPress) {
+            auto* keyEvent = static_cast<QKeyEvent*>(event);
+            if (keyEvent->key() == Qt::Key_Escape) {
+                QTimer::singleShot(0, this, [this] { finishInlineRename(false); });
+                return true;
+            }
+            if (watched != renameEdit_ &&
+                (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter)) {
+                QTimer::singleShot(0, this, [this] { finishInlineRename(true); });
+                return true;
+            }
+            if (watched != renameEdit_) {
+                renameEdit_->setFocus(Qt::OtherFocusReason);
+                QKeyEvent forwarded(keyEvent->type(),
+                                    keyEvent->key(),
+                                    keyEvent->modifiers(),
+                                    keyEvent->text(),
+                                    keyEvent->isAutoRepeat(),
+                                    keyEvent->count());
+                QApplication::sendEvent(renameEdit_, &forwarded);
+                return true;
+            }
+        }
         if (event->type() == QEvent::KeyPress && isInlinePreviewObject(watched)) {
             auto* keyEvent = static_cast<QKeyEvent*>(event);
             recordDebugEvent(QStringLiteral("inline preview key: %1").arg(debugKeyName(keyEvent)));
@@ -6536,21 +6947,9 @@ public:
         if (event->type() == QEvent::MouseButtonPress) {
             auto* mouseEvent = static_cast<QMouseEvent*>(event);
             if (mouseEvent->button() == Qt::LeftButton) {
-                if ((watched == sidePreviewText_ || watched == sidePreviewText_->viewport()) &&
-                    !sideEditorPath_.isEmpty()) {
+                if (isSidePreviewObject(watched) && !sideEditorPath_.isEmpty()) {
                     return focusEditorForPath(sideEditorPath_);
                 }
-            }
-        }
-        if (watched == renameEdit_ && event->type() == QEvent::KeyPress) {
-            auto* keyEvent = static_cast<QKeyEvent*>(event);
-            if (keyEvent->key() == Qt::Key_Escape) {
-                QTimer::singleShot(0, this, [this] { finishInlineRename(false); });
-                return true;
-            }
-            if (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter) {
-                QTimer::singleShot(0, this, [this] { finishInlineRename(true); });
-                return true;
             }
         }
         return QMainWindow::eventFilter(watched, event);
@@ -6584,6 +6983,32 @@ private:
             if (object->property("mycelInlinePreview").toBool()) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    bool isSidePreviewObject(QObject* watched) const
+    {
+        if (!sidePreviewStack_ || sideEditorEditing_ || sidePreviewStack_->currentWidget() == sideEditor_) {
+            return false;
+        }
+
+        QWidget* currentPreview = sidePreviewStack_->currentWidget();
+        for (QObject* object = watched; object; object = object->parent()) {
+            if (object == currentPreview || object == sidePreviewStack_) {
+                return true;
+            }
+            if (sidePreviewText_ && (object == sidePreviewText_ || object == sidePreviewText_->viewport())) {
+                return true;
+            }
+            if (object == sidePreviewImage_ || object == sidePreviewVideo_) {
+                return true;
+            }
+#if MYCEL_HAS_WEBENGINE
+            if (object == sideHtmlWeb_) {
+                return true;
+            }
+#endif
         }
         return false;
     }
@@ -8042,13 +8467,11 @@ private:
         assignTopLevelBranches(*root_);
 
         qreal yCursor = 0.0;
-        layoutTree(*root_, 0.0, yCursor);
+        layoutTree(*root_, 0.0, yCursor, linkedTargetPaths(fileLinks_));
         layoutFileLinks(*root_, fileLinks_);
         translateTree(*root_, QPointF(140.0, 120.0 - root_->center.y()));
 
-        scene_.setRoot(root_.get());
-        scene_.setUserColors(&userColors_);
-        scene_.setFileLinks(&fileLinks_);
+        scene_.addItem(new ConnectionLayerItem(root_.get(), &fileLinks_));
         visitNodes(*root_, [this](Node& node) {
             scene_.addItem(new NodeItem(&node, this));
         });
@@ -8201,6 +8624,9 @@ private:
     std::vector<FileLink> fileLinks_;
     QAction* editorPaneAction_ = nullptr;
     QAction* debugPaneAction_ = nullptr;
+    QAction* lightThemeAction_ = nullptr;
+    QAction* darkThemeAction_ = nullptr;
+    AppTheme uiTheme_ = AppTheme::Light;
     QStringList debugEvents_;
     QWidget* sideEditorPanel_ = nullptr;
     QStackedWidget* sidePreviewStack_ = nullptr;
@@ -8493,7 +8919,7 @@ void NodeItem::beginFallbackDragAtScene(const QPointF& scenePos)
     dragStart_ = pos();
     pressStartScene_ = scenePos;
     setOpacity(0.72);
-    setZValue(100.0);
+    setZValue(DragLayerZ);
 }
 
 void NodeItem::updateFallbackDragAtScene(const QPointF& scenePos)
@@ -8554,10 +8980,16 @@ void NodeItem::createPreviewWidget()
     textEdit->viewport()->setProperty("mycelInlinePreview", true);
     textEdit->viewport()->setAutoFillBackground(false);
     textEdit->document()->setDocumentMargin(8.0);
-    textEdit->document()->setDefaultStyleSheet(QStringLiteral("* { color: #243036; } a { color: #1168b3; }"));
+    const ThemeColors colors = currentThemeColors();
+    textEdit->document()->setDefaultStyleSheet(QStringLiteral("* { color: %1; } a { color: %2; }")
+                                                   .arg(cssColor(colors.inlinePreviewText),
+                                                        cssColor(colors.highlight)));
     textEdit->setStyleSheet(QStringLiteral(
-        "QTextEdit { background: transparent; border: none; color: #243036; "
-        "selection-background-color: #bfdbfe; selection-color: #111827; }"));
+                                "QTextEdit { background: transparent; border: none; color: %1; "
+                                "selection-background-color: %2; selection-color: %3; }")
+                                .arg(cssColor(colors.inlinePreviewText),
+                                     cssColor(colors.highlight),
+                                     cssColor(colors.highlightedText)));
 
     QFont previewFont;
     if (isMarkdownPreviewFile(info)) {
@@ -8685,7 +9117,7 @@ void NodeItem::mousePressEvent(QGraphicsSceneMouseEvent* event)
                                       .arg(event->scenePos().x(), 0, 'f', 1)
                                       .arg(event->scenePos().y(), 0, 'f', 1));
         setOpacity(0.72);
-        setZValue(100.0);
+        setZValue(DragLayerZ);
     }
     QGraphicsItem::mousePressEvent(event);
 }

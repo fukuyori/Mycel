@@ -128,9 +128,11 @@ $RequiredRuntimeFiles = @(
     "Qt6Multimedia.dll",
     "Qt6MultimediaWidgets.dll",
     "Qt6Widgets.dll",
+    "QtWebEngineProcess.exe",
     "multimedia\ffmpegmediaplugin.dll",
     "multimedia\windowsmediaplugin.dll",
-    "platforms\qwindows.dll"
+    "platforms\qwindows.dll",
+    "resources\qtwebengine_resources.pak"
 )
 
 foreach ($RequiredFile in $RequiredRuntimeFiles) {
@@ -149,6 +151,8 @@ New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 
 Copy-Item -LiteralPath $ExePath -Destination $StagingDir -Force
 Copy-Item -Path (Join-Path $BuildDir "*.dll") -Destination $StagingDir -Force
+Copy-IfExists (Join-Path $BuildDir "QtWebEngineProcess.exe") $StagingDir
+Copy-IfExists (Join-Path $BuildDir "vc_redist.x64.exe") $StagingDir
 
 $RuntimeDirectories = @(
     "generic",
@@ -157,6 +161,10 @@ $RuntimeDirectories = @(
     "multimedia",
     "networkinformation",
     "platforms",
+    "position",
+    "qml",
+    "qmltooling",
+    "resources",
     "styles",
     "tls",
     "translations"
@@ -168,6 +176,7 @@ foreach ($RuntimeDirectory in $RuntimeDirectories) {
 
 Copy-IfExists (Join-Path $RootDir "README.md") $StagingDir
 Copy-IfExists (Join-Path $RootDir "README.ja.md") $StagingDir
+Copy-IfExists (Join-Path $RootDir "LICENSE") $StagingDir
 Copy-Item -LiteralPath $IconPath -Destination $StagingDir -Force
 
 $EscapedPayloadDir = Escape-IssString $StagingDir
@@ -191,6 +200,7 @@ DisableProgramGroupPage=yes
 OutputDir=$EscapedOutputDir
 OutputBaseFilename=MycelSetup-{#MyAppVersion}
 SetupIconFile=$EscapedIconPath
+LicenseFile={#PayloadDir}\LICENSE
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible

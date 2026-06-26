@@ -4,7 +4,7 @@ Mycel is a C++/Qt mind-map tool that uses the system's folder and file structure
 
 Instead of treating files as a vertical file list, Mycel lays out folders and files as connected nodes on a whiteboard-style canvas. It is designed for exploring project structure, understanding document sets, and organizing information as a map while keeping the underlying data in normal system folders and files.
 
-- Current version: 0.3.8
+- Current version: 0.3.9
 - Release history: [CHANGELOG.md](CHANGELOG.md)
 - Development plan: [docs/development-plan.ja.md](docs/development-plan.ja.md)
 - Japanese documentation: [README.ja.md](README.ja.md)
@@ -15,6 +15,7 @@ Instead of treating files as a vertical file list, Mycel lays out folders and fi
 
 - Folders and files rendered as connected nodes
 - Large whiteboard-style canvas with free pan and zoom
+- Light and dark themes
 - Folder collapse and expand
 - Mixed file/folder ordering
 - File-to-file linking by dropping a file on the right edge of another file
@@ -29,7 +30,7 @@ Instead of treating files as a vertical file list, Mycel lays out folders and fi
 - Copy selected items with `Ctrl + C` / `Ctrl + V`
 - Watch external file and folder changes under the root and refresh changed folders automatically
 - Export/import a Mycel Archive Markdown file
-- Inline rename with F2
+- Inline rename with F2 and Enter confirmation
 - Context menus for refresh, delete, color, creation, and open actions
 
 ### Preview And Editing
@@ -129,6 +130,7 @@ On normal startup, if the root directory does not contain a `.mycel` folder, Myc
 | + / - | Zoom in or out |
 | F5 | Reload the whole map |
 | F11 | Maximize or restore the window |
+| Toolbar Theme | Switch between light and dark themes |
 | ? | Show the cheat sheet |
 
 On macOS, two-finger trackpad slide pans the canvas while trackpad pinch remains zoom. Windows and Linux keep the existing wheel behavior.
@@ -142,7 +144,7 @@ On macOS, two-finger trackpad slide pans the canvas while trackpad pinch remains
 | Shift + Tab | Move to the previous visible item at the same level |
 | Up / Down | Move to the previous or next item in the same folder |
 | Left | Move to the parent folder |
-| Right | Move to the first item inside the selected folder |
+| Right | Move to the first linked target file, or the first item inside the selected folder |
 | F2 with one file or folder selected | Rename it inline |
 | O | Open the selected item with the OS default application |
 
@@ -167,6 +169,7 @@ On macOS, two-finger trackpad slide pans the canvas while trackpad pinch remains
 | Enter | Toggle selected file previews or selected folder collapse |
 | Drag the lower-right corner of a preview | Resize the preview |
 | Select preview text and press Ctrl + C | Copy text |
+| Click the preview pane for an editable selected file | Enter plain-text edit mode |
 | E | Edit the selected file as plain text |
 | Ctrl + E | Show or hide the preview pane |
 | Toolbar Preview Place | Move the preview pane to the left, right, or bottom |
@@ -308,3 +311,7 @@ The `Sample` directory contains a business process reform mind-map sample. Open 
 ```
 
 It includes nested folders and Markdown notes for current-state analysis, issue structure, reform themes, measures, KPIs, roadmap, communication, risk management, and meeting notes.
+
+## License
+
+Mycel is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
