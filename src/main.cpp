@@ -749,6 +749,22 @@ Node* findNodeByPath(Node& node, const QString& path)
     return nullptr;
 }
 
+// True when two scans describe the same displayed tree: same paths, same file/dir kind,
+// and the same children in the same order, recursively. Used to skip re-rendering when a
+// filesystem notification (e.g. a cloud-sync mtime touch) did not change what is shown.
+bool sameVisibleStructure(const Node& a, const Node& b)
+{
+    if (a.path != b.path || a.isDir != b.isDir || a.children.size() != b.children.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.children.size(); ++i) {
+        if (!sameVisibleStructure(*a.children[i], *b.children[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 QRectF nodePaintBounds(const Node& node)
 {
     QRectF nodeRect(node.center.x() - node.size.width() / 2.0 - 220.0,
@@ -2058,6 +2074,45 @@ protected:
     }
 };
 
+// Owns the single in-progress node-drag session. BoardView routes its press/move/release
+// here so there is one place that knows which node is being dragged; the per-node motion
+// and drop logic still lives on NodeItem (beginDrag/updateDrag/finishDrag).
+class DragController {
+public:
+    bool active() const { return node_ != nullptr; }
+
+    void begin(NodeItem* node, const QPointF& scenePos, Qt::KeyboardModifiers modifiers)
+    {
+        node_ = node;
+        if (node_) {
+            node_->beginDrag(scenePos, modifiers);
+        }
+    }
+
+    void update(const QPointF& scenePos)
+    {
+        if (node_) {
+            node_->updateDrag(scenePos);
+        }
+    }
+
+    void finish(Qt::MouseButton button, const QPointF& scenePos)
+    {
+        NodeItem* node = node_;
+        node_ = nullptr;  // cleared first: finishDrag may rebuild and delete the item
+        if (node) {
+            node->finishDrag(button, scenePos);
+        }
+    }
+
+    // Drop the session without finishing it — used when a rebuild is about to delete the
+    // dragged item, so the pointer never dangles.
+    void cancel() { node_ = nullptr; }
+
+private:
+    NodeItem* node_ = nullptr;
+};
+
 class BoardView final : public QGraphicsView {
 public:
     explicit BoardView(QWidget* parent = nullptr) : QGraphicsView(parent)
@@ -2102,10 +2157,10 @@ public:
         imageResizePath_.clear();
         // A rebuild destroys every NodeItem, so any in-progress drag pointer would
         // dangle. Drop it here (renderCurrentTree calls this before scene_.clear()).
-        dragNode_ = nullptr;
+        dragController_.cancel();
     }
 
-    bool isDraggingNode() const { return dragNode_ != nullptr; }
+    bool isDraggingNode() const { return dragController_.active(); }
 
 protected:
     void wheelEvent(QWheelEvent* event) override
@@ -2207,8 +2262,7 @@ protected:
                 // a press on a child preview proxy widget must pass through so the preview
                 // stays interactive. Alt+drag is reserved for panning.
                 if (!(event->modifiers() & Qt::AltModifier) && itemAt(event->pos()) == nodeItem) {
-                    dragNode_ = nodeItem;
-                    nodeItem->beginDrag(scenePos, event->modifiers());
+                    dragController_.begin(nodeItem, scenePos, event->modifiers());
                     event->accept();
                     return;
                 }
@@ -2272,8 +2326,8 @@ protected:
             event->accept();
             return;
         }
-        if (dragNode_ && (event->buttons() & Qt::LeftButton)) {
-            dragNode_->updateDrag(mapToScene(event->pos()));
+        if (dragController_.active() && (event->buttons() & Qt::LeftButton)) {
+            dragController_.update(mapToScene(event->pos()));
             event->accept();
             return;
         }
@@ -2316,11 +2370,9 @@ protected:
             event->accept();
             return;
         }
-        if (dragNode_ && event->button() == Qt::LeftButton) {
-            notifyDebug(QStringLiteral("view finalize node drag: %1").arg(dragNode_->path()));
-            NodeItem* node = dragNode_;
-            dragNode_ = nullptr;  // cleared first: finishDrag may rebuild and delete the item
-            node->finishDrag(Qt::LeftButton, mapToScene(event->pos()));
+        if (dragController_.active() && event->button() == Qt::LeftButton) {
+            notifyDebug(QStringLiteral("view finalize node drag"));
+            dragController_.finish(Qt::LeftButton, mapToScene(event->pos()));
             event->accept();
             return;
         }
@@ -2580,7 +2632,7 @@ private:
     }
 
     bool panning_ = false;
-    NodeItem* dragNode_ = nullptr;  // node whose drag this view is currently driving
+    DragController dragController_;  // owns the in-progress node-drag session
     QString imageResizePath_;
     QPointF imageResizeStartScene_;
     QSizeF imageResizeStartSize_;
@@ -3297,6 +3349,100 @@ public:
                                     QFileInfo(destination).fileName(), req.isDir});
         }
         return result;
+    }
+};
+
+// Decides what a drag would drop onto (a folder to move into, or a file to link to)
+// from the scene contents and the pointer position. Pure hit-testing over the scene;
+// it holds no drag state and performs no mutation, so the gesture orchestration in
+// BoardView / NodeItem only has to ask "what is under here" rather than reimplement it.
+class DropTargetResolver {
+public:
+    // The folder node the dragged items would move into, or nullptr. dragItems are the
+    // items being moved (excluded as candidates, along with their descendants).
+    static NodeItem* folderTarget(const QGraphicsScene& scene, const NodeItem* source,
+                                  const std::vector<NodeItem*>& dragItems, const QPointF& scenePos)
+    {
+        if (!source) {
+            return nullptr;
+        }
+
+        const auto isMovingItem = [&dragItems](const NodeItem* item) {
+            if (!item || !item->node()) {
+                return false;
+            }
+            for (const NodeItem* dragItem : dragItems) {
+                if (!dragItem || !dragItem->node()) {
+                    continue;
+                }
+                if (item == dragItem || isDescendantPath(dragItem->node()->path, item->node()->path)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        constexpr qreal FolderDropIntentMargin = 28.0;
+        for (QGraphicsItem* item : scene.items(scenePos)) {
+            auto* candidate = dynamic_cast<NodeItem*>(item);
+            if (!candidate || candidate == source || !candidate->node()->isDir) {
+                continue;
+            }
+            if (!isMovingItem(candidate)) {
+                return candidate;
+            }
+        }
+
+        const QRectF dropRect = source->sceneBoundingRect().adjusted(-10.0, -10.0, 10.0, 10.0);
+        NodeItem* best = nullptr;
+        qreal bestOverlap = 0.0;
+        const QRectF intentRect = dropRect.united(QRectF(scenePos, QSizeF(1.0, 1.0))
+                                                      .adjusted(-FolderDropIntentMargin, -FolderDropIntentMargin,
+                                                                FolderDropIntentMargin, FolderDropIntentMargin));
+        for (QGraphicsItem* item : scene.items(intentRect, Qt::IntersectsItemBoundingRect)) {
+            auto* candidate = dynamic_cast<NodeItem*>(item);
+            if (!candidate || candidate == source || !candidate->node()->isDir) {
+                continue;
+            }
+            if (isMovingItem(candidate)) {
+                continue;
+            }
+
+            const QRectF overlap = dropRect.intersected(candidate->sceneBoundingRect());
+            qreal area = overlap.width() * overlap.height();
+            if (candidate->sceneBoundingRect().adjusted(-FolderDropIntentMargin, -FolderDropIntentMargin,
+                                                        FolderDropIntentMargin, FolderDropIntentMargin)
+                    .contains(scenePos)) {
+                area += 1.0e9;
+            }
+            if (area > bestOverlap) {
+                bestOverlap = area;
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    // The file node the dragged file would be linked to, or nullptr. Links require
+    // metadata storage, a single non-directory source, and a non-directory target.
+    static NodeItem* linkTarget(const QGraphicsScene& scene, const NodeItem* source,
+                                bool multiDrag, bool mycelStorageEnabled, const QPointF& scenePos)
+    {
+        constexpr qreal LinkDropIntentMargin = 72.0;
+        if (!mycelStorageEnabled || !source || !source->node() || source->node()->isDir || multiDrag) {
+            return nullptr;
+        }
+
+        for (QGraphicsItem* item : scene.items()) {
+            auto* candidate = dynamic_cast<NodeItem*>(item);
+            if (!candidate || candidate == source || !candidate->node() || candidate->node()->isDir) {
+                continue;
+            }
+            if (candidate->containsLinkDropScenePoint(scenePos, LinkDropIntentMargin)) {
+                return candidate;
+            }
+        }
+        return nullptr;
     }
 };
 
@@ -5627,85 +5773,13 @@ public:
 
     NodeItem* folderItemForDrop(const NodeItem* source, const QPointF& scenePos) const
     {
-        if (!source) {
-            return nullptr;
-        }
-
-        const std::vector<NodeItem*> dragItems = selectedTopLevelDragItems(source);
-        const auto isMovingItem = [&dragItems](const NodeItem* item) {
-            if (!item || !item->node()) {
-                return false;
-            }
-            for (const NodeItem* dragItem : dragItems) {
-                if (!dragItem || !dragItem->node()) {
-                    continue;
-                }
-                if (item == dragItem || isDescendantPath(dragItem->node()->path, item->node()->path)) {
-                    return true;
-                }
-            }
-            return false;
-        };
-
-        constexpr qreal FolderDropIntentMargin = 28.0;
-        for (QGraphicsItem* item : scene_.items(scenePos)) {
-            auto* candidate = dynamic_cast<NodeItem*>(item);
-            if (!candidate || candidate == source || !candidate->node()->isDir) {
-                continue;
-            }
-            if (!isMovingItem(candidate)) {
-                return candidate;
-            }
-        }
-
-        const QRectF dropRect = source->sceneBoundingRect().adjusted(-10.0, -10.0, 10.0, 10.0);
-        NodeItem* best = nullptr;
-        qreal bestOverlap = 0.0;
-        const QRectF intentRect = dropRect.united(QRectF(scenePos, QSizeF(1.0, 1.0))
-                                                      .adjusted(-FolderDropIntentMargin, -FolderDropIntentMargin,
-                                                                FolderDropIntentMargin, FolderDropIntentMargin));
-        for (QGraphicsItem* item : scene_.items(intentRect, Qt::IntersectsItemBoundingRect)) {
-            auto* candidate = dynamic_cast<NodeItem*>(item);
-            if (!candidate || candidate == source || !candidate->node()->isDir) {
-                continue;
-            }
-            if (isMovingItem(candidate)) {
-                continue;
-            }
-
-            const QRectF overlap = dropRect.intersected(candidate->sceneBoundingRect());
-            qreal area = overlap.width() * overlap.height();
-            if (candidate->sceneBoundingRect().adjusted(-FolderDropIntentMargin, -FolderDropIntentMargin,
-                                                        FolderDropIntentMargin, FolderDropIntentMargin)
-                    .contains(scenePos)) {
-                area += 1.0e9;
-            }
-            if (area > bestOverlap) {
-                bestOverlap = area;
-                best = candidate;
-            }
-        }
-        return best;
+        return DropTargetResolver::folderTarget(scene_, source, selectedTopLevelDragItems(source), scenePos);
     }
 
     NodeItem* linkTargetItemForDrop(const NodeItem* source, const QPointF& scenePos) const
     {
-        constexpr qreal LinkDropIntentMargin = 72.0;
-        if (!mycelStorageEnabled_ || !source || !source->node() || source->node()->isDir ||
-            isMultiDragSelection(source)) {
-            return nullptr;
-        }
-
-        for (QGraphicsItem* item : scene_.items()) {
-            auto* candidate = dynamic_cast<NodeItem*>(item);
-            if (!candidate || candidate == source || !candidate->node() || candidate->node()->isDir) {
-                continue;
-            }
-            if (candidate->containsLinkDropScenePoint(scenePos, LinkDropIntentMargin)) {
-                return candidate;
-            }
-        }
-        return nullptr;
+        return DropTargetResolver::linkTarget(scene_, source, isMultiDragSelection(source),
+                                              mycelStorageEnabled_, scenePos);
     }
 
     NodeItem* nodeItemForPath(const QString& path) const
@@ -6807,48 +6881,51 @@ public:
         return topLevel;
     }
 
-    bool replaceScannedSubtree(const QString& directoryPath)
+    enum class SubtreeRefresh { Changed, Unchanged, NotFound };
+
+    // Rescan one changed directory and replace its subtree only if the displayed structure
+    // actually differs. Returns Unchanged (and keeps the existing Node objects, so live
+    // NodeItems stay valid) when a notification did not alter what is shown.
+    SubtreeRefresh replaceScannedSubtree(const QString& directoryPath)
     {
         if (!root_) {
-            return false;
+            return SubtreeRefresh::NotFound;
         }
 
         const QString cleanPath = QDir::cleanPath(directoryPath);
         const QString cleanRoot = QDir::cleanPath(root_->path);
         if (cleanPath == cleanRoot) {
-            root_ = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_);
-            return true;
+            auto rescanned = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_,
+                                      fileOrders_, rootPath_);
+            if (sameVisibleStructure(*root_, *rescanned)) {
+                return SubtreeRefresh::Unchanged;
+            }
+            root_ = std::move(rescanned);
+            return SubtreeRefresh::Changed;
         }
 
         Node* existing = findVisibleNodeByPath(root_.get(), cleanPath);
         if (!existing || !existing->isDir) {
-            return false;
+            return SubtreeRefresh::NotFound;
         }
 
         Node* parent = findVisibleNodeByPath(root_.get(), existing->parentPath);
         if (!parent) {
-            return false;
+            return SubtreeRefresh::NotFound;
         }
 
         for (auto& child : parent->children) {
             if (QDir::cleanPath(child->path) == cleanPath) {
-                child = scanTree(cleanPath, existing->depth, existing->branch,
-                                 collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_);
-                return true;
+                auto rescanned = scanTree(cleanPath, existing->depth, existing->branch,
+                                          collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_);
+                if (sameVisibleStructure(*child, *rescanned)) {
+                    return SubtreeRefresh::Unchanged;
+                }
+                child = std::move(rescanned);
+                return SubtreeRefresh::Changed;
             }
         }
-        return false;
-    }
-
-    bool refreshChangedSubtrees(const QStringList& directories)
-    {
-        bool changed = false;
-        for (const QString& directory : directories) {
-            if (replaceScannedSubtree(directory)) {
-                changed = true;
-            }
-        }
-        return changed;
+        return SubtreeRefresh::NotFound;
     }
 
     void refreshFromFileSystemChange()
@@ -6869,7 +6946,6 @@ public:
             return;
         }
 
-        const QStringList selectedPaths = selectedNodePaths();
         const QStringList refreshDirectories = pendingRefreshDirectories();
         pendingFileSystemPaths_.clear();
         cancelQueuedInlinePreviewToggle();
@@ -6878,9 +6954,41 @@ public:
             return;
         }
 
-        if (!refreshChangedSubtrees(refreshDirectories)) {
-            root_ = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_);
+        // Capture selection before any subtree is replaced: selectedNodePaths() reads the
+        // Node objects behind the live items, which a replace would free.
+        const QStringList selectedPaths = selectedNodePaths();
+
+        bool changed = false;
+        bool needFullRescan = false;
+        for (const QString& directory : refreshDirectories) {
+            switch (replaceScannedSubtree(directory)) {
+            case SubtreeRefresh::Changed:
+                changed = true;
+                break;
+            case SubtreeRefresh::NotFound:
+                needFullRescan = true;
+                break;
+            case SubtreeRefresh::Unchanged:
+                break;
+            }
         }
+
+        if (needFullRescan) {
+            auto rescanned = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_,
+                                      fileOrders_, rootPath_);
+            if (!root_ || !sameVisibleStructure(*root_, *rescanned)) {
+                root_ = std::move(rescanned);
+                changed = true;
+            }
+        }
+
+        if (!changed) {
+            // The notification did not change the displayed tree (typically a cloud-sync
+            // mtime touch). Skip the re-render so selection and previews do not churn.
+            resetFileSystemWatcher();
+            return;
+        }
+
         renderCurrentTree(false);
         if (!selectedPaths.isEmpty()) {
             restoreSelection(selectedPaths);
@@ -9299,72 +9407,79 @@ void NodeItem::finishDrag(Qt::MouseButton button, const QPointF& scenePos)
 
 void NodeItem::finishDragAtScene(Qt::MouseButton button, const QPointF& scenePos)
 {
+    // moveDragItemsToFolder / addFileLink / reorderNodeByY can rebuild the scene, which
+    // deletes every NodeItem including this one. Capture the MainWindow pointer (it
+    // outlives the gesture) and the node path up front, and never touch this / window_ /
+    // node_ after a call that may rebuild.
+    MainWindow* window = window_;
+    const QString nodePath = node_ ? node_->path : QStringLiteral("(null)");
     const bool hadDragMove = dragMoveLogged_;
     dragMoveLogged_ = false;
     const qreal mouseMoveDistance = QLineF(pressStartScene_, scenePos).length();
     if (button == Qt::LeftButton) {
-        window_->recordDebugEvent(QStringLiteral("node release: %1 mouseMove=%2 itemMove=%3")
-                                      .arg(node_ ? node_->path : QStringLiteral("(null)"))
-                                      .arg(mouseMoveDistance, 0, 'f', 1)
-                                      .arg(QLineF(dragStart_, pos()).length(), 0, 'f', 1));
+        window->recordDebugEvent(QStringLiteral("node release: %1 mouseMove=%2 itemMove=%3")
+                                     .arg(nodePath)
+                                     .arg(mouseMoveDistance, 0, 'f', 1)
+                                     .arg(QLineF(dragStart_, pos()).length(), 0, 'f', 1));
     }
     if (!hadDragMove && mouseMoveDistance < 8.0) {
-        window_->clearInternalDropHover();
-        window_->clearLinkDropHover();
-        window_->clearDragPreview();
-        window_->setDragVisuals(this, 1.0, 10.0);
+        window->clearInternalDropHover();
+        window->clearLinkDropHover();
+        window->clearDragPreview();
+        window->setDragVisuals(this, 1.0, 10.0);
         if (button == Qt::LeftButton && scene()) {
             scene()->clearSelection();
             setSelected(true);
-            window_->focusBoard();
+            window->focusBoard();
             return;
         }
         return;
     }
 
-    NodeItem* folderTarget = window_->folderItemForDrop(this, scenePos);
+    NodeItem* folderTarget = window->folderItemForDrop(this, scenePos);
     if (folderTarget) {
-        window_->recordDebugEvent(QStringLiteral("node drop folder target: %1 -> %2")
-                                      .arg(node_ ? node_->path : QStringLiteral("(null)"),
-                                           folderTarget->node() ? folderTarget->node()->path : QStringLiteral("(null)")));
-        window_->clearInternalDropHover();
-        window_->clearLinkDropHover();
-        window_->moveDragItemsToFolder(this, folderTarget->node());
+        window->recordDebugEvent(QStringLiteral("node drop folder target: %1 -> %2")
+                                     .arg(nodePath,
+                                          folderTarget->node() ? folderTarget->node()->path : QStringLiteral("(null)")));
+        window->clearInternalDropHover();
+        window->clearLinkDropHover();
+        window->moveDragItemsToFolder(this, folderTarget->node());  // may delete this
         return;
     }
 
-    NodeItem* linkTarget = window_->linkTargetItemForDrop(this, scenePos);
+    NodeItem* linkTarget = window->linkTargetItemForDrop(this, scenePos);
     if (linkTarget) {
-        window_->recordDebugEvent(QStringLiteral("node drop link target: %1 -> %2")
-                                      .arg(node_ ? node_->path : QStringLiteral("(null)"),
-                                           linkTarget->node() ? linkTarget->node()->path : QStringLiteral("(null)")));
-        window_->clearInternalDropHover();
-        window_->clearLinkDropHover();
-        window_->clearDragPreview();
-        window_->addFileLink(linkTarget->node(), node_);
+        window->recordDebugEvent(QStringLiteral("node drop link target: %1 -> %2")
+                                     .arg(nodePath,
+                                          linkTarget->node() ? linkTarget->node()->path : QStringLiteral("(null)")));
+        window->clearInternalDropHover();
+        window->clearLinkDropHover();
+        window->clearDragPreview();
+        window->addFileLink(linkTarget->node(), node_);  // may delete this
         return;
     }
 
-    if (window_->isMultiDragSelection(this)) {
-        window_->clearInternalDropHover();
-        window_->clearLinkDropHover();
-        window_->clearDragPreview();
-        window_->setDragVisuals(this, 1.0, 10.0);
+    if (window->isMultiDragSelection(this)) {
+        window->clearInternalDropHover();
+        window->clearLinkDropHover();
+        window->clearDragPreview();
+        window->setDragVisuals(this, 1.0, 10.0);
         return;
     }
 
-    window_->clearInternalDropHover();
-    window_->clearLinkDropHover();
-    if (window_->reorderNodeByY(node_, this, sceneBoundingRect().center().y())) {
-        window_->recordDebugEvent(QStringLiteral("node drop reordered: %1").arg(node_ ? node_->path : QStringLiteral("(null)")));
+    window->clearInternalDropHover();
+    window->clearLinkDropHover();
+    const qreal dropCenterY = sceneBoundingRect().center().y();
+    if (window->reorderNodeByY(node_, this, dropCenterY)) {  // may delete this
+        window->recordDebugEvent(QStringLiteral("node drop reordered: %1").arg(nodePath));
         return;
     }
-    window_->recordDebugEvent(QStringLiteral("node drop no target: %1 scene=(%2,%3)")
-                                  .arg(node_ ? node_->path : QStringLiteral("(null)"))
-                                  .arg(scenePos.x(), 0, 'f', 1)
-                                  .arg(scenePos.y(), 0, 'f', 1));
-    window_->clearDragPreview();
-    window_->setDragVisuals(this, 1.0, 10.0);
+    window->recordDebugEvent(QStringLiteral("node drop no target: %1 scene=(%2,%3)")
+                                 .arg(nodePath)
+                                 .arg(scenePos.x(), 0, 'f', 1)
+                                 .arg(scenePos.y(), 0, 'f', 1));
+    window->clearDragPreview();
+    window->setDragVisuals(this, 1.0, 10.0);
 }
 
 void NodeItem::updateDrag(const QPointF& scenePos)
