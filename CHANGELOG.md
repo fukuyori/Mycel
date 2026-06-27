@@ -2,6 +2,11 @@
 
 Mycel の主な変更履歴です。
 
+## 0.4.4
+
+- 純粋なファイル操作ロジック（衝突リネーム・移動の検証・子孫移動禁止）を `src/mycel_fileops.hpp` に分離し、GUI 非依存の単体テストターゲット（`tests/fileops_test.cpp`、`ctest`）を追加。衝突リネーム・単一/複数移動・同一dir no-op・root スキップ・`isDescendantPath` を検証
+- `ctest --test-dir build` で基本的なファイル操作の回帰を自動検出できるように整備
+
 ## 0.4.3
 
 - レイアウトと接続線の幾何を `TreeLayoutEngine` に分離し、親子線の bounds 確保と描画を同一のパス生成に統一（ズレで線が消える問題を構造的に解消）

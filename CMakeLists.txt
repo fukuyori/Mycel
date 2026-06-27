@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(Mycel VERSION 0.4.3 LANGUAGES CXX)
+project(Mycel VERSION 0.4.4 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -61,3 +61,15 @@ target_compile_definitions(mycel PRIVATE
 target_compile_options(mycel PRIVATE
     $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wall -Wextra -Wpedantic>
 )
+
+# Tests for the pure core logic (no GUI). Run with: ctest --test-dir build
+enable_testing()
+
+find_package(Qt6 QUIET COMPONENTS Core)
+if(TARGET Qt6::Core)
+    add_executable(mycel_fileops_test tests/fileops_test.cpp)
+    set_target_properties(mycel_fileops_test PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+    target_include_directories(mycel_fileops_test PRIVATE src)
+    target_link_libraries(mycel_fileops_test PRIVATE Qt6::Core)
+    add_test(NAME fileops COMMAND mycel_fileops_test)
+endif()
