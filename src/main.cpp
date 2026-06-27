@@ -3446,6 +3446,89 @@ public:
     }
 };
 
+// Owns every mutation of the scene's node selection so the rule "what becomes selected"
+// lives in one place instead of being duplicated across NodeItem and MainWindow. View
+// concerns (focus, scrolling a node into view) stay in MainWindow.
+class SelectionController {
+public:
+    explicit SelectionController(QGraphicsScene& scene) : scene_(scene) {}
+
+    void clear() { scene_.clearSelection(); }
+
+    // Make `item` the selection. additive keeps the current selection (Cmd/Ctrl/Shift-click).
+    void select(NodeItem* item, bool additive = false)
+    {
+        if (!additive) {
+            scene_.clearSelection();
+        }
+        if (item) {
+            item->setSelected(true);
+        }
+    }
+
+    // Select the single node with this path (clearing others). Returns it, or nullptr.
+    NodeItem* selectByPath(const QString& path)
+    {
+        scene_.clearSelection();
+        for (QGraphicsItem* item : scene_.items()) {
+            auto* nodeItem = dynamic_cast<NodeItem*>(item);
+            if (nodeItem && nodeItem->node() && nodeItem->node()->path == path) {
+                nodeItem->setSelected(true);
+                return nodeItem;
+            }
+        }
+        return nullptr;
+    }
+
+    // Select every node whose path is in `paths`. Returns the first selected, or nullptr.
+    NodeItem* selectByPaths(const QStringList& paths)
+    {
+        scene_.clearSelection();
+        NodeItem* first = nullptr;
+        for (QGraphicsItem* item : scene_.items()) {
+            auto* nodeItem = dynamic_cast<NodeItem*>(item);
+            if (nodeItem && nodeItem->node() && paths.contains(nodeItem->node()->path)) {
+                nodeItem->setSelected(true);
+                if (!first) {
+                    first = nodeItem;
+                }
+            }
+        }
+        return first;
+    }
+
+    // Select every visible node. Returns true if anything was selected.
+    bool selectAll()
+    {
+        scene_.clearSelection();
+        bool any = false;
+        for (QGraphicsItem* item : scene_.items()) {
+            auto* nodeItem = dynamic_cast<NodeItem*>(item);
+            if (nodeItem && nodeItem->node()) {
+                nodeItem->setSelected(true);
+                any = true;
+            }
+        }
+        return any;
+    }
+
+    QStringList selectedPaths() const
+    {
+        QStringList paths;
+        for (QGraphicsItem* item : scene_.selectedItems()) {
+            auto* nodeItem = dynamic_cast<NodeItem*>(item);
+            if (nodeItem && nodeItem->node()) {
+                paths.append(nodeItem->node()->path);
+            }
+        }
+        paths.removeDuplicates();
+        return paths;
+    }
+
+private:
+    QGraphicsScene& scene_;
+};
+
 class MainWindow final : public QMainWindow {
 public:
     explicit MainWindow(QString rootPath, bool mycelStorageEnabled, QWidget* parent = nullptr)
@@ -4361,16 +4444,7 @@ public:
 
     bool selectAllVisibleNodes()
     {
-        bool selectedAny = false;
-        scene_.clearSelection();
-        for (QGraphicsItem* item : scene_.items()) {
-            auto* nodeItem = dynamic_cast<NodeItem*>(item);
-            if (!nodeItem || !nodeItem->node()) {
-                continue;
-            }
-            nodeItem->setSelected(true);
-            selectedAny = true;
-        }
+        const bool selectedAny = selection_.selectAll();
         if (selectedAny) {
             view_->setFocus(Qt::ShortcutFocusReason);
             recordDebugEvent(QStringLiteral("selected all visible nodes"));
@@ -6450,15 +6524,14 @@ public:
 
     QStringList selectedNodePaths() const
     {
-        QStringList paths;
-        for (QGraphicsItem* item : scene_.selectedItems()) {
-            auto* nodeItem = dynamic_cast<NodeItem*>(item);
-            if (nodeItem && nodeItem->node()) {
-                paths.append(nodeItem->node()->path);
-            }
-        }
-        paths.removeDuplicates();
-        return paths;
+        return selection_.selectedPaths();
+    }
+
+    // Selection primitive shared by NodeItem (drag start, click, double-click). additive
+    // keeps the current selection for Cmd/Ctrl/Shift-click.
+    void selectNodeItem(NodeItem* item, bool additive)
+    {
+        selection_.select(item, additive);
     }
 
     void restoreFolderSelection(const QString& folderPath)
@@ -6468,43 +6541,20 @@ public:
 
     bool selectNodePath(const QString& path, bool ensureVisible = false)
     {
-        scene_.clearSelection();
-        bool selected = false;
-        NodeItem* selectedItem = nullptr;
-        for (QGraphicsItem* item : scene_.items()) {
-            auto* nodeItem = dynamic_cast<NodeItem*>(item);
-            if (nodeItem && nodeItem->node() && nodeItem->node()->path == path) {
-                nodeItem->setSelected(true);
-                selectedItem = nodeItem;
-                selected = true;
-                break;
-            }
-        }
+        NodeItem* selectedItem = selection_.selectByPath(path);
         view_->setFocus(Qt::ShortcutFocusReason);
         if (ensureVisible) {
             ensureNodeItemVisible(selectedItem);
         }
-        if (selected && ensureVisible) {
+        if (selectedItem && ensureVisible) {
             QTimer::singleShot(0, this, [this, path] { ensureNodePathVisible(path); });
         }
-        return selected;
+        return selectedItem != nullptr;
     }
 
     bool restoreSelection(const QStringList& paths, bool ensureVisible = false)
     {
-        scene_.clearSelection();
-        bool selected = false;
-        NodeItem* firstSelectedItem = nullptr;
-        for (QGraphicsItem* item : scene_.items()) {
-            auto* nodeItem = dynamic_cast<NodeItem*>(item);
-            if (nodeItem && nodeItem->node() && paths.contains(nodeItem->node()->path)) {
-                nodeItem->setSelected(true);
-                if (!firstSelectedItem) {
-                    firstSelectedItem = nodeItem;
-                }
-                selected = true;
-            }
-        }
+        NodeItem* firstSelectedItem = selection_.selectByPaths(paths);
         view_->setFocus(Qt::ShortcutFocusReason);
         if (ensureVisible) {
             ensureNodeItemVisible(firstSelectedItem);
@@ -6513,7 +6563,7 @@ public:
             const QString path = firstSelectedItem->node()->path;
             QTimer::singleShot(0, this, [this, path] { ensureNodePathVisible(path); });
         }
-        return selected;
+        return firstSelectedItem != nullptr;
     }
 
     void ensureNodeItemVisible(NodeItem* item)
@@ -8918,6 +8968,7 @@ private:
     QStringList pausedWatcherFiles_;
     QStringList pausedWatcherDirectories_;
     MindMapScene scene_;
+    SelectionController selection_{scene_};
     QSplitter* editorSplitter_ = nullptr;
     BoardView* view_ = nullptr;
     QDockWidget* debugDock_ = nullptr;
@@ -9391,10 +9442,8 @@ void NodeItem::beginDrag(const QPointF& scenePos, Qt::KeyboardModifiers modifier
                                   .arg(node_ ? node_->path : QStringLiteral("(null)"))
                                   .arg(scenePos.x(), 0, 'f', 1)
                                   .arg(scenePos.y(), 0, 'f', 1));
-    if (scene() && !(modifiers & (Qt::ControlModifier | Qt::MetaModifier | Qt::ShiftModifier))) {
-        scene()->clearSelection();
-    }
-    setSelected(true);
+    const bool additive = (modifiers & (Qt::ControlModifier | Qt::MetaModifier | Qt::ShiftModifier)) != 0;
+    window_->selectNodeItem(this, additive);
     window_->focusBoard();
     setOpacity(0.72);
     setZValue(DragLayerZ);
@@ -9428,8 +9477,7 @@ void NodeItem::finishDragAtScene(Qt::MouseButton button, const QPointF& scenePos
         window->clearDragPreview();
         window->setDragVisuals(this, 1.0, 10.0);
         if (button == Qt::LeftButton && scene()) {
-            scene()->clearSelection();
-            setSelected(true);
+            window->selectNodeItem(this, false);
             window->focusBoard();
             return;
         }
@@ -9533,8 +9581,7 @@ void NodeItem::mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event)
 
     window->cancelQueuedInlinePreviewToggle();
     if (scene()) {
-        scene()->clearSelection();
-        setSelected(true);
+        window->selectNodeItem(this, false);
     }
     event->accept();
 

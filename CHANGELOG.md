@@ -2,6 +2,11 @@
 
 Mycel の主な変更履歴です。
 
+## 0.4.2
+
+- シーン上のノード選択の変更を `SelectionController` に集約し、`NodeItem` と `MainWindow` に散在していた選択処理（クリック選択、Cmd/Ctrl/Shift による追加選択、パス選択、全選択）を一本化
+- ドキュメント索引 `docs/README.ja.md` の進捗を更新
+
 ## 0.4.1
 
 - ドロップ先（フォルダ移動先／ファイルリンク先）のヒットテストを `DropTargetResolver` に分離し、`MainWindow` から判定ロジックを除去
