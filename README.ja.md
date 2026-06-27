@@ -4,8 +4,9 @@
 
 ファイルを縦方向の一覧として扱うのではなく、フォルダとファイルを接続されたノードとしてホワイトボード風のキャンバスに配置します。通常のシステムフォルダとファイルをそのまま使いながら、プロジェクト構造、文書群、知識ベースを地図のように整理し探索するためのツールです。
 
-- 現在のバージョン: 0.3.9
+- 現在のバージョン: 0.4.0
 - 変更履歴: [CHANGELOG.md](CHANGELOG.md)
+- ドキュメント索引: [docs/README.ja.md](docs/README.ja.md)
 - 開発予定: [docs/development-plan.ja.md](docs/development-plan.ja.md)
 - 英語版: [README.md](README.md)
 
