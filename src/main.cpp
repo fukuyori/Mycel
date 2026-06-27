@@ -711,31 +711,6 @@ void assignTopLevelBranches(Node& root)
     }
 }
 
-void layoutTree(Node& node, qreal leftX, qreal& yCursor)
-{
-    node.center.setX(leftX + node.size.width() / 2.0);
-    if (node.children.empty()) {
-        node.center.setY(yCursor);
-        yCursor += YStep + (node.previewOpen ? node.previewSize.height() + 28.0 : 0.0);
-        return;
-    }
-
-    const qreal childLeftX = leftX + std::max(XStep, node.size.width() + ParentChildGap);
-    for (auto& child : node.children) {
-        layoutTree(*child, childLeftX, yCursor);
-    }
-
-    node.center.setY((node.children.front()->center.y() + node.children.back()->center.y()) / 2.0);
-}
-
-void translateTree(Node& node, const QPointF& delta)
-{
-    node.center += delta;
-    for (auto& child : node.children) {
-        translateTree(*child, delta);
-    }
-}
-
 Node* findNodeByPath(Node& node, const QString& path)
 {
     if (node.path == path) {
@@ -765,44 +740,219 @@ bool sameVisibleStructure(const Node& a, const Node& b)
     return true;
 }
 
-QRectF nodePaintBounds(const Node& node)
-{
-    QRectF nodeRect(node.center.x() - node.size.width() / 2.0 - 220.0,
-                    node.center.y() - node.size.height() / 2.0 - 80.0,
-                    node.size.width() + 440.0,
-                    node.size.height() + 160.0);
-    if (node.previewOpen) {
-        const qreal previewWidth = std::max(node.size.width(), node.previewSize.width());
-        const QRectF previewRect(node.center.x() - node.size.width() / 2.0,
-                                 node.center.y() - node.size.height() / 2.0,
-                                 previewWidth,
-                                 34.0 + node.previewSize.height());
-        nodeRect = nodeRect.united(previewRect.adjusted(-40.0, -40.0, 80.0, 40.0));
+// Generates the displayed geometry: node coordinates, the parent-child and file-link
+// connection paths, and per-node bounds. Both the bounds calculation and ConnectionLayer's
+// drawing go through the same path builders here, so a connector can never fall outside the
+// bounds that were reserved for it (which used to make lines disappear).
+struct TreeLayoutEngine {
+    // Paths of file-link targets — these are laid out beside their link source, not in the
+    // normal tree column.
+    static QSet<QString> linkedTargetPaths(const std::vector<FileLink>& links)
+    {
+        QSet<QString> targets;
+        for (const FileLink& link : links) {
+            targets.insert(link.to);
+        }
+        return targets;
     }
-    return nodeRect;
-}
 
-QRectF updateSubtreeBounds(Node& node)
-{
-    QRectF bounds = nodePaintBounds(node);
-    for (auto& child : node.children) {
-        bounds = bounds.united(updateSubtreeBounds(*child));
-        const QPointF start(node.center.x() + node.size.width() / 2.0, node.center.y());
-        const QPointF end(child->center.x() - child->size.width() / 2.0, child->center.y());
+    // Assign node centers. Children that are file-link targets are skipped here and placed
+    // beside their link source by layoutFileLinks instead.
+    static void layoutTree(Node& node, qreal leftX, qreal& yCursor, const QSet<QString>& linkedTargets)
+    {
+        node.center.setX(leftX + node.size.width() / 2.0);
+        const auto isTreeChild = [&linkedTargets](const std::unique_ptr<Node>& child) {
+            return !linkedTargets.contains(child->path);
+        };
+        const bool hasTreeChildren = std::any_of(node.children.begin(), node.children.end(), isTreeChild);
+        if (!hasTreeChildren) {
+            node.center.setY(yCursor);
+            yCursor += YStep + (node.previewOpen ? node.previewSize.height() + 28.0 : 0.0);
+            return;
+        }
+
+        const qreal childLeftX = leftX + std::max(XStep, node.size.width() + ParentChildGap);
+        for (auto& child : node.children) {
+            if (linkedTargets.contains(child->path)) {
+                continue;
+            }
+            layoutTree(*child, childLeftX, yCursor, linkedTargets);
+        }
+
+        const auto first = std::find_if(node.children.begin(), node.children.end(), isTreeChild);
+        const auto last = std::find_if(node.children.rbegin(), node.children.rend(), isTreeChild);
+        node.center.setY(((*first)->center.y() + (*last)->center.y()) / 2.0);
+    }
+
+    static void translateTree(Node& node, const QPointF& delta)
+    {
+        node.center += delta;
+        for (auto& child : node.children) {
+            translateTree(*child, delta);
+        }
+    }
+
+    // The curved connector drawn from a parent node to one of its children.
+    static QPainterPath parentChildEdgePath(const Node& parent, const Node& child)
+    {
+        const QPointF start(parent.center.x() + parent.size.width() / 2.0, parent.center.y());
+        const QPointF end(child.center.x() - child.size.width() / 2.0, child.center.y());
         const qreal distance = std::max<qreal>(96.0, end.x() - start.x());
         const qreal splitX = start.x() + std::clamp(distance * 0.46, 58.0, 128.0);
-        QPainterPath edgePath(start);
-        edgePath.cubicTo(QPointF(start.x() + distance * 0.16, start.y()),
-                         QPointF(splitX - 34.0, end.y()),
-                         QPointF(splitX, end.y()));
-        edgePath.cubicTo(QPointF(splitX + 30.0, end.y()),
-                         QPointF(end.x() - 38.0, end.y()),
-                         end);
-        bounds = bounds.united(edgePath.controlPointRect().adjusted(-8.0, -8.0, 8.0, 8.0));
+        QPainterPath path(start);
+        path.cubicTo(QPointF(start.x() + distance * 0.16, start.y()),
+                     QPointF(splitX - 34.0, end.y()),
+                     QPointF(splitX, end.y()));
+        path.cubicTo(QPointF(splitX + 30.0, end.y()),
+                     QPointF(end.x() - 38.0, end.y()),
+                     end);
+        return path;
     }
-    node.subtreeBounds = bounds;
-    return bounds;
-}
+
+    // The curved connector drawn for a user-created file link between two file nodes. Uses
+    // the same split-and-fan shape as parent-child edges so multiple targets of one source
+    // spread up and down consistently, instead of a plain diagonal S-curve.
+    static QPainterPath fileLinkPath(const Node& from, const Node& to)
+    {
+        const QPointF anchor = linkSourceAnchor(from);
+        const QPointF start(anchor.x() + 6.0, anchor.y());
+        const QPointF end(to.center.x() - to.size.width() / 2.0 - 6.0, to.center.y());
+        // Run horizontally along the source's row past the neighbour previews, then fan up or
+        // down at the target column (its left edge, i.e. the right edge of those previews).
+        const qreal columnLeft = to.center.x() - to.size.width() / 2.0 - ParentChildGap;
+        const qreal splitX = std::min(std::max(columnLeft, start.x() + 20.0), end.x() - 20.0);
+        QPainterPath path(start);
+        path.lineTo(QPointF(splitX, start.y()));
+        path.cubicTo(QPointF(splitX + 34.0, start.y()),
+                     QPointF(end.x() - 38.0, end.y()),
+                     end);
+        return path;
+    }
+
+    static qreal nodeVerticalSpan(const Node& node)
+    {
+        return YStep + (node.previewOpen ? node.previewSize.height() + 28.0 : 0.0);
+    }
+
+    // Right-most x of a node's drawn content (accounts for an open preview wider than the card).
+    static qreal nodeContentRightX(const Node& node)
+    {
+        qreal right = node.center.x() + node.size.width() / 2.0;
+        if (node.previewOpen) {
+            const qreal previewRight = node.center.x() - node.size.width() / 2.0 +
+                                       std::max(node.size.width(), node.previewSize.width());
+            right = std::max(right, previewRight);
+        }
+        return right;
+    }
+
+    // Point on the source's right edge where its file links emanate. With an open preview
+    // this is the right edge of the preview, vertically centered on it, so links fan out from
+    // the preview rather than from the small header above it.
+    static QPointF linkSourceAnchor(const Node& node)
+    {
+        const qreal x = nodeContentRightX(node);
+        if (node.previewOpen) {
+            const qreal top = node.center.y() - node.size.height() / 2.0;
+            return QPointF(x, top + (34.0 + node.previewSize.height()) / 2.0);
+        }
+        return QPointF(x, node.center.y());
+    }
+
+    // Place each file-link target to the right of its link source. Multiple targets of the
+    // same source are stacked and centered on the source's link anchor (the preview's right
+    // edge when a preview is open), so they fan up and down from there. Runs after layoutTree.
+    static void layoutFileLinks(Node& root, const std::vector<FileLink>& links)
+    {
+        // Collect each source's targets, preserving link order.
+        std::map<QString, std::vector<Node*>> targetsBySource;
+        for (const FileLink& link : links) {
+            Node* from = findNodeByPath(root, link.from);
+            Node* to = findNodeByPath(root, link.to);
+            if (!from || !to || from->isDir || to->isDir || from == to) {
+                continue;
+            }
+            targetsBySource[from->path].push_back(to);
+        }
+
+        const QSet<QString> linkedTargets = linkedTargetPaths(links);
+
+        for (auto& [sourcePath, targets] : targetsBySource) {
+            Node* from = findNodeByPath(root, sourcePath);
+            if (!from) {
+                continue;
+            }
+            qreal totalSpan = 0.0;
+            for (const Node* to : targets) {
+                totalSpan += nodeVerticalSpan(*to);
+            }
+            const QPointF anchor = linkSourceAnchor(*from);
+            const qreal stackTop = anchor.y() - totalSpan / 2.0;
+            const qreal stackBottom = anchor.y() + totalSpan / 2.0;
+
+            // Push the target column clear of any tree node whose frame (card or open
+            // preview) overlaps the rows the stack will occupy, so targets don't land on the
+            // preview of the node above or below the source.
+            qreal columnLeft = anchor.x();
+            std::function<void(const Node&)> clearOverlaps = [&](const Node& node) {
+                if (&node != from && !linkedTargets.contains(node.path)) {
+                    const qreal top = node.center.y() - node.size.height() / 2.0;
+                    const qreal bottom = top + (node.previewOpen ? 34.0 + node.previewSize.height()
+                                                                 : node.size.height());
+                    if (bottom >= stackTop && top <= stackBottom) {
+                        columnLeft = std::max(columnLeft, nodeContentRightX(node));
+                    }
+                }
+                for (const auto& child : node.children) {
+                    clearOverlaps(*child);
+                }
+            };
+            clearOverlaps(root);
+
+            const qreal linkedLeftX = columnLeft + ParentChildGap;
+            qreal slotTop = stackTop;  // center the stack on the source anchor
+            for (Node* to : targets) {
+                const qreal span = nodeVerticalSpan(*to);
+                to->center = QPointF(linkedLeftX + to->size.width() / 2.0, slotTop + span / 2.0);
+                slotTop += span;
+            }
+        }
+    }
+
+    static QRectF nodePaintBounds(const Node& node)
+    {
+        QRectF nodeRect(node.center.x() - node.size.width() / 2.0 - 220.0,
+                        node.center.y() - node.size.height() / 2.0 - 80.0,
+                        node.size.width() + 440.0,
+                        node.size.height() + 160.0);
+        if (node.previewOpen) {
+            const qreal previewWidth = std::max(node.size.width(), node.previewSize.width());
+            const QRectF previewRect(node.center.x() - node.size.width() / 2.0,
+                                     node.center.y() - node.size.height() / 2.0,
+                                     previewWidth,
+                                     34.0 + node.previewSize.height());
+            nodeRect = nodeRect.united(previewRect.adjusted(-40.0, -40.0, 80.0, 40.0));
+        }
+        return nodeRect;
+    }
+
+    // Compute and store each node's subtree bounds, reserving room for every parent-child
+    // connector via the same path builder ConnectionLayer draws with.
+    static QRectF updateSubtreeBounds(Node& node, const QSet<QString>& linkedTargets)
+    {
+        QRectF bounds = nodePaintBounds(node);
+        for (auto& child : node.children) {
+            bounds = bounds.united(updateSubtreeBounds(*child, linkedTargets));
+            if (linkedTargets.contains(child->path)) {
+                continue;  // linked targets connect via the link line, not a parent-child edge
+            }
+            const QPainterPath edgePath = parentChildEdgePath(node, *child);
+            bounds = bounds.united(edgePath.controlPointRect().adjusted(-8.0, -8.0, 8.0, 8.0));
+        }
+        node.subtreeBounds = bounds;
+        return bounds;
+    }
+};
 
 void visitNodes(Node& node, const std::function<void(Node&)>& fn)
 {
@@ -1717,10 +1867,13 @@ public:
     void beginDrag(const QPointF& scenePos, Qt::KeyboardModifiers modifiers);
     void updateDrag(const QPointF& scenePos);
     void finishDrag(Qt::MouseButton button, const QPointF& scenePos);
+    // Default action (double-click): toggle a folder's collapse or a file's inline preview.
+    // Driven by BoardView, since the view owns the press that would otherwise let
+    // QGraphicsView deliver the double-click here.
+    void activate();
 
 protected:
     void contextMenuEvent(QGraphicsSceneContextMenuEvent* event) override;
-    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event) override;
     void dragEnterEvent(QGraphicsSceneDragDropEvent* event) override;
     void dragLeaveEvent(QGraphicsSceneDragDropEvent* event) override;
     void dragMoveEvent(QGraphicsSceneDragDropEvent* event) override;
@@ -2000,14 +2153,11 @@ private:
                 continue;
             }
 
-            const QPointF start(from->center.x() + from->size.width() / 2.0 + 6.0, from->center.y());
-            const QPointF end(to->center.x() - to->size.width() / 2.0 - 6.0, to->center.y());
-            const qreal distance = std::max<qreal>(72.0, end.x() - start.x());
-            QPainterPath path(start);
-            path.cubicTo(QPointF(start.x() + distance * 0.45, start.y()),
-                         QPointF(end.x() - distance * 0.45, end.y()),
-                         end);
-            if (!path.controlPointRect().intersects(exposed)) {
+            const QPainterPath path = TreeLayoutEngine::fileLinkPath(*from, *to);
+            // Inflate before the visibility test: a perfectly horizontal link (target on the
+            // same row as its source) has a zero-height controlPointRect, and
+            // QRectF::intersects() always reports false for an empty rect, which dropped the line.
+            if (!path.controlPointRect().adjusted(-2.0, -2.0, 2.0, 2.0).intersects(exposed)) {
                 continue;
             }
             QColor color = neutralStroke();
@@ -2017,27 +2167,32 @@ private:
         }
     }
 
+    bool hasIncomingFileLink(const Node& node) const
+    {
+        if (!links_ || node.isDir) {
+            return false;
+        }
+        for (const FileLink& link : *links_) {
+            if (link.to == node.path) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void drawEdges(QPainter* painter, const Node& node, const QRectF& exposed) const
     {
         if (node.children.empty()) {
             return;
         }
 
-        const QPointF start(node.center.x() + node.size.width() / 2.0, node.center.y());
-
         for (const auto& child : node.children) {
-            const QPointF end(child->center.x() - child->size.width() / 2.0, child->center.y());
-            const qreal distance = std::max<qreal>(96.0, end.x() - start.x());
-            const qreal splitX = start.x() + std::clamp(distance * 0.46, 58.0, 128.0);
-            const QPointF split(splitX, end.y());
-
-            QPainterPath path(start);
-            path.cubicTo(QPointF(start.x() + distance * 0.16, start.y()),
-                         QPointF(split.x() - 34.0, split.y()),
-                         split);
-            path.cubicTo(QPointF(split.x() + 30.0, split.y()),
-                         QPointF(end.x() - 38.0, end.y()),
-                         end);
+            // File-link targets connect via the link line; skip their parent-child edge.
+            if (hasIncomingFileLink(*child)) {
+                drawEdges(painter, *child, exposed);
+                continue;
+            }
+            const QPainterPath path = TreeLayoutEngine::parentChildEdgePath(node, *child);
             QColor color = neutralStroke();
             color.setAlpha(connectorLineAlpha());
             const qreal width = child->isDir ? (node.depth == 0 ? 3.0 : 2.5) : 1.5;
@@ -2256,12 +2411,15 @@ protected:
                     event->accept();
                     return;
                 }
-                // The view owns the node drag end to end, so the release is always
-                // delivered here even if the item's implicit grab is lost. Only start a
-                // drag when the press lands on the node body itself (itemAt == nodeItem);
-                // a press on a child preview proxy widget must pass through so the preview
-                // stays interactive. Alt+drag is reserved for panning.
-                if (!(event->modifiers() & Qt::AltModifier) && itemAt(event->pos()) == nodeItem) {
+                // The view owns the node drag end to end, so the release is always delivered
+                // here even if the item's implicit grab is lost. Start a drag when the press
+                // is on the node body — that includes the case where itemAt() missed entirely
+                // (a frequent quirk that nodeItemAt resolves by geometry). Only pass through
+                // when itemAt() reports a different item, i.e. a child preview proxy widget,
+                // so the preview stays interactive. Alt+drag is reserved for panning.
+                QGraphicsItem* hitItem = itemAt(event->pos());
+                const bool onChildWidget = hitItem != nullptr && hitItem != nodeItem;
+                if (!(event->modifiers() & Qt::AltModifier) && !onChildWidget) {
                     dragController_.begin(nodeItem, scenePos, event->modifiers());
                     event->accept();
                     return;
@@ -2395,6 +2553,25 @@ protected:
         QGraphicsView::mouseReleaseEvent(event);
     }
 
+    void mouseDoubleClickEvent(QMouseEvent* event) override
+    {
+        // The view owns the press, so QGraphicsView no longer delivers double-clicks to the
+        // node. Drive the node's default action here. Pass through when the press is on a
+        // child preview proxy so double-clicking preview text keeps its normal behaviour.
+        if (event->button() == Qt::LeftButton) {
+            if (NodeItem* nodeItem = nodeItemAt(event->pos())) {
+                QGraphicsItem* hitItem = itemAt(event->pos());
+                const bool onChildWidget = hitItem != nullptr && hitItem != nodeItem;
+                if (!onChildWidget) {
+                    nodeItem->activate();
+                    event->accept();
+                    return;
+                }
+            }
+        }
+        QGraphicsView::mouseDoubleClickEvent(event);
+    }
+
     void keyPressEvent(QKeyEvent* event) override
     {
         if (textInputWidgetHasFocus()) {
@@ -2439,6 +2616,24 @@ private:
     {
         for (QGraphicsItem* item = itemAt(pos); item; item = item->parentItem()) {
             if (auto* nodeItem = dynamic_cast<NodeItem*>(item)) {
+                return nodeItem;
+            }
+        }
+        // QGraphicsView::itemAt() can miss a node (notably when a preview proxy widget is
+        // present), which would make a file-name click look like an empty-canvas click. Fall
+        // back to a direct geometry test against every visible node.
+        if (!scene()) {
+            return nullptr;
+        }
+        const QPointF scenePos = mapToScene(pos);
+        for (QGraphicsItem* item : scene()->items()) {
+            auto* nodeItem = dynamic_cast<NodeItem*>(item);
+            if (!nodeItem || !nodeItem->isVisible()) {
+                continue;
+            }
+            const QPointF localPos = nodeItem->mapFromScene(scenePos);
+            if (nodeItem->contains(localPos) ||
+                nodeItem->boundingRect().adjusted(-2.0, -2.0, 2.0, 2.0).contains(localPos)) {
                 return nodeItem;
             }
         }
@@ -5950,6 +6145,12 @@ public:
             }
         }
 
+        // A link target is placed beside exactly one source, so re-linking the same file
+        // replaces its previous connection instead of leaving a stale line behind.
+        fileLinks_.erase(std::remove_if(fileLinks_.begin(), fileLinks_.end(),
+                                        [to](const FileLink& link) { return link.to == to->path; }),
+                         fileLinks_.end());
+
         fileLinks_.push_back({from->path, to->path});
         saveLinkFile();
         rebuild(false);
@@ -8824,9 +9025,11 @@ private:
         assignTopLevelBranches(*root_);
 
         qreal yCursor = 0.0;
-        layoutTree(*root_, 0.0, yCursor);
-        translateTree(*root_, QPointF(140.0, 120.0 - root_->center.y()));
-        updateSubtreeBounds(*root_);
+        const QSet<QString> linkedTargets = TreeLayoutEngine::linkedTargetPaths(fileLinks_);
+        TreeLayoutEngine::layoutTree(*root_, 0.0, yCursor, linkedTargets);
+        TreeLayoutEngine::layoutFileLinks(*root_, fileLinks_);
+        TreeLayoutEngine::translateTree(*root_, QPointF(140.0, 120.0 - root_->center.y()));
+        TreeLayoutEngine::updateSubtreeBounds(*root_, linkedTargets);
 
         scene_.addItem(new ConnectionLayerItem(root_.get(), &fileLinks_));
         visitNodes(*root_, [this](Node& node) {
@@ -9573,7 +9776,7 @@ void NodeItem::updateDragAtScene(const QPointF& scenePos)
     }
 }
 
-void NodeItem::mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event)
+void NodeItem::activate()
 {
     QPointer<MainWindow> window = window_;
     const QString path = node_->path;
@@ -9583,7 +9786,6 @@ void NodeItem::mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event)
     if (scene()) {
         window->selectNodeItem(this, false);
     }
-    event->accept();
 
     QTimer::singleShot(0, window, [window, path, isDir] {
         if (!window) {
