@@ -86,6 +86,7 @@
 #include <QtWidgets/QListWidget>
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QMenu>
+#include <QtWidgets/QMenuBar>
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QPushButton>
@@ -1758,7 +1759,11 @@ public:
         if (node_->previewOpen && !node_->isDir) {
             rect = rect.united(previewFrameRect());
         }
-        return rect;
+        // The selection outline and drop-hover outlines are stroked a few pixels OUTSIDE the
+        // node box (see paint(): box.adjusted(-5,-5,5,5) with a 3px pen is the widest). Grow the
+        // bounding rect to enclose them, otherwise deselecting only invalidates the inner box and
+        // leaves the outline's outer edge painted on the canvas as a stale frame.
+        return rect.adjusted(-8.0, -8.0, 8.0, 8.0);
     }
 
     QPainterPath shape() const override
@@ -1856,6 +1861,9 @@ public:
     void beginDrag(const QPointF& scenePos, Qt::KeyboardModifiers modifiers);
     void updateDrag(const QPointF& scenePos);
     void finishDrag(Qt::MouseButton button, const QPointF& scenePos);
+    // Right-click selects this node (or keeps it if already part of the selection) so the
+    // context menu acts on it and the selection frame stays visible.
+    void selectForContextMenu();
     // Default action (double-click): toggle a folder's collapse or a file's inline preview.
     // Driven by BoardView, since the view owns the press that would otherwise let
     // QGraphicsView deliver the double-click here.
@@ -2058,6 +2066,7 @@ private:
     QPointF layoutCenter_;
     QPointF dragStart_;
     QPointF pressStartScene_;
+    Qt::KeyboardModifiers pressModifiers_ = Qt::NoModifier;
     bool dragMoveLogged_ = false;
     bool resizingPreview_ = false;
     bool resizePreferHeight_ = false;
@@ -2436,6 +2445,16 @@ protected:
             setDragMode(QGraphicsView::RubberBandDrag);
             QGraphicsView::mousePressEvent(event);
             return;
+        }
+        // Right-click on a node: establish/keep its selection and consume the press so the scene's
+        // default press handling can't clear the selection (the context menu still fires on
+        // right-button release). Without this the highlight frame vanishes on right-click.
+        if (event->button() == Qt::RightButton) {
+            if (NodeItem* nodeItem = nodeItemAt(event->pos())) {
+                nodeItem->selectForContextMenu();
+                event->accept();
+                return;
+            }
         }
         QGraphicsView::mousePressEvent(event);
     }
@@ -3541,9 +3560,11 @@ public:
     }
 
     // Select every node whose path is in `paths`. Returns the first selected, or nullptr.
-    NodeItem* selectByPaths(const QStringList& paths)
+    NodeItem* selectByPaths(const QStringList& paths, bool additive = false)
     {
-        scene_.clearSelection();
+        if (!additive) {
+            scene_.clearSelection();
+        }
         NodeItem* first = nullptr;
         for (QGraphicsItem* item : scene_.items()) {
             auto* nodeItem = dynamic_cast<NodeItem*>(item);
@@ -3608,6 +3629,9 @@ public:
         view_->setKeyHandler([this](QKeyEvent* event) { return handleBoardShortcut(event); });
         view_->setViewChangedHandler([this] { scheduleViewStateSave(); });
         view_->setDebugHandler([this](const QString& message) { recordDebugEvent(message); });
+        recordDebugEvent(QStringLiteral("main window constructed: root=%1 mycelStorage=%2")
+                             .arg(rootPath_,
+                                  mycelStorageEnabled_ ? QStringLiteral("true") : QStringLiteral("false")));
 
         sideEditorPanel_ = new QWidget(editorSplitter_);
         sideEditorPanel_->setObjectName(QStringLiteral("SideEditorPanel"));
@@ -3707,7 +3731,26 @@ public:
         addDockWidget(Qt::BottomDockWidgetArea, debugDock_);
         debugDock_->hide();
 
+        undoAction_ = new QAction(QStringLiteral("元に戻す"), this);
+        undoAction_->setShortcut(QKeySequence::Undo);
+        undoAction_->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+        undoAction_->setEnabled(false);
+        view_->addAction(undoAction_);
+        connect(undoAction_, &QAction::triggered, this, [this] { performUndo(); });
+        redoAction_ = new QAction(QStringLiteral("やり直す"), this);
+        redoAction_->setShortcut(QKeySequence::Redo);
+        redoAction_->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+        redoAction_->setEnabled(false);
+        view_->addAction(redoAction_);
+        connect(redoAction_, &QAction::triggered, this, [this] { performRedo(); });
+        QMenu* editMenu = menuBar()->addMenu(QStringLiteral("編集"));
+        editMenu->addAction(undoAction_);
+        editMenu->addAction(redoAction_);
+
         auto* toolbar = addToolBar(QStringLiteral("Mycel"));
+        toolbar->addAction(undoAction_);
+        toolbar->addAction(redoAction_);
+        toolbar->addSeparator();
         QAction* openAction = toolbar->addAction(QStringLiteral("Open"));
         QAction* refreshAction = toolbar->addAction(QStringLiteral("Refresh"));
         refreshAction->setShortcut(QKeySequence(Qt::Key_F5));
@@ -3911,6 +3954,9 @@ public:
         }
         applyTheme(uiTheme_, false, false);
         restoreWindowStateFromSettingsFile();
+        if (mycelStorageEnabled_) {
+            cleanHistoryTrash();  // discard any trash left behind by a previous session
+        }
         rebuild(true);
         QTimer::singleShot(0, this, [this] { syncEditorPaneVisibility(); });
         qApp->installEventFilter(this);
@@ -3933,6 +3979,9 @@ public:
             view_->setScene(nullptr);
         }
         scene_.clear();
+        if (mycelStorageEnabled_) {
+            cleanHistoryTrash();  // session over: undo history is gone, so its trash can go too
+        }
     }
 
     bool mycelStorageEnabled() const
@@ -3958,6 +4007,8 @@ public:
         }
 
         const QString parentPath = parent->path;
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         QDir dir(parent->path);
         QString name = QStringLiteral("NewFolder");
         QString path = dir.filePath(name);
@@ -3976,6 +4027,9 @@ public:
         saveOrderFile();
         rebuild(false);
         restoreFolderSelection(parentPath);
+        const QString trashPath = allocateTrashPath(name);
+        recordHistory(QStringLiteral("フォルダ作成"), {{trashPath, path}}, {{path, trashPath}},
+                      historyBefore, historySelection);
     }
 
     void createFile(Node* parent, const QString& selectionPathAfterCreate = {})
@@ -3987,6 +4041,8 @@ public:
 
         const QString parentPath = parent->path;
         const QString restorePath = selectionPathAfterCreate.isEmpty() ? parentPath : selectionPathAfterCreate;
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         QDir dir(parent->path);
         QString name = QStringLiteral("NewFile.txt");
         QString path = dir.filePath(name);
@@ -4001,11 +4057,15 @@ public:
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("ファイルを作成できませんでした。"));
             return;
         }
+        file.close();
         recordDebugEvent(QStringLiteral("created file: %1").arg(relativeKeyForPath(path)));
         appendCreatedItemToOrder(parent->path, name, false);
         saveOrderFile();
         rebuild(false);
         selectNodePath(restorePath);
+        const QString trashPath = allocateTrashPath(name);
+        recordHistory(QStringLiteral("ファイル作成"), {{trashPath, path}}, {{path, trashPath}},
+                      historyBefore, historySelection);
     }
 
     void createFileInFolderPath(const QString& folderPath)
@@ -4025,17 +4085,23 @@ public:
         }
 
         recordDebugEvent(QStringLiteral("context create file in: %1").arg(relativeKeyForPath(folderPath)));
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         QFile file(path);
         if (!file.open(QIODevice::WriteOnly)) {
             recordDebugEvent(QStringLiteral("context create file failed: %1").arg(QDir::toNativeSeparators(path)));
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("ファイルを作成できませんでした。"));
             return;
         }
+        file.close();
         appendCreatedItemToOrder(folderInfo.absoluteFilePath(), name, false);
         saveOrderFile();
         rebuild(false);
         selectNodePath(folderInfo.absoluteFilePath(), true);
         recordDebugEvent(QStringLiteral("context created file: %1").arg(relativeKeyForPath(path)));
+        const QString trashPath = allocateTrashPath(name);
+        recordHistory(QStringLiteral("ファイル作成"), {{trashPath, path}}, {{path, trashPath}},
+                      historyBefore, historySelection);
     }
 
     void createFolderInFolderPath(const QString& folderPath)
@@ -4055,6 +4121,8 @@ public:
         }
 
         recordDebugEvent(QStringLiteral("context create folder in: %1").arg(relativeKeyForPath(folderPath)));
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         if (!dir.mkdir(name)) {
             recordDebugEvent(QStringLiteral("context create folder failed: %1").arg(QDir::toNativeSeparators(path)));
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("フォルダを作成できませんでした。"));
@@ -4065,6 +4133,9 @@ public:
         rebuild(false);
         selectNodePath(folderInfo.absoluteFilePath(), true);
         recordDebugEvent(QStringLiteral("context created folder: %1").arg(relativeKeyForPath(path)));
+        const QString trashPath = allocateTrashPath(name);
+        recordHistory(QStringLiteral("フォルダ作成"), {{trashPath, path}}, {{path, trashPath}},
+                      historyBefore, historySelection);
     }
 
     void createFileInSelectedFolder()
@@ -4160,6 +4231,11 @@ public:
             return false;
         }
 
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+        std::vector<std::pair<QString, QString>> redoMoves;
+        std::vector<std::pair<QString, QString>> undoMoves;
+
         QStringList createdDirectories;
         QStringList failed;
         for (const QString& sourcePath : copiedPaths_) {
@@ -4181,6 +4257,9 @@ public:
 
             QFileInfo destinationInfo(destinationPath);
             appendCreatedItemToOrder(parentPath, destinationInfo.fileName(), destinationInfo.isDir());
+            const QString trashPath = allocateTrashPath(destinationInfo.fileName());
+            redoMoves.push_back({trashPath, destinationPath});
+            undoMoves.push_back({destinationPath, trashPath});
             if (destinationInfo.isDir()) {
                 createdDirectories.append(destinationInfo.absoluteFilePath());
             }
@@ -4193,6 +4272,10 @@ public:
         }
         saveOrderFile();
         rebuild(false);
+        if (!redoMoves.empty()) {
+            recordHistory(QStringLiteral("貼り付け"), std::move(redoMoves), std::move(undoMoves),
+                          historyBefore, historySelection);
+        }
 
         if (!failed.isEmpty()) {
             QMessageBox::warning(this, QStringLiteral("Mycel"),
@@ -4371,6 +4454,8 @@ public:
             return false;
         }
 
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         const bool collapse = !allFoldersCollapsed;
         bool changed = false;
         for (const QString& path : selectedPaths) {
@@ -4393,6 +4478,7 @@ public:
             saveCollapsedFile();
             rebuild(false);
             restoreSelection(selectedPaths, true);
+            recordHistory(QStringLiteral("折り畳み切替"), {}, {}, historyBefore, historySelection);
         } else {
             view_->setFocus(Qt::ShortcutFocusReason);
         }
@@ -5190,6 +5276,8 @@ public:
         if (!node || node->isDir) {
             return;
         }
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         const QFileInfo info(node->path);
         if (isImagePreviewFile(info)) {
             const qreal scale = imagePreviewScaleForSize(info, size, preferHeight);
@@ -5201,6 +5289,7 @@ public:
         }
         savePreviewFile();
         rebuild(false);
+        recordHistory(QStringLiteral("プレビューサイズ変更"), {}, {}, historyBefore, historySelection);
     }
 
     void setImagePreviewScale(Node* node, qreal scale)
@@ -5212,12 +5301,15 @@ public:
         if (!isImagePreviewFile(info)) {
             return;
         }
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         const QSizeF size = imagePreviewSizeForScale(info, scale);
         const qreal normalizedScale = imagePreviewScaleForSize(info, size, false);
         previewImageScales_[node->path] = normalizedScale;
         previewSizes_[node->path] = size;
         savePreviewFile();
         rebuild(false);
+        recordHistory(QStringLiteral("プレビューサイズ変更"), {}, {}, historyBefore, historySelection);
     }
 
     void toggleCollapsed(Node* node)
@@ -5230,6 +5322,8 @@ public:
 
     void toggleCollapsedPath(const QString& path)
     {
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         if (collapsedPaths_.contains(path)) {
             collapsedPaths_.remove(path);
         } else {
@@ -5238,6 +5332,7 @@ public:
         saveCollapsedFile();
         rebuild(false);
         selectNodePath(path, true);
+        recordHistory(QStringLiteral("折り畳み切替"), {}, {}, historyBefore, historySelection);
     }
 
     QColor colorForNode(const Node* node) const
@@ -5283,9 +5378,16 @@ public:
         if (!node || !mycelStorageEnabled_ || !color.isValid()) {
             return;
         }
+        const auto it = userColors_.find(node->path);
+        if (it != userColors_.end() && it->second == color) {
+            return;
+        }
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         userColors_[node->path] = color;
         saveColorFile();
         rebuild(false);
+        recordHistory(QStringLiteral("色変更"), {}, {}, historyBefore, historySelection);
     }
 
     void setNodeColorPath(const QString& path, const QColor& color)
@@ -5293,31 +5395,44 @@ public:
         if (path.isEmpty() || !mycelStorageEnabled_ || !color.isValid()) {
             return;
         }
+        const auto it = userColors_.find(path);
+        if (it != userColors_.end() && it->second == color) {
+            return;
+        }
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         userColors_[path] = color;
         saveColorFile();
         rebuild(false);
         selectNodePath(path, true);
+        recordHistory(QStringLiteral("色変更"), {}, {}, historyBefore, historySelection);
     }
 
     void clearNodeColor(Node* node)
     {
-        if (!node || !mycelStorageEnabled_) {
+        if (!node || !mycelStorageEnabled_ || userColors_.find(node->path) == userColors_.end()) {
             return;
         }
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         userColors_.erase(node->path);
         saveColorFile();
         rebuild(false);
+        recordHistory(QStringLiteral("色クリア"), {}, {}, historyBefore, historySelection);
     }
 
     void clearNodeColorPath(const QString& path)
     {
-        if (path.isEmpty() || !mycelStorageEnabled_) {
+        if (path.isEmpty() || !mycelStorageEnabled_ || userColors_.find(path) == userColors_.end()) {
             return;
         }
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         userColors_.erase(path);
         saveColorFile();
         rebuild(false);
         selectNodePath(path, true);
+        recordHistory(QStringLiteral("色クリア"), {}, {}, historyBefore, historySelection);
     }
 
     void beginInlineRename(Node* node)
@@ -5452,6 +5567,9 @@ public:
             return false;
         }
         const bool wasDir = info.isDir();
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+        pauseFileSystemWatcher();
         if (!QFile::rename(path, destination)) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("名前を変更できませんでした。"));
             return false;
@@ -5471,6 +5589,8 @@ public:
         saveLinkFile();
         saveCollapsedFile();
         rebuild(false);
+        recordHistory(QStringLiteral("名前変更"), {{path, destination}}, {{destination, path}},
+                      historyBefore, historySelection);
         return true;
     }
 
@@ -5486,7 +5606,10 @@ public:
                                   QMessageBox::Cancel) != QMessageBox::Yes) {
             return;
         }
-        if (!QFile::remove(filePath)) {
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+        const QString trashPath = moveToTrash(filePath);
+        if (trashPath.isEmpty()) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("ファイルを削除できませんでした。"));
             return;
         }
@@ -5497,6 +5620,8 @@ public:
         saveLinkFile();
         saveCollapsedFile();
         rebuild(false);
+        recordHistory(QStringLiteral("削除"), {{filePath, trashPath}}, {{trashPath, filePath}},
+                      historyBefore, historySelection);
     }
 
     void deleteFilePath(const QString& path)
@@ -5517,8 +5642,10 @@ public:
             return;
         }
 
-        QDir dir(folderPath);
-        if (!dir.removeRecursively()) {
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+        const QString trashPath = moveToTrash(folderPath);
+        if (trashPath.isEmpty()) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("フォルダを削除できませんでした。"));
             return;
         }
@@ -5530,6 +5657,8 @@ public:
         saveLinkFile();
         saveCollapsedFile();
         rebuild(false);
+        recordHistory(QStringLiteral("削除"), {{folderPath, trashPath}}, {{trashPath, folderPath}},
+                      historyBefore, historySelection);
     }
 
     void deleteFolderPath(const QString& path)
@@ -5557,20 +5686,45 @@ public:
 
     void moveNode(Node* source, Node* targetDir)
     {
-        if (!source || !targetDir || !targetDir->isDir || source == root_.get()) {
+        const QString sourcePath = source ? source->path : QString();
+        const bool sourceIsDir = source && source->isDir;
+        const bool sourceIsRoot = source == root_.get();
+        const QString targetDirPath = targetDir ? targetDir->path : QString();
+        const bool targetIsDir = targetDir && targetDir->isDir;
+        recordDebugEvent(QStringLiteral("move node begin: source=%1 isDir=%2 isRoot=%3 target=%4 targetIsDir=%5")
+                             .arg(relativeKeyForPath(sourcePath),
+                                  sourceIsDir ? QStringLiteral("true") : QStringLiteral("false"),
+                                  sourceIsRoot ? QStringLiteral("true") : QStringLiteral("false"),
+                                  relativeKeyForPath(targetDirPath),
+                                  targetIsDir ? QStringLiteral("true") : QStringLiteral("false")));
+
+        if (sourcePath.isEmpty() || targetDirPath.isEmpty() || !targetIsDir || sourceIsRoot) {
+            recordDebugEvent(QStringLiteral("move node aborted: invalid source or target"));
             rebuild(false);
             return;
         }
 
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+
+        pauseFileSystemWatcher();
         const FileOperationService::MoveResult result = FileOperationService::moveInto(
-            {{source->path, source->isDir, source == root_.get()}}, targetDir->path);
+            {{sourcePath, sourceIsDir, sourceIsRoot}}, targetDirPath);
+        recordDebugEvent(QStringLiteral("move node fs result: moved=%1 failed=%2 blocked=%3 sameDir=%4")
+                             .arg(static_cast<int>(result.moved.size()))
+                             .arg(static_cast<int>(result.failed.size()))
+                             .arg(result.blocked ? QStringLiteral("true") : QStringLiteral("false"),
+                                  result.skippedSameDir ? QStringLiteral("true") : QStringLiteral("false")));
 
         if (result.blocked) {
+            recordDebugEvent(QStringLiteral("move node blocked"));
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("自分自身または配下へは移動できません。"));
             rebuild(false);
             return;
         }
         if (!result.failed.empty()) {
+            recordDebugEvent(QStringLiteral("move node failed: %1 -> %2")
+                                 .arg(relativeKeyForPath(result.failed.front().first), result.failed.front().second));
             QMessageBox::warning(this, QStringLiteral("Mycel"),
                                  QStringLiteral("移動できませんでした。\n%1").arg(result.failed.front().second));
             rebuild(false);
@@ -5584,7 +5738,9 @@ public:
         }
 
         const FileOperationService::MovedEntry& entry = result.moved.front();
-        applyMovedMetadata(entry, targetDir->path, mycelStorageEnabled_ && !entry.isDir);
+        recordDebugEvent(QStringLiteral("move node metadata: %1 -> %2")
+                             .arg(relativeKeyForPath(entry.oldPath), relativeKeyForPath(entry.newPath)));
+        applyMovedMetadata(entry, targetDirPath, mycelStorageEnabled_ && !entry.isDir);
         saveColorFile();
         savePreviewFile();
         saveLinkFile();
@@ -5593,16 +5749,26 @@ public:
             saveOrderFile();
         }
         rebuild(false);
+        recordHistory(QStringLiteral("移動"), {{entry.oldPath, entry.newPath}},
+                      {{entry.newPath, entry.oldPath}}, historyBefore, historySelection);
     }
 
     void moveDragItemsToFolder(NodeItem* sourceItem, Node* targetDir)
     {
+        const QString targetDirPath = targetDir ? targetDir->path : QString();
+        const bool targetIsDir = targetDir && targetDir->isDir;
         std::vector<NodeItem*> dragItems = selectedTopLevelDragItems(sourceItem);
+        recordDebugEvent(QStringLiteral("move drag begin: source=%1 target=%2 targetIsDir=%3 dragItems=%4")
+                             .arg(sourceItem ? relativeKeyForPath(sourceItem->path()) : QStringLiteral("(null)"),
+                                  relativeKeyForPath(targetDirPath),
+                                  targetIsDir ? QStringLiteral("true") : QStringLiteral("false"))
+                             .arg(static_cast<int>(dragItems.size())));
         if (dragItems.size() <= 1) {
             moveNode(sourceItem ? sourceItem->node() : nullptr, targetDir);
             return;
         }
-        if (!targetDir || !targetDir->isDir) {
+        if (targetDirPath.isEmpty() || !targetIsDir) {
+            recordDebugEvent(QStringLiteral("move drag aborted: invalid target"));
             clearDragPreview();
             return;
         }
@@ -5614,16 +5780,30 @@ public:
                 continue;
             }
             requests.push_back({node->path, node->isDir, false});
+            recordDebugEvent(QStringLiteral("move drag request: %1 isDir=%2")
+                                 .arg(relativeKeyForPath(node->path),
+                                      node->isDir ? QStringLiteral("true") : QStringLiteral("false")));
         }
 
         if (requests.empty()) {
+            recordDebugEvent(QStringLiteral("move drag aborted: no requests"));
             clearDragPreview();
             return;
         }
 
-        const FileOperationService::MoveResult result = FileOperationService::moveInto(requests, targetDir->path);
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+
+        pauseFileSystemWatcher();
+        const FileOperationService::MoveResult result = FileOperationService::moveInto(requests, targetDirPath);
+        recordDebugEvent(QStringLiteral("move drag fs result: moved=%1 failed=%2 blocked=%3 sameDir=%4")
+                             .arg(static_cast<int>(result.moved.size()))
+                             .arg(static_cast<int>(result.failed.size()))
+                             .arg(result.blocked ? QStringLiteral("true") : QStringLiteral("false"),
+                                  result.skippedSameDir ? QStringLiteral("true") : QStringLiteral("false")));
 
         if (result.blocked) {
+            recordDebugEvent(QStringLiteral("move drag blocked"));
             QMessageBox::warning(this, QStringLiteral("Mycel"),
                                  QStringLiteral("自分自身または配下へは移動できません。"));
             rebuild(false);
@@ -5631,15 +5811,30 @@ public:
         }
 
         for (const FileOperationService::MovedEntry& entry : result.moved) {
-            applyMovedMetadata(entry, targetDir->path, mycelStorageEnabled_);
+            recordDebugEvent(QStringLiteral("move drag metadata: %1 -> %2")
+                                 .arg(relativeKeyForPath(entry.oldPath), relativeKeyForPath(entry.newPath)));
+            applyMovedMetadata(entry, targetDirPath, mycelStorageEnabled_);
         }
 
+        recordDebugEvent(QStringLiteral("move drag saving metadata"));
         saveColorFile();
         savePreviewFile();
         saveOrderFile();
         saveLinkFile();
         saveCollapsedFile();
+        recordDebugEvent(QStringLiteral("move drag rebuild"));
         rebuild(false);
+
+        std::vector<std::pair<QString, QString>> redoMoves;
+        std::vector<std::pair<QString, QString>> undoMoves;
+        for (const FileOperationService::MovedEntry& entry : result.moved) {
+            redoMoves.push_back({entry.oldPath, entry.newPath});
+            undoMoves.push_back({entry.newPath, entry.oldPath});
+        }
+        if (!redoMoves.empty()) {
+            recordHistory(QStringLiteral("移動"), std::move(redoMoves), std::move(undoMoves),
+                          historyBefore, historySelection);
+        }
 
         if (!result.failed.empty()) {
             QStringList failed;
@@ -5674,6 +5869,10 @@ public:
         QDir target(targetDir->path);
         QStringList importedNames;
         QStringList failedPaths;
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+        std::vector<std::pair<QString, QString>> redoMoves;
+        std::vector<std::pair<QString, QString>> undoMoves;
 
         for (const QUrl& url : urls) {
             if (!url.isLocalFile()) {
@@ -5704,11 +5903,16 @@ public:
             QFileInfo destinationInfo(destinationPath);
             importedNames.append(destinationInfo.fileName());
             appendCreatedItemToOrder(targetDir->path, destinationInfo.fileName(), destinationInfo.isDir());
+            const QString trashPath = allocateTrashPath(destinationInfo.fileName());
+            redoMoves.push_back({trashPath, destinationPath});
+            undoMoves.push_back({destinationPath, trashPath});
         }
 
         if (!importedNames.isEmpty()) {
             saveOrderFile();
             rebuild(false);
+            recordHistory(QStringLiteral("取り込み"), std::move(redoMoves), std::move(undoMoves),
+                          historyBefore, historySelection);
         }
 
         if (!failedPaths.isEmpty()) {
@@ -5768,6 +5972,8 @@ public:
             return;
         }
 
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         QString destinationPath;
         bool saved = false;
         if (mimeData->hasText()) {
@@ -5812,6 +6018,9 @@ public:
         appendCreatedItemToOrder(targetDir->path, fileName, false);
         saveOrderFile();
         rebuild(false);
+        const QString trashPath = allocateTrashPath(fileName);
+        recordHistory(QStringLiteral("貼り付け"), {{trashPath, destinationPath}},
+                      {{destinationPath, trashPath}}, historyBefore, historySelection);
     }
 
     void pasteClipboardToFolderPathAction(const QString& folderPath)
@@ -6010,6 +6219,9 @@ public:
             }
         }
 
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+
         // A link target is placed beside exactly one source, so re-linking the same file
         // replaces its previous connection instead of leaving a stale line behind.
         fileLinks_.erase(std::remove_if(fileLinks_.begin(), fileLinks_.end(),
@@ -6019,6 +6231,7 @@ public:
         fileLinks_.push_back({from->path, to->path});
         saveLinkFile();
         rebuild(false);
+        recordHistory(QStringLiteral("関連付け"), {}, {}, historyBefore, historySelection);
     }
 
     bool hasIncomingFileLink(Node* node) const
@@ -6053,6 +6266,8 @@ public:
             return;
         }
 
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         const auto oldSize = fileLinks_.size();
         fileLinks_.erase(std::remove_if(fileLinks_.begin(), fileLinks_.end(), [node](const FileLink& link) {
                              return link.to == node->path;
@@ -6064,6 +6279,7 @@ public:
 
         saveLinkFile();
         rebuild(false);
+        recordHistory(QStringLiteral("関連付け解除"), {}, {}, historyBefore, historySelection);
     }
 
     void removeIncomingFileLinksPath(const QString& path)
@@ -6106,6 +6322,8 @@ public:
             return a.y < b.y;
         });
 
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         const QString key = orderKeyForDirectory(source->parentPath);
         QStringList order = fileOrders_[key];
         QDir parent(source->parentPath);
@@ -6129,6 +6347,7 @@ public:
         fileOrders_[key] = order;
         saveOrderFile();
         rebuild(false);
+        recordHistory(QStringLiteral("並び替え"), {}, {}, historyBefore, historySelection);
         return true;
     }
 
@@ -6339,6 +6558,8 @@ public:
 
     void setFilePreviewsForPaths(const QStringList& paths, bool open)
     {
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         bool changed = false;
         QStringList selectedPaths;
         for (const QString& path : paths) {
@@ -6365,6 +6586,7 @@ public:
             savePreviewFile();
             rebuild(false);
             restoreSelection(selectedPaths);
+            recordHistory(QStringLiteral("プレビュー切替"), {}, {}, historyBefore, historySelection);
         }
     }
 
@@ -6373,10 +6595,13 @@ public:
         if (previewPaths_.contains(path) || !prepareInlinePreviewOpenPath(path)) {
             return false;
         }
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         previewPaths_.insert(path);
         savePreviewFile();
         rebuild(false);
         selectNodePath(path);
+        recordHistory(QStringLiteral("プレビュー切替"), {}, {}, historyBefore, historySelection);
         return true;
     }
 
@@ -6385,10 +6610,13 @@ public:
         if (!previewPaths_.contains(path)) {
             return false;
         }
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         previewPaths_.remove(path);
         savePreviewFile();
         rebuild(false);
         selectNodePath(path);
+        recordHistory(QStringLiteral("プレビュー切替"), {}, {}, historyBefore, historySelection);
         return true;
     }
 
@@ -6552,21 +6780,31 @@ public:
             return;
         }
 
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+        std::vector<std::pair<QString, QString>> redoMoves;
+        std::vector<std::pair<QString, QString>> undoMoves;
+
         QStringList failed;
         for (const QString& path : filePaths) {
-            if (!QFile::remove(path)) {
+            const QString trashPath = moveToTrash(path);
+            if (trashPath.isEmpty()) {
                 failed.append(path);
                 continue;
             }
+            redoMoves.push_back({path, trashPath});
+            undoMoves.push_back({trashPath, path});
             removeDeletedPathMetadata(path, false);
         }
 
         for (const QString& path : folderPaths) {
-            QDir dir(path);
-            if (!dir.removeRecursively()) {
+            const QString trashPath = moveToTrash(path);
+            if (trashPath.isEmpty()) {
                 failed.append(path);
                 continue;
             }
+            redoMoves.push_back({path, trashPath});
+            undoMoves.push_back({trashPath, path});
             removeDeletedPathMetadata(path, true);
         }
 
@@ -6577,9 +6815,272 @@ public:
         saveCollapsedFile();
         rebuild(false);
 
+        if (!redoMoves.empty()) {
+            recordHistory(QStringLiteral("削除"), std::move(redoMoves), std::move(undoMoves),
+                          historyBefore, historySelection);
+        }
+
         if (!failed.isEmpty()) {
             QMessageBox::warning(this, QStringLiteral("Mycel"),
                                  QStringLiteral("削除できなかった項目があります。\n%1").arg(failed.join(QLatin1Char('\n'))));
+        }
+    }
+
+    // ===== Undo/Redo history =================================================
+    // A snapshot of every persisted, path-keyed metadata container. Restoring a snapshot
+    // re-keys all metadata back to a prior state in one shot, so per-operation undo logic only
+    // has to reverse the filesystem moves; the metadata follows from the snapshot.
+    struct MetadataSnapshot {
+        QSet<QString> collapsedPaths;
+        std::map<QString, QColor> userColors;
+        QSet<QString> previewPaths;
+        std::map<QString, QSizeF> previewSizes;
+        std::map<QString, qreal> previewImageScales;
+        std::map<QString, QStringList> fileOrders;
+        std::vector<FileLink> fileLinks;
+    };
+    // One undoable action. redoMoves replays the filesystem changes; undoMoves reverses them.
+    // create/delete/import are normalized to moves to/from .mycel/trash so every structural
+    // change is expressed as a reversible rename.
+    struct HistoryEntry {
+        QString description;
+        std::vector<std::pair<QString, QString>> redoMoves;
+        std::vector<std::pair<QString, QString>> undoMoves;
+        MetadataSnapshot before;
+        MetadataSnapshot after;
+        QStringList selectionBefore;
+        QStringList selectionAfter;
+    };
+
+    MetadataSnapshot captureMetadataSnapshot() const
+    {
+        return MetadataSnapshot{collapsedPaths_, userColors_,  previewPaths_, previewSizes_,
+                                previewImageScales_, fileOrders_, fileLinks_};
+    }
+
+    void restoreMetadataSnapshot(const MetadataSnapshot& s)
+    {
+        collapsedPaths_ = s.collapsedPaths;
+        userColors_ = s.userColors;
+        previewPaths_ = s.previewPaths;
+        previewSizes_ = s.previewSizes;
+        previewImageScales_ = s.previewImageScales;
+        fileOrders_ = s.fileOrders;
+        fileLinks_ = s.fileLinks;
+    }
+
+    void saveAllMetadata()
+    {
+        saveColorFile();
+        saveOrderFile();
+        savePreviewFile();
+        saveLinkFile();
+        saveCollapsedFile();
+    }
+
+    QString historyTrashDir() const
+    {
+        return QDir(rootPath_).filePath(QStringLiteral(".mycel/trash"));
+    }
+
+    // The undo history (and its trashed items) lives only for the session. Wipe .mycel/trash at
+    // startup and shutdown so deleted/undone items don't pile up on disk across runs.
+    void cleanHistoryTrash()
+    {
+        QDir trash(historyTrashDir());
+        if (trash.exists()) {
+            trash.removeRecursively();
+        }
+        historyTrashCounter_ = 0;
+    }
+
+    // A fresh, collision-free path under .mycel/trash holding one item by its original name, so
+    // undo/redo can move it straight back to (or out of) the tree.
+    QString allocateTrashPath(const QString& name)
+    {
+        QString slotDir = QDir(historyTrashDir()).filePath(QString::number(++historyTrashCounter_));
+        while (QFileInfo::exists(slotDir)) {
+            slotDir = QDir(historyTrashDir()).filePath(QString::number(++historyTrashCounter_));
+        }
+        QDir().mkpath(slotDir);
+        return QDir(slotDir).filePath(name);
+    }
+
+    // On Windows QFileSystemWatcher keeps an open handle on every watched directory, which blocks
+    // renaming/moving those directories ("Access is denied"). Drop all watched paths before a
+    // structural filesystem move; the rebuild that follows re-establishes them via
+    // resetFileSystemWatcher().
+    void pauseFileSystemWatcher()
+    {
+        if (!fileSystemWatcher_) {
+            return;
+        }
+        const QStringList files = fileSystemWatcher_->files();
+        if (!files.isEmpty()) {
+            fileSystemWatcher_->removePaths(files);
+        }
+        const QStringList directories = fileSystemWatcher_->directories();
+        if (!directories.isEmpty()) {
+            fileSystemWatcher_->removePaths(directories);
+        }
+    }
+
+    // Move a tree item into .mycel/trash and return its new path (empty on failure). Deletes go
+    // through here so they can be reversed by undo (the item is recovered, not destroyed).
+    QString moveToTrash(const QString& path)
+    {
+        pauseFileSystemWatcher();
+        const QString trashPath = allocateTrashPath(QFileInfo(path).fileName());
+        std::error_code ec;
+        std::filesystem::rename(std::filesystem::u8path(path.toStdString()),
+                                std::filesystem::u8path(trashPath.toStdString()), ec);
+        if (ec) {
+            recordDebugEvent(QStringLiteral("trash move failed: %1 : %2")
+                                 .arg(relativeKeyForPath(path), QString::fromStdString(ec.message())));
+            return QString();
+        }
+        return trashPath;
+    }
+
+    bool applyHistoryMoves(const std::vector<std::pair<QString, QString>>& moves)
+    {
+        if (!moves.empty()) {
+            pauseFileSystemWatcher();
+        }
+        bool ok = true;
+        for (const auto& move : moves) {
+            if (move.first.isEmpty() || move.second.isEmpty()) {
+                continue;
+            }
+            QDir().mkpath(QFileInfo(move.second).absolutePath());
+            std::error_code ec;
+            std::filesystem::rename(std::filesystem::u8path(move.first.toStdString()),
+                                    std::filesystem::u8path(move.second.toStdString()), ec);
+            if (ec) {
+                ok = false;
+                recordDebugEvent(QStringLiteral("history move failed: %1 -> %2 : %3")
+                                     .arg(relativeKeyForPath(move.first), relativeKeyForPath(move.second),
+                                          QString::fromStdString(ec.message())));
+            }
+        }
+        return ok;
+    }
+
+    void pushHistoryEntry(HistoryEntry entry)
+    {
+        redoStack_.clear();
+        undoStack_.push_back(std::move(entry));
+        while (static_cast<int>(undoStack_.size()) > kMaxHistoryEntries) {
+            undoStack_.erase(undoStack_.begin());
+        }
+        updateUndoRedoActions();
+    }
+
+    // Record one undoable action. `before` must be captured by the caller at the very start of
+    // the op (while paths are still in their old form). When a group is open the moves are
+    // folded into it instead of pushed, so a multi-item gesture undoes as a single step.
+    void recordHistory(const QString& description,
+                       std::vector<std::pair<QString, QString>> redoMoves,
+                       std::vector<std::pair<QString, QString>> undoMoves,
+                       const MetadataSnapshot& before, const QStringList& selectionBefore)
+    {
+        if (applyingHistory_) {
+            return;
+        }
+        if (historyGroup_) {
+            for (auto& move : redoMoves) {
+                historyGroup_->redoMoves.push_back(std::move(move));
+            }
+            for (auto& move : undoMoves) {
+                historyGroup_->undoMoves.push_back(std::move(move));
+            }
+            return;
+        }
+        HistoryEntry entry;
+        entry.description = description;
+        entry.redoMoves = std::move(redoMoves);
+        entry.undoMoves = std::move(undoMoves);
+        entry.before = before;
+        entry.selectionBefore = selectionBefore;
+        entry.after = captureMetadataSnapshot();
+        entry.selectionAfter = selectedNodePaths();
+        pushHistoryEntry(std::move(entry));
+    }
+
+    void beginHistoryGroup(const QString& description)
+    {
+        if (applyingHistory_ || historyGroup_) {
+            return;
+        }
+        historyGroup_ = std::make_unique<HistoryEntry>();
+        historyGroup_->description = description;
+        historyGroup_->before = captureMetadataSnapshot();
+        historyGroup_->selectionBefore = selectedNodePaths();
+    }
+
+    void endHistoryGroup()
+    {
+        if (!historyGroup_) {
+            return;
+        }
+        std::unique_ptr<HistoryEntry> group = std::move(historyGroup_);
+        historyGroup_.reset();
+        group->after = captureMetadataSnapshot();
+        group->selectionAfter = selectedNodePaths();
+        pushHistoryEntry(std::move(*group));
+    }
+
+    void performUndo()
+    {
+        if (renameEdit_ || sideEditorEditing_ || undoStack_.empty()) {
+            return;
+        }
+        HistoryEntry entry = std::move(undoStack_.back());
+        undoStack_.pop_back();
+        applyingHistory_ = true;
+        applyHistoryMoves(entry.undoMoves);
+        restoreMetadataSnapshot(entry.before);
+        saveAllMetadata();
+        rebuild(false);
+        restoreSelection(entry.selectionBefore, true);
+        applyingHistory_ = false;
+        recordDebugEvent(QStringLiteral("undo: %1").arg(entry.description));
+        redoStack_.push_back(std::move(entry));
+        updateUndoRedoActions();
+    }
+
+    void performRedo()
+    {
+        if (renameEdit_ || sideEditorEditing_ || redoStack_.empty()) {
+            return;
+        }
+        HistoryEntry entry = std::move(redoStack_.back());
+        redoStack_.pop_back();
+        applyingHistory_ = true;
+        applyHistoryMoves(entry.redoMoves);
+        restoreMetadataSnapshot(entry.after);
+        saveAllMetadata();
+        rebuild(false);
+        restoreSelection(entry.selectionAfter, true);
+        applyingHistory_ = false;
+        recordDebugEvent(QStringLiteral("redo: %1").arg(entry.description));
+        undoStack_.push_back(std::move(entry));
+        updateUndoRedoActions();
+    }
+
+    void updateUndoRedoActions()
+    {
+        if (undoAction_) {
+            const bool can = !undoStack_.empty();
+            undoAction_->setEnabled(can);
+            undoAction_->setToolTip(can ? QStringLiteral("元に戻す: %1").arg(undoStack_.back().description)
+                                        : QStringLiteral("元に戻す"));
+        }
+        if (redoAction_) {
+            const bool can = !redoStack_.empty();
+            redoAction_->setEnabled(can);
+            redoAction_->setToolTip(can ? QStringLiteral("やり直す: %1").arg(redoStack_.back().description)
+                                        : QStringLiteral("やり直す"));
         }
     }
 
@@ -6594,10 +7095,25 @@ public:
     }
 
     // Selection primitive shared by NodeItem (drag start, click, double-click). additive
-    // keeps the current selection for Cmd/Ctrl/Shift-click.
+    // keeps the current selection for Cmd/Ctrl-click.
     void selectNodeItem(NodeItem* item, bool additive)
     {
         selection_.select(item, additive);
+        if (item && item->node()) {
+            selectionRangeAnchorPath_ = item->node()->path;
+        } else if (!additive) {
+            selectionRangeAnchorPath_.clear();
+        }
+    }
+
+    void selectNodeItem(NodeItem* item, Qt::KeyboardModifiers modifiers)
+    {
+        const bool range = (modifiers & Qt::ShiftModifier) != 0;
+        const bool additive = (modifiers & (Qt::ControlModifier | Qt::MetaModifier)) != 0;
+        if (range && selectNodeRangeToItem(item, additive)) {
+            return;
+        }
+        selectNodeItem(item, additive || range);
     }
 
     void restoreFolderSelection(const QString& folderPath)
@@ -6608,6 +7124,7 @@ public:
     bool selectNodePath(const QString& path, bool ensureVisible = false)
     {
         NodeItem* selectedItem = selection_.selectByPath(path);
+        selectionRangeAnchorPath_ = selectedItem && selectedItem->node() ? selectedItem->node()->path : QString();
         view_->setFocus(Qt::ShortcutFocusReason);
         if (ensureVisible) {
             ensureNodeItemVisible(selectedItem);
@@ -6621,6 +7138,9 @@ public:
     bool restoreSelection(const QStringList& paths, bool ensureVisible = false)
     {
         NodeItem* firstSelectedItem = selection_.selectByPaths(paths);
+        selectionRangeAnchorPath_ = firstSelectedItem && firstSelectedItem->node()
+                                        ? firstSelectedItem->node()->path
+                                        : QString();
         view_->setFocus(Qt::ShortcutFocusReason);
         if (ensureVisible) {
             ensureNodeItemVisible(firstSelectedItem);
@@ -6802,6 +7322,62 @@ public:
             }
         }
         return nullptr;
+    }
+
+    QStringList visibleNodePathsInOrder() const
+    {
+        QStringList paths;
+        if (!root_) {
+            return paths;
+        }
+        std::function<void(const Node&)> visit = [&](const Node& node) {
+            paths.append(node.path);
+            for (const auto& child : node.children) {
+                visit(*child);
+            }
+        };
+        visit(*root_);
+        return paths;
+    }
+
+    bool selectNodeRangeToItem(NodeItem* item, bool additive)
+    {
+        if (!item || !item->node()) {
+            return false;
+        }
+
+        QString anchorPath = selectionRangeAnchorPath_;
+        if (anchorPath.isEmpty()) {
+            if (Node* selected = singleSelectedNode()) {
+                anchorPath = selected->path;
+            }
+        }
+        if (anchorPath.isEmpty()) {
+            return false;
+        }
+
+        const QString targetPath = item->node()->path;
+        const QStringList paths = visibleNodePathsInOrder();
+        int anchorIndex = paths.indexOf(anchorPath);
+        int targetIndex = paths.indexOf(targetPath);
+        if (anchorIndex < 0 || targetIndex < 0) {
+            return false;
+        }
+        if (anchorIndex > targetIndex) {
+            std::swap(anchorIndex, targetIndex);
+        }
+
+        QStringList rangePaths;
+        for (int index = anchorIndex; index <= targetIndex; ++index) {
+            rangePaths.append(paths[index]);
+        }
+        selection_.selectByPaths(rangePaths, additive);
+        selectionRangeAnchorPath_ = anchorPath;
+        recordDebugEvent(QStringLiteral("selected range: %1 -> %2 (%3)")
+                             .arg(relativeKeyForPath(anchorPath),
+                                  relativeKeyForPath(targetPath))
+                             .arg(rangePaths.size()));
+        return true;
     }
 
     Node* singleSelectedNode() const
@@ -7473,8 +8049,18 @@ private:
 public:
     void recordDebugEvent(const QString& message)
     {
-        debugEvents_.append(QStringLiteral("%1  %2")
-                                .arg(QTime::currentTime().toString(QStringLiteral("HH:mm:ss.zzz")), message));
+        const QString line = QStringLiteral("%1  %2")
+                                 .arg(QTime::currentTime().toString(QStringLiteral("HH:mm:ss.zzz")), message);
+        debugEvents_.append(line);
+        const QString logPath = qEnvironmentVariable("MYCEL_DEBUG_LOG");
+        if (!logPath.isEmpty()) {
+            QDir().mkpath(QFileInfo(logPath).absolutePath());
+            QFile logFile(logPath);
+            if (logFile.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+                QTextStream stream(&logFile);
+                stream << line << Qt::endl;
+            }
+        }
         while (debugEvents_.size() > 80) {
             debugEvents_.removeFirst();
         }
@@ -9037,6 +9623,7 @@ private:
     QStringList pausedWatcherDirectories_;
     MindMapScene scene_;
     SelectionController selection_{scene_};
+    QString selectionRangeAnchorPath_;
     QSplitter* editorSplitter_ = nullptr;
     BoardView* view_ = nullptr;
     QDockWidget* debugDock_ = nullptr;
@@ -9045,6 +9632,17 @@ private:
     QString dragHoverLinkTargetPath_;
     QStringList copiedPaths_;
     std::vector<FileLink> fileLinks_;
+
+    // ---- Undo/Redo history (types defined above, near the history methods) -------------
+    std::vector<HistoryEntry> undoStack_;
+    std::vector<HistoryEntry> redoStack_;
+    std::unique_ptr<HistoryEntry> historyGroup_;
+    bool applyingHistory_ = false;
+    int historyTrashCounter_ = 0;
+    static constexpr int kMaxHistoryEntries = 100;
+    QAction* undoAction_ = nullptr;
+    QAction* redoAction_ = nullptr;
+
     QAction* editorPaneAction_ = nullptr;
     QAction* debugPaneAction_ = nullptr;
     QAction* lightThemeAction_ = nullptr;
@@ -9505,13 +10103,20 @@ void NodeItem::beginDrag(const QPointF& scenePos, Qt::KeyboardModifiers modifier
 {
     dragStart_ = pos();
     pressStartScene_ = scenePos;
+    pressModifiers_ = modifiers;
     dragMoveLogged_ = false;
     window_->recordDebugEvent(QStringLiteral("node press: %1 scene=(%2,%3)")
                                   .arg(node_ ? node_->path : QStringLiteral("(null)"))
                                   .arg(scenePos.x(), 0, 'f', 1)
                                   .arg(scenePos.y(), 0, 'f', 1));
-    const bool additive = (modifiers & (Qt::ControlModifier | Qt::MetaModifier | Qt::ShiftModifier)) != 0;
-    window_->selectNodeItem(this, additive);
+    // A plain (no Ctrl/Meta/Shift) press on an item that is already part of a multi-selection
+    // must NOT collapse the selection here — otherwise the group is lost before the drag can
+    // move it. Keep the selection intact; if the gesture turns out to be a click (no drag),
+    // finishDragAtScene collapses it to this single item on release.
+    const bool plainPress = (modifiers & (Qt::ControlModifier | Qt::MetaModifier | Qt::ShiftModifier)) == 0;
+    if (!(plainPress && window_->isMultiDragSelection(this))) {
+        window_->selectNodeItem(this, modifiers);
+    }
     window_->focusBoard();
     setOpacity(0.72);
     setZValue(DragLayerZ);
@@ -9520,6 +10125,19 @@ void NodeItem::beginDrag(const QPointF& scenePos, Qt::KeyboardModifiers modifier
 void NodeItem::finishDrag(Qt::MouseButton button, const QPointF& scenePos)
 {
     finishDragAtScene(button, scenePos);
+}
+
+void NodeItem::selectForContextMenu()
+{
+    if (!window_) {
+        return;
+    }
+    // Keep an existing (possibly multi-item) selection that already includes this node; otherwise
+    // select just this node. Either way the highlight frame stays for the context menu.
+    if (!isSelected()) {
+        window_->selectNodeItem(this, false);
+    }
+    window_->focusBoard();
 }
 
 void NodeItem::finishDragAtScene(Qt::MouseButton button, const QPointF& scenePos)
@@ -9545,7 +10163,7 @@ void NodeItem::finishDragAtScene(Qt::MouseButton button, const QPointF& scenePos
         window->clearDragPreview();
         window->setDragVisuals(this, 1.0, 10.0);
         if (button == Qt::LeftButton && scene()) {
-            window->selectNodeItem(this, false);
+            window->selectNodeItem(this, pressModifiers_);
             window->focusBoard();
             return;
         }

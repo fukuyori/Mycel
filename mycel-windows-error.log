@@ -1,0 +1,52 @@
+==== 06/29/2026 07:29:18 ====
+障害が発生しているアプリケーション名: mycel.exe、バージョン: 0.0.0.0、タイム スタンプ: 0x6a41a005
+障害が発生したモジュール名: ucrtbase.dll、 バージョン: 10.0.26100.8521、タイム スタンプ: 0xc38f7a35
+例外コード: 0xc0000409
+フォールト オフセット: 0x00000000000a527e
+フォールト プロセス ID: 0x24F4
+アプリケーションのフォールトの開始時刻: 0x1DD074D866E8E10
+Faulting アプリケーション パス:  D:\home\source\cpp\Mycel\build-windows-msvc\mycel.exe
+Faulting モジュール パス:  C:\WINDOWS\System32\ucrtbase.dll
+Report Id: 6c791f6e-b541-44cc-96fe-dc75bf35261e
+Faulting パッケージの完全名: 
+Faulting パッケージ相対アプリケーション ID: 
+
+==== 06/29/2026 07:28:45 ====
+障害が発生しているアプリケーション名: mycel.exe、バージョン: 0.0.0.0、タイム スタンプ: 0x6a41a005
+障害が発生したモジュール名: ucrtbase.dll、 バージョン: 10.0.26100.8521、タイム スタンプ: 0xc38f7a35
+例外コード: 0xc0000409
+フォールト オフセット: 0x00000000000a527e
+フォールト プロセス ID: 0x9574
+アプリケーションのフォールトの開始時刻: 0x1DD074D6F694679
+Faulting アプリケーション パス:  D:\home\source\cpp\Mycel\build-windows-msvc\mycel.exe
+Faulting モジュール パス:  C:\WINDOWS\System32\ucrtbase.dll
+Report Id: 509cda6a-d132-4931-8d3f-d6966801dc2d
+Faulting パッケージの完全名: 
+Faulting パッケージ相対アプリケーション ID: 
+
+==== 06/29/2026 07:24:54 ====
+障害が発生しているアプリケーション名: mycel.exe、バージョン: 0.0.0.0、タイム スタンプ: 0x6a419ecf
+障害が発生したモジュール名: ucrtbase.dll、 バージョン: 10.0.26100.8521、タイム スタンプ: 0xc38f7a35
+例外コード: 0xc0000409
+フォールト オフセット: 0x00000000000a527e
+フォールト プロセス ID: 0x9ACC
+アプリケーションのフォールトの開始時刻: 0x1DD074CD6FD3171
+Faulting アプリケーション パス:  D:\home\source\cpp\Mycel\build-windows-msvc\mycel.exe
+Faulting モジュール パス:  C:\WINDOWS\System32\ucrtbase.dll
+Report Id: 37119a6e-8694-4ce5-b719-9c91ba647212
+Faulting パッケージの完全名: 
+Faulting パッケージ相対アプリケーション ID: 
+
+==== 06/29/2026 07:15:21 ====
+障害が発生しているアプリケーション名: mycel.exe、バージョン: 0.0.0.0、タイム スタンプ: 0x6a3f9dbb
+障害が発生したモジュール名: ucrtbase.dll、 バージョン: 10.0.26100.8521、タイム スタンプ: 0xc38f7a35
+例外コード: 0xc0000409
+フォールト オフセット: 0x00000000000a527e
+フォールト プロセス ID: 0xA160
+アプリケーションのフォールトの開始時刻: 0x1DD074B6B510ED1
+Faulting アプリケーション パス:  C:\Users\n_fuk\AppData\Local\Programs\Mycel\mycel.exe
+Faulting モジュール パス:  C:\WINDOWS\System32\ucrtbase.dll
+Report Id: 29f7f855-3a62-4667-a42d-2351d8e418f5
+Faulting パッケージの完全名: 
+Faulting パッケージ相対アプリケーション ID: 
+

@@ -4,7 +4,7 @@ Mycel is a C++/Qt mind-map tool that uses the system's folder and file structure
 
 Instead of treating files as a vertical file list, Mycel lays out folders and files as connected nodes on a whiteboard-style canvas. It is designed for exploring project structure, understanding document sets, and organizing information as a map while keeping the underlying data in normal system folders and files.
 
-- Current version: 0.4.4
+- Current version: 0.5.0
 - Release history: [CHANGELOG.md](CHANGELOG.md)
 - Documentation index: [docs/README.ja.md](docs/README.ja.md)
 - Development plan: [docs/development-plan.ja.md](docs/development-plan.ja.md)
@@ -27,12 +27,15 @@ Instead of treating files as a vertical file list, Mycel lays out folders and fi
 
 - Create `NewFile.txt` / `NewFolder` from the canvas
 - Move items between folders by drag and drop
+- Move several selected items together in a single drag
 - Copy OS files and folders by dropping them onto folder nodes
 - Copy selected items with `Ctrl + C` / `Ctrl + V`
 - Watch external file and folder changes under the root and refresh changed folders automatically
 - Export/import a Mycel Archive Markdown file
 - Inline rename with F2 and Enter confirmation
 - Context menus for refresh, delete, color, creation, and open actions
+- Undo and redo with `Ctrl + Z` / `Ctrl + Y`, also available from the Edit menu and toolbar. Covers moves, reorders, renames, creation, deletion, paste, import, links, colors, collapse, and preview state
+- Deleted items are moved to `.mycel/trash` so a delete can be reverted with undo (the trash is cleared on startup and shutdown)
 
 ### Preview And Editing
 
@@ -141,6 +144,7 @@ On macOS, two-finger trackpad slide pans the canvas while trackpad pinch remains
 | Operation | Action |
 | --- | --- |
 | Left-click a node | Select it |
+| Shift + left-click a node | Select the continuous visible range from the last selected node |
 | Tab | Move to the next visible item at the same level |
 | Shift + Tab | Move to the previous visible item at the same level |
 | Up / Down | Move to the previous or next item in the same folder |

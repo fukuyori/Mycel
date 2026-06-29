@@ -145,8 +145,12 @@ public:
             const QString destination = availableDestination(targetDirPath, info.fileName(), req.isDir, &reserved);
 
             std::error_code ec;
-            std::filesystem::rename(std::filesystem::path(req.path.toStdString()),
-                                    std::filesystem::path(destination.toStdString()), ec);
+            // QString::toStdString() yields UTF-8. std::filesystem::path(std::string) reinterprets
+            // those bytes in the system ANSI code page (e.g. CP932 on Japanese Windows) and throws
+            // std::system_error for any byte sequence that does not map — crashing on non-ASCII names.
+            // u8path interprets the std::string as UTF-8 on every platform, which is what we have.
+            std::filesystem::rename(std::filesystem::u8path(req.path.toStdString()),
+                                    std::filesystem::u8path(destination.toStdString()), ec);
             if (ec) {
                 result.failed.emplace_back(req.path, QString::fromStdString(ec.message()));
                 continue;
