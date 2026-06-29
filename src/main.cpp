@@ -12,6 +12,8 @@
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QMimeData>
+#include <QtCore/QProcess>
+#include <QtCore/QStandardPaths>
 #include <QtCore/QPointF>
 #include <QtCore/QPointer>
 #include <QtCore/QRectF>
@@ -1284,35 +1286,63 @@ bool isVideoPreviewFile(const QFileInfo& info)
     return extensions.contains(info.suffix().toLower());
 }
 
-QString fileKindBadge(const QFileInfo& info)
+// A short badge plus an accent color drawn on a file icon, so file types are distinguishable at
+// a glance. accent is invalid for the generic fallback.
+struct FileKindStyle {
+    QString badge;
+    QColor accent;
+};
+
+FileKindStyle fileKindStyleFor(const QFileInfo& info)
 {
-    const QString suffix = info.suffix().toLower();
+    const QString s = info.suffix().toLower();
     const QString name = info.fileName();
-    if (suffix == QStringLiteral("cpp") || suffix == QStringLiteral("cc") ||
-        suffix == QStringLiteral("cxx") || suffix == QStringLiteral("c") ||
-        suffix == QStringLiteral("h") || suffix == QStringLiteral("hpp")) {
-        return QStringLiteral("<>");
-    }
-    if (suffix == QStringLiteral("md") || suffix == QStringLiteral("rst")) {
-        return QStringLiteral("MD");
-    }
-    if (suffix == QStringLiteral("txt")) {
-        return QStringLiteral("TXT");
-    }
-    if (suffix == QStringLiteral("pdf")) {
-        return QStringLiteral("PDF");
-    }
-    if (suffix == QStringLiteral("json") || suffix == QStringLiteral("yaml") ||
-        suffix == QStringLiteral("yml") || suffix == QStringLiteral("toml") ||
-        suffix == QStringLiteral("xml") || suffix == QStringLiteral("cmake") ||
+    auto is = [&s](std::initializer_list<const char*> exts) {
+        for (const char* e : exts) {
+            if (s == QLatin1String(e)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    // Saturated mid-tones that stay readable on the light file page in both themes.
+    const QColor blue(0x2f, 0x6f, 0xed);
+    const QColor cyan(0x10, 0x9b, 0xb8);
+    const QColor green(0x1f, 0x9d, 0x55);
+    const QColor amber(0xc9, 0x84, 0x12);
+    const QColor red(0xd6, 0x45, 0x3d);
+    const QColor purple(0x8b, 0x5c, 0xf6);
+    const QColor slate(0x60, 0x70, 0x88);
+    const QColor pink(0xdb, 0x2f, 0x88);
+
+    if (is({"py"})) return {QStringLiteral("PY"), blue};
+    if (is({"go"})) return {QStringLiteral("GO"), cyan};
+    if (is({"rs"})) return {QStringLiteral("RS"), amber};
+    if (is({"ts", "tsx"})) return {QStringLiteral("TS"), blue};
+    if (is({"js", "mjs", "cjs", "jsx"})) return {QStringLiteral("JS"), amber};
+    if (is({"java"})) return {QStringLiteral("JV"), red};
+    if (is({"rb"})) return {QStringLiteral("RB"), red};
+    if (is({"php"})) return {QStringLiteral("PHP"), purple};
+    if (is({"cs"})) return {QStringLiteral("C#"), green};
+    if (is({"cpp", "cc", "cxx", "c", "h", "hpp", "hh"})) return {QStringLiteral("<>"), blue};
+    if (is({"css", "scss", "sass", "less"})) return {QStringLiteral("CSS"), blue};
+    if (is({"html", "htm"})) return {QStringLiteral("<>"), amber};
+    if (is({"md", "rst", "markdown"})) return {QStringLiteral("MD"), slate};
+    if (is({"txt", "log"})) return {QStringLiteral("TXT"), slate};
+    if (is({"csv", "tsv"})) return {QStringLiteral("CSV"), green};
+    if (is({"pdf"})) return {QStringLiteral("PDF"), red};
+    if (is({"doc", "docx", "rtf"})) return {QStringLiteral("DOC"), blue};
+    if (is({"xls", "xlsx"})) return {QStringLiteral("XLS"), green};
+    if (is({"ppt", "pptx"})) return {QStringLiteral("PPT"), amber};
+    if (is({"zip", "tar", "gz", "tgz", "7z", "rar"})) return {QStringLiteral("ZIP"), amber};
+    if (is({"mp3", "wav", "flac", "aac", "ogg", "m4a"})) return {QStringLiteral("♪"), purple};
+    if (is({"mp4", "mov", "avi", "mkv", "webm", "m4v"})) return {QStringLiteral("▶"), pink};
+    if (is({"json", "yaml", "yml", "toml", "xml", "ini", "cfg", "conf", "cmake"}) ||
         name == QStringLiteral("CMakeLists.txt")) {
-        return QStringLiteral("⚙");
+        return {QStringLiteral("⚙"), slate};
     }
-    if (suffix == QStringLiteral("sh") || suffix == QStringLiteral("bat") ||
-        suffix == QStringLiteral("command")) {
-        return QStringLiteral("$");
-    }
-    return {};
+    if (is({"sh", "bash", "zsh", "bat", "cmd", "ps1", "command"})) return {QStringLiteral("$"), green};
+    return {QString(), QColor()};
 }
 
 QString normalizedDirectoryPath(const QString& path)
@@ -1971,13 +2001,14 @@ private:
             return;
         }
 
-        const QString badge = fileKindBadge(info);
-        if (!badge.isEmpty()) {
+        const FileKindStyle kind = fileKindStyleFor(info);
+        if (!kind.badge.isEmpty()) {
             QFont badgeFont = painter->font();
-            badgeFont.setPointSize(badge.size() > 2 ? 5 : 7);
+            badgeFont.setPointSize(kind.badge.size() > 2 ? 5 : 7);
             badgeFont.setBold(true);
             painter->setFont(badgeFont);
-            painter->drawText(QRectF(at.x() + 3.0, at.y() + 14.0, 20.0, 13.0), Qt::AlignCenter, badge);
+            painter->setPen(QPen(kind.accent.isValid() ? kind.accent : colors.fileInk, 1.1));
+            painter->drawText(QRectF(at.x() + 3.0, at.y() + 14.0, 20.0, 13.0), Qt::AlignCenter, kind.badge);
             return;
         }
 
@@ -4620,6 +4651,240 @@ public:
         QDesktopServices::openUrl(QUrl::fromLocalFile(path));
     }
 
+    bool isGoScriptFile(const QString& path) const
+    {
+        const QFileInfo info(path);
+        return info.isFile() && info.suffix().compare(QStringLiteral("go"), Qt::CaseInsensitive) == 0;
+    }
+
+    // Scripts Mycel can run in a pipeline (Python or Go source).
+    bool isPipelineScriptFile(const QString& path) const
+    {
+        const QFileInfo info(path);
+        const QString suffix = info.suffix().toLower();
+        return info.isFile() && (suffix == QStringLiteral("py") || suffix == QStringLiteral("go"));
+    }
+
+    // Interpreter for a script as {program, leadingArgs}; leadingArgs precede the script path
+    // (e.g. {"run"} for `go run`). An empty program means no runner is installed/known.
+    std::pair<QString, QStringList> pipelineRunnerFor(const QString& scriptPath) const
+    {
+        const QString suffix = QFileInfo(scriptPath).suffix().toLower();
+        if (suffix == QStringLiteral("go")) {
+            return {QStandardPaths::findExecutable(QStringLiteral("go")), {QStringLiteral("run")}};
+        }
+        if (suffix == QStringLiteral("py")) {
+            for (const QString& candidate :
+                 {QStringLiteral("python"), QStringLiteral("python3"), QStringLiteral("py")}) {
+                const QString exe = QStandardPaths::findExecutable(candidate);
+                if (!exe.isEmpty()) {
+                    return {exe, {}};
+                }
+            }
+        }
+        return {QString(), {}};
+    }
+
+    // Run `program args...` in workingDir, streaming combined stdout/stderr into a non-modal
+    // window. onFinished(exitCode) runs when the process ends (e.g. to refresh outputs); the
+    // process is killed if the window closes.
+    void runProcessWithOutputDialog(const QString& title, const QString& program, const QStringList& args,
+                                    const QString& workingDir, std::function<void(int)> onFinished = {})
+    {
+        auto* dialog = new QDialog(this);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowTitle(title);
+        dialog->resize(760, 460);
+        auto* layout = new QVBoxLayout(dialog);
+        auto* output = new QPlainTextEdit(dialog);
+        output->setReadOnly(true);
+        output->setStyleSheet(QStringLiteral(
+            "QPlainTextEdit { background: #111827; color: #e5e7eb; border: none; "
+            "font-family: Menlo, Consolas, monospace; font-size: 12px; }"));
+        auto* buttonRow = new QHBoxLayout();
+        auto* stopButton = new QPushButton(QStringLiteral("停止"), dialog);
+        auto* closeButton = new QPushButton(QStringLiteral("閉じる"), dialog);
+        buttonRow->addWidget(stopButton);
+        buttonRow->addStretch(1);
+        buttonRow->addWidget(closeButton);
+        layout->addWidget(output, 1);
+        layout->addLayout(buttonRow);
+
+        auto* process = new QProcess(dialog);
+        process->setWorkingDirectory(workingDir);
+        process->setProcessChannelMode(QProcess::MergedChannels);
+
+        auto appendOutput = [output](const QString& text) {
+            output->moveCursor(QTextCursor::End);
+            output->insertPlainText(text);
+            output->moveCursor(QTextCursor::End);
+        };
+        appendOutput(QStringLiteral("$ %1 %2\n\n").arg(QFileInfo(program).fileName(), args.join(QLatin1Char(' '))));
+
+        connect(process, &QProcess::readyReadStandardOutput, dialog, [process, appendOutput] {
+            appendOutput(QString::fromUtf8(process->readAllStandardOutput()));
+        });
+        connect(process, &QProcess::finished, dialog,
+                [appendOutput, stopButton, onFinished](int code, QProcess::ExitStatus status) {
+                    appendOutput(status == QProcess::CrashExit
+                                     ? QStringLiteral("\n[プロセスが異常終了しました]")
+                                     : QStringLiteral("\n[終了コード %1]").arg(code));
+                    stopButton->setEnabled(false);
+                    if (onFinished) {
+                        onFinished(status == QProcess::CrashExit ? -1 : code);
+                    }
+                });
+        connect(process, &QProcess::errorOccurred, dialog, [appendOutput, stopButton](QProcess::ProcessError) {
+            appendOutput(QStringLiteral("\n[プロセスの起動に失敗しました]"));
+            stopButton->setEnabled(false);
+        });
+        connect(stopButton, &QPushButton::clicked, dialog, [process] {
+            if (process->state() != QProcess::NotRunning) {
+                process->kill();
+            }
+        });
+        connect(closeButton, &QPushButton::clicked, dialog, &QDialog::close);
+        connect(dialog, &QDialog::finished, process, [process](int) {
+            if (process->state() != QProcess::NotRunning) {
+                process->kill();
+                process->waitForFinished(1000);
+            }
+        });
+
+        dialog->show();
+        process->start(program, args);
+    }
+
+    // Run a single Go source file as a script (`go run <file>`), showing the output window.
+    void runGoScript(const QString& filePath)
+    {
+        const QFileInfo info(filePath);
+        if (!info.exists() || !info.isFile()) {
+            return;
+        }
+        const QString goExe = QStandardPaths::findExecutable(QStringLiteral("go"));
+        if (goExe.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"),
+                                 QStringLiteral("go コマンドが見つかりません。Go ツールチェーンをインストールし、PATH に追加してください。"));
+            return;
+        }
+        recordDebugEvent(QStringLiteral("go run: %1").arg(relativeKeyForPath(filePath)));
+        runProcessWithOutputDialog(QStringLiteral("Go 実行: %1").arg(info.fileName()), goExe,
+                                   {QStringLiteral("run"), info.absoluteFilePath()}, info.absolutePath());
+    }
+
+    // The input feeding a script = the file linked INTO it (link.to == script).
+    QString pipelineInputFor(const QString& scriptPath) const
+    {
+        for (const FileLink& link : fileLinks_) {
+            if (link.to == scriptPath) {
+                return link.from;
+            }
+        }
+        return QString();
+    }
+
+    // The output of a script = the file linked OUT of it (link.from == script).
+    QString pipelineOutputFor(const QString& scriptPath) const
+    {
+        for (const FileLink& link : fileLinks_) {
+            if (link.from == scriptPath) {
+                return link.to;
+            }
+        }
+        return QString();
+    }
+
+    // Create an empty output file beside the script and link script -> output, as one undo step.
+    QString createPipelineOutput(const QString& scriptPath, const QString& inputPath)
+    {
+        const QFileInfo scriptInfo(scriptPath);
+        const QString dirPath = scriptInfo.absolutePath();
+        QString base = QStringLiteral("output");
+        QString ext = QStringLiteral("txt");
+        if (!inputPath.isEmpty()) {
+            const QFileInfo inputInfo(inputPath);
+            base = inputInfo.completeBaseName() + QStringLiteral(".out");
+            if (!inputInfo.suffix().isEmpty()) {
+                ext = inputInfo.suffix();
+            }
+        }
+        QString name = QStringLiteral("%1.%2").arg(base, ext);
+        QString path = QDir(dirPath).filePath(name);
+        for (int n = 2; QFileInfo::exists(path); ++n) {
+            name = QStringLiteral("%1 %2.%3").arg(base).arg(n).arg(ext);
+            path = QDir(dirPath).filePath(name);
+        }
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly)) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("出力ファイルを作成できませんでした。"));
+            return QString();
+        }
+        file.close();
+        beginHistoryGroup(QStringLiteral("出力ファイル作成"));
+        appendCreatedItemToOrder(dirPath, name, false, scriptInfo.fileName());
+        saveOrderFile();
+        rebuild(false);
+        const QString trashPath = allocateTrashPath(name);
+        recordHistory(QStringLiteral("出力ファイル作成"), {{trashPath, path}}, {{path, trashPath}},
+                      captureMetadataSnapshot(), selectedNodePaths());
+        if (Node* from = nodeForPath(scriptPath)) {
+            if (Node* to = nodeForPath(path)) {
+                addFileLink(from, to);
+            }
+        }
+        endHistoryGroup();
+        return path;
+    }
+
+    // Run a pipeline stage: the script reads the linked input file and writes the linked output
+    // file, invoked as `runner script <input> <output>`. Input/output are resolved from the
+    // horizontal links into/out of the script node (output auto-created if absent).
+    void runPipelineForScript(const QString& scriptPath)
+    {
+        const QFileInfo scriptInfo(scriptPath);
+        if (!scriptInfo.exists() || scriptInfo.isDir()) {
+            return;
+        }
+        const std::pair<QString, QStringList> runner = pipelineRunnerFor(scriptPath);
+        if (runner.first.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"),
+                                 scriptInfo.suffix().toLower() == QStringLiteral("py")
+                                     ? QStringLiteral("python が見つかりません。Python をインストールし、PATH に追加してください。")
+                                     : QStringLiteral("このスクリプトを実行するコマンドが見つかりません。"));
+            return;
+        }
+        const QString inputPath = pipelineInputFor(scriptPath);
+        if (inputPath.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"),
+                                 QStringLiteral("入力ファイルが接続されていません。入力ファイルをこのスクリプトへドラッグしてリンクしてください。"));
+            return;
+        }
+        QString outputPath = pipelineOutputFor(scriptPath);
+        if (outputPath.isEmpty()) {
+            outputPath = createPipelineOutput(scriptPath, inputPath);
+            if (outputPath.isEmpty()) {
+                return;
+            }
+        }
+
+        QStringList args = runner.second;
+        args << scriptInfo.absoluteFilePath() << QDir::toNativeSeparators(inputPath)
+             << QDir::toNativeSeparators(outputPath);
+        recordDebugEvent(QStringLiteral("pipeline run: %1 (in=%2 out=%3)")
+                             .arg(relativeKeyForPath(scriptPath), relativeKeyForPath(inputPath),
+                                  relativeKeyForPath(outputPath)));
+        const QString outPath = outputPath;
+        runProcessWithOutputDialog(QStringLiteral("パイプライン実行: %1").arg(scriptInfo.fileName()),
+                                   runner.first, args, scriptInfo.absolutePath(),
+                                   [this, outPath](int code) {
+                                       rebuild(false);  // reflect the regenerated output file
+                                       if (code == 0) {
+                                           selectNodePath(outPath, true);
+                                       }
+                                   });
+    }
+
     bool openSelectedNode()
     {
         Node* node = singleSelectedNode();
@@ -5547,7 +5812,11 @@ public:
         }
 
         const QString destination = info.dir().filePath(name);
-        if (QFileInfo::exists(destination)) {
+        // On a case-insensitive filesystem (Windows, default macOS) a case-only rename such as
+        // Script.py -> script.py reports the destination as already existing because it resolves to
+        // the SAME file. Allow that; only block when a genuinely different item is in the way.
+        const bool caseOnlyRename = name.compare(info.fileName(), Qt::CaseInsensitive) == 0;
+        if (QFileInfo::exists(destination) && !caseOnlyRename) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("同名のファイルまたはフォルダが既にあります。"));
             return false;
         }
@@ -5555,7 +5824,22 @@ public:
         const MetadataSnapshot historyBefore = captureMetadataSnapshot();
         const QStringList historySelection = selectedNodePaths();
         pauseFileSystemWatcher();
-        if (!QFile::rename(path, destination)) {
+        bool renamed = false;
+        if (caseOnlyRename && QFileInfo::exists(destination)) {
+            // QFile::rename refuses when the target "exists" (the same file under a different
+            // case), so route the case change through a unique temporary name.
+            QString tempPath = info.dir().filePath(QStringLiteral("~mycel-rename-%1").arg(info.fileName()));
+            for (int n = 1; QFileInfo::exists(tempPath); ++n) {
+                tempPath = info.dir().filePath(QStringLiteral("~mycel-rename-%1-%2").arg(n).arg(info.fileName()));
+            }
+            renamed = QFile::rename(path, tempPath) && QFile::rename(tempPath, destination);
+            if (!renamed && QFileInfo::exists(tempPath)) {
+                QFile::rename(tempPath, path);  // best-effort restore if the second step failed
+            }
+        } else {
+            renamed = QFile::rename(path, destination);
+        }
+        if (!renamed) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("名前を変更できませんでした。"));
             return false;
         }
@@ -9838,6 +10122,12 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         unlinkAction->setEnabled(window->hasIncomingFileLinkPath(filePath));
         QAction* editAction = menu.addAction(QStringLiteral("編集"));
         editAction->setEnabled(window->canEditTextFilePath(filePath));
+        QAction* runPipelineAction = window->isPipelineScriptFile(filePath)
+                                         ? menu.addAction(QStringLiteral("パイプライン実行"))
+                                         : nullptr;
+        QAction* runGoAction = window->isGoScriptFile(filePath)
+                                   ? menu.addAction(QStringLiteral("Go スクリプトとして実行"))
+                                   : nullptr;
         QAction* renameAction = menu.addAction(QStringLiteral("名前変更"));
         QAction* copyAction = menu.addAction(QStringLiteral("コピー"));
         QAction* deleteAction = menu.addAction(QStringLiteral("削除"));
@@ -9872,6 +10162,22 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
             QTimer::singleShot(0, window, [window, filePath] {
                 if (window) {
                     window->createLinkedFileBeside(filePath);
+                }
+            });
+            return;
+        }
+        if (runPipelineAction && selected == runPipelineAction) {
+            QTimer::singleShot(0, window, [window, filePath] {
+                if (window) {
+                    window->runPipelineForScript(filePath);
+                }
+            });
+            return;
+        }
+        if (runGoAction && selected == runGoAction) {
+            QTimer::singleShot(0, window, [window, filePath] {
+                if (window) {
+                    window->runGoScript(filePath);
                 }
             });
             return;
