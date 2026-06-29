@@ -3999,143 +3999,128 @@ public:
         return root_ ? findNodeByPath(*root_, path) : nullptr;
     }
 
-    void createFolder(Node* parent)
+    // Create an empty NewFile.txt (conflict-free name) in dirPath, register it, rebuild, record
+    // history, and move focus to the new file. Returns the new path (empty on failure).
+    QString createFileInDirectory(const QString& dirPath, const QString& afterSiblingPath = QString())
     {
-        if (!parent || !parent->isDir) {
-            recordDebugEvent(QStringLiteral("create folder: invalid parent"));
-            return;
+        const QFileInfo dirInfo(dirPath);
+        if (!dirInfo.exists() || !dirInfo.isDir()) {
+            recordDebugEvent(QStringLiteral("create file: not a directory: %1").arg(QDir::toNativeSeparators(dirPath)));
+            return QString();
         }
-
-        const QString parentPath = parent->path;
-        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
-        const QStringList historySelection = selectedNodePaths();
-        QDir dir(parent->path);
-        QString name = QStringLiteral("NewFolder");
-        QString path = dir.filePath(name);
-        for (int number = 2; QFileInfo::exists(path); ++number) {
-            name = QStringLiteral("NewFolder %1").arg(number);
-            path = dir.filePath(name);
-        }
-
-        if (!dir.mkdir(name)) {
-            recordDebugEvent(QStringLiteral("create folder failed: %1").arg(QDir::toNativeSeparators(path)));
-            QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("フォルダを作成できませんでした。"));
-            return;
-        }
-        recordDebugEvent(QStringLiteral("created folder: %1").arg(relativeKeyForPath(path)));
-        appendCreatedItemToOrder(parent->path, name, true);
-        saveOrderFile();
-        rebuild(false);
-        restoreFolderSelection(parentPath);
-        const QString trashPath = allocateTrashPath(name);
-        recordHistory(QStringLiteral("フォルダ作成"), {{trashPath, path}}, {{path, trashPath}},
-                      historyBefore, historySelection);
-    }
-
-    void createFile(Node* parent, const QString& selectionPathAfterCreate = {})
-    {
-        if (!parent || !parent->isDir) {
-            recordDebugEvent(QStringLiteral("create file: invalid parent"));
-            return;
-        }
-
-        const QString parentPath = parent->path;
-        const QString restorePath = selectionPathAfterCreate.isEmpty() ? parentPath : selectionPathAfterCreate;
-        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
-        const QStringList historySelection = selectedNodePaths();
-        QDir dir(parent->path);
+        QDir dir(dirInfo.absoluteFilePath());
         QString name = QStringLiteral("NewFile.txt");
         QString path = dir.filePath(name);
         for (int number = 2; QFileInfo::exists(path); ++number) {
             name = QStringLiteral("NewFile %1.txt").arg(number);
             path = dir.filePath(name);
         }
-
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
         QFile file(path);
         if (!file.open(QIODevice::WriteOnly)) {
             recordDebugEvent(QStringLiteral("create file failed: %1").arg(QDir::toNativeSeparators(path)));
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("ファイルを作成できませんでした。"));
-            return;
+            return QString();
         }
         file.close();
         recordDebugEvent(QStringLiteral("created file: %1").arg(relativeKeyForPath(path)));
-        appendCreatedItemToOrder(parent->path, name, false);
+        appendCreatedItemToOrder(dir.absolutePath(), name, false,
+                                 afterSiblingPath.isEmpty() ? QString() : QFileInfo(afterSiblingPath).fileName());
         saveOrderFile();
         rebuild(false);
-        selectNodePath(restorePath);
+        selectNodePath(path, true);  // focus the newly created file
         const QString trashPath = allocateTrashPath(name);
         recordHistory(QStringLiteral("ファイル作成"), {{trashPath, path}}, {{path, trashPath}},
                       historyBefore, historySelection);
+        return path;
     }
 
-    void createFileInFolderPath(const QString& folderPath)
+    // Create a NewFolder (conflict-free) in dirPath, register it, rebuild, record history, and
+    // move focus to the new folder. Returns the new path (empty on failure).
+    QString createFolderInDirectory(const QString& dirPath, const QString& afterSiblingPath = QString())
     {
-        QFileInfo folderInfo(folderPath);
-        if (!folderInfo.exists() || !folderInfo.isDir()) {
-            recordDebugEvent(QStringLiteral("context create file: folder path is not a directory: %1").arg(QDir::toNativeSeparators(folderPath)));
-            return;
+        const QFileInfo dirInfo(dirPath);
+        if (!dirInfo.exists() || !dirInfo.isDir()) {
+            recordDebugEvent(QStringLiteral("create folder: not a directory: %1").arg(QDir::toNativeSeparators(dirPath)));
+            return QString();
         }
-
-        QDir dir(folderInfo.absoluteFilePath());
-        QString name = QStringLiteral("NewFile.txt");
-        QString path = dir.filePath(name);
-        for (int number = 2; QFileInfo::exists(path); ++number) {
-            name = QStringLiteral("NewFile %1.txt").arg(number);
-            path = dir.filePath(name);
-        }
-
-        recordDebugEvent(QStringLiteral("context create file in: %1").arg(relativeKeyForPath(folderPath)));
-        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
-        const QStringList historySelection = selectedNodePaths();
-        QFile file(path);
-        if (!file.open(QIODevice::WriteOnly)) {
-            recordDebugEvent(QStringLiteral("context create file failed: %1").arg(QDir::toNativeSeparators(path)));
-            QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("ファイルを作成できませんでした。"));
-            return;
-        }
-        file.close();
-        appendCreatedItemToOrder(folderInfo.absoluteFilePath(), name, false);
-        saveOrderFile();
-        rebuild(false);
-        selectNodePath(folderInfo.absoluteFilePath(), true);
-        recordDebugEvent(QStringLiteral("context created file: %1").arg(relativeKeyForPath(path)));
-        const QString trashPath = allocateTrashPath(name);
-        recordHistory(QStringLiteral("ファイル作成"), {{trashPath, path}}, {{path, trashPath}},
-                      historyBefore, historySelection);
-    }
-
-    void createFolderInFolderPath(const QString& folderPath)
-    {
-        QFileInfo folderInfo(folderPath);
-        if (!folderInfo.exists() || !folderInfo.isDir()) {
-            recordDebugEvent(QStringLiteral("context create folder: folder path is not a directory: %1").arg(QDir::toNativeSeparators(folderPath)));
-            return;
-        }
-
-        QDir dir(folderInfo.absoluteFilePath());
+        QDir dir(dirInfo.absoluteFilePath());
         QString name = QStringLiteral("NewFolder");
         QString path = dir.filePath(name);
         for (int number = 2; QFileInfo::exists(path); ++number) {
             name = QStringLiteral("NewFolder %1").arg(number);
             path = dir.filePath(name);
         }
-
-        recordDebugEvent(QStringLiteral("context create folder in: %1").arg(relativeKeyForPath(folderPath)));
         const MetadataSnapshot historyBefore = captureMetadataSnapshot();
         const QStringList historySelection = selectedNodePaths();
         if (!dir.mkdir(name)) {
-            recordDebugEvent(QStringLiteral("context create folder failed: %1").arg(QDir::toNativeSeparators(path)));
+            recordDebugEvent(QStringLiteral("create folder failed: %1").arg(QDir::toNativeSeparators(path)));
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("フォルダを作成できませんでした。"));
-            return;
+            return QString();
         }
-        appendCreatedItemToOrder(folderInfo.absoluteFilePath(), name, true);
+        recordDebugEvent(QStringLiteral("created folder: %1").arg(relativeKeyForPath(path)));
+        appendCreatedItemToOrder(dir.absolutePath(), name, true,
+                                 afterSiblingPath.isEmpty() ? QString() : QFileInfo(afterSiblingPath).fileName());
         saveOrderFile();
         rebuild(false);
-        selectNodePath(folderInfo.absoluteFilePath(), true);
-        recordDebugEvent(QStringLiteral("context created folder: %1").arg(relativeKeyForPath(path)));
+        selectNodePath(path, true);  // focus the newly created folder
         const QString trashPath = allocateTrashPath(name);
         recordHistory(QStringLiteral("フォルダ作成"), {{trashPath, path}}, {{path, trashPath}},
                       historyBefore, historySelection);
+        return path;
+    }
+
+    // Create a new file next to `filePath` and link it horizontally to the right of it, recorded
+    // as a single undoable action.
+    void createLinkedFileBeside(const QString& filePath)
+    {
+        const QFileInfo info(filePath);
+        if (!info.exists() || info.isDir()) {
+            return;
+        }
+        if (!mycelStorageEnabled_) {
+            createFileInDirectory(info.absolutePath());
+            return;
+        }
+        beginHistoryGroup(QStringLiteral("リンク付きファイル作成"));
+        const QString newPath = createFileInDirectory(info.absolutePath(), filePath);  // beside this file
+        if (!newPath.isEmpty()) {
+            if (Node* from = nodeForPath(filePath)) {
+                if (Node* to = nodeForPath(newPath)) {
+                    addFileLink(from, to);
+                }
+            }
+        }
+        endHistoryGroup();
+        if (!newPath.isEmpty()) {
+            selectNodePath(newPath, true);
+        }
+    }
+
+    // Thin wrappers kept for existing callers (keyboard shortcuts, selection-based creation).
+    void createFolder(Node* parent)
+    {
+        if (parent && parent->isDir) {
+            createFolderInDirectory(parent->path);
+        }
+    }
+
+    void createFile(Node* parent, const QString& = {})
+    {
+        if (parent && parent->isDir) {
+            createFileInDirectory(parent->path);
+        }
+    }
+
+    void createFileInFolderPath(const QString& folderPath)
+    {
+        createFileInDirectory(folderPath);
+    }
+
+    void createFolderInFolderPath(const QString& folderPath)
+    {
+        createFolderInDirectory(folderPath);
     }
 
     void createFileInSelectedFolder()
@@ -4157,7 +4142,7 @@ public:
             return;
         }
         recordDebugEvent(QStringLiteral("create file beside selected file: %1").arg(relativeKeyForPath(parent->path)));
-        createFile(parent, node->path);
+        createFileInDirectory(parent->path, node->path);  // place directly below the selected file
     }
 
     void createFolderInSelectedFolder()
@@ -8733,7 +8718,10 @@ private:
         }
     }
 
-    void appendCreatedItemToOrder(const QString& directoryPath, const QString& newName, bool)
+    // Register a freshly created item in the directory's custom order. When `afterName` names an
+    // existing sibling, the new item is placed directly after it; otherwise it is appended.
+    void appendCreatedItemToOrder(const QString& directoryPath, const QString& newName, bool,
+                                  const QString& afterName = QString())
     {
         if (!mycelStorageEnabled_) {
             return;
@@ -8763,7 +8751,14 @@ private:
                 order.append(name);
             }
         }
-        order.append(newName);
+        int insertIndex = order.size();
+        if (!afterName.isEmpty()) {
+            const int afterIndex = order.indexOf(afterName);
+            if (afterIndex >= 0) {
+                insertIndex = afterIndex + 1;
+            }
+        }
+        order.insert(insertIndex, newName);
         fileOrders_[key] = order;
     }
 
@@ -9742,10 +9737,14 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         const QString folderPath = itemPath;
         const bool isRootFolder = node_ == window->rootNode();
         QAction* collapseAction = menu.addAction(node_->collapsed ? QStringLiteral("展開") : QStringLiteral("折りたたむ"));
-        QAction* fileAction = menu.addAction(QStringLiteral("ファイルを作成"));
-        fileAction->setData(QStringLiteral("create-file"));
-        QAction* folderAction = menu.addAction(QStringLiteral("フォルダを作成"));
-        folderAction->setData(QStringLiteral("create-folder"));
+        QMenu* newFileMenu = menu.addMenu(QStringLiteral("ファイルを作成"));
+        QAction* fileBelowAction = newFileMenu->addAction(QStringLiteral("下の階層に作成"));
+        QAction* fileSameAction = newFileMenu->addAction(QStringLiteral("同じ階層に作成"));
+        fileSameAction->setEnabled(!isRootFolder);
+        QMenu* newFolderMenu = menu.addMenu(QStringLiteral("フォルダを作成"));
+        QAction* folderBelowAction = newFolderMenu->addAction(QStringLiteral("下の階層に作成"));
+        QAction* folderSameAction = newFolderMenu->addAction(QStringLiteral("同じ階層に作成"));
+        folderSameAction->setEnabled(!isRootFolder);
         QAction* renameAction = menu.addAction(QStringLiteral("名前変更"));
         renameAction->setEnabled(!isRootFolder);
         QAction* copyAction = menu.addAction(QStringLiteral("コピー"));
@@ -9759,19 +9758,25 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         addColorMenu(menu, colorActions, clearColorAction);
         QAction* openAction = menu.addAction(QStringLiteral("開く"));
         QAction* selected = menu.exec(screenPos);
-        const QString command = selected ? selected->data().toString() : QString();
-        if (command == QStringLiteral("create-file")) {
-            QTimer::singleShot(0, window, [window, folderPath] {
+        const QString parentDir = QFileInfo(folderPath).absolutePath();
+        if (selected == fileBelowAction || selected == fileSameAction) {
+            const bool same = (selected == fileSameAction);
+            const QString dir = same ? parentDir : folderPath;
+            const QString after = same ? folderPath : QString();  // place beside this folder
+            QTimer::singleShot(0, window, [window, dir, after] {
                 if (window) {
-                    window->createFileInFolderPath(folderPath);
+                    window->createFileInDirectory(dir, after);
                 }
             });
             return;
         }
-        if (command == QStringLiteral("create-folder")) {
-            QTimer::singleShot(0, window, [window, folderPath] {
+        if (selected == folderBelowAction || selected == folderSameAction) {
+            const bool same = (selected == folderSameAction);
+            const QString dir = same ? parentDir : folderPath;
+            const QString after = same ? folderPath : QString();  // place beside this folder
+            QTimer::singleShot(0, window, [window, dir, after] {
                 if (window) {
-                    window->createFolderInFolderPath(folderPath);
+                    window->createFolderInDirectory(dir, after);
                 }
             });
             return;
@@ -9836,11 +9841,41 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         QAction* renameAction = menu.addAction(QStringLiteral("名前変更"));
         QAction* copyAction = menu.addAction(QStringLiteral("コピー"));
         QAction* deleteAction = menu.addAction(QStringLiteral("削除"));
+        QAction* newFolderSameAction = menu.addAction(QStringLiteral("フォルダを作成（同じ階層）"));
+        QMenu* newFileMenu = menu.addMenu(QStringLiteral("ファイルを作成"));
+        QAction* newFileSameAction = newFileMenu->addAction(QStringLiteral("同じ階層に作成"));
+        QAction* newFileLinkAction = newFileMenu->addAction(QStringLiteral("横リンクで作成"));
+        newFileLinkAction->setEnabled(window->mycelStorageEnabled());
         std::vector<QAction*> colorActions;
         QAction* clearColorAction = nullptr;
         addColorMenu(menu, colorActions, clearColorAction);
         QAction* openAction = menu.addAction(QStringLiteral("開く"));
         QAction* selected = menu.exec(screenPos);
+        const QString parentDir = QFileInfo(filePath).absolutePath();
+        if (selected == newFolderSameAction) {
+            QTimer::singleShot(0, window, [window, parentDir, filePath] {
+                if (window) {
+                    window->createFolderInDirectory(parentDir, filePath);  // beside this file
+                }
+            });
+            return;
+        }
+        if (selected == newFileSameAction) {
+            QTimer::singleShot(0, window, [window, parentDir, filePath] {
+                if (window) {
+                    window->createFileInDirectory(parentDir, filePath);  // beside this file
+                }
+            });
+            return;
+        }
+        if (selected == newFileLinkAction) {
+            QTimer::singleShot(0, window, [window, filePath] {
+                if (window) {
+                    window->createLinkedFileBeside(filePath);
+                }
+            });
+            return;
+        }
         if (selected == previewAction) {
             QTimer::singleShot(0, window, [window, filePath] {
                 if (window) {
