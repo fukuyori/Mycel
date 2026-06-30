@@ -4,7 +4,7 @@ Mycel is a C++/Qt mind-map tool that uses the system's folder and file structure
 
 Instead of treating files as a vertical file list, Mycel lays out folders and files as connected nodes on a whiteboard-style canvas. It is designed for exploring project structure, understanding document sets, and organizing information as a map while keeping the underlying data in normal system folders and files.
 
-- Current version: 0.5.3
+- Current version: 0.5.4
 - Release history: [CHANGELOG.md](CHANGELOG.md)
 - Documentation index: [docs/README.ja.md](docs/README.ja.md)
 - Development plan: [docs/development-plan.ja.md](docs/development-plan.ja.md)
@@ -40,13 +40,17 @@ Instead of treating files as a vertical file list, Mycel lays out folders and fi
 - Run a Go source file as a script from the context menu (`go run`), with the output shown in a window
 - Pipelines: link an input file to a script (`.py`/`.go`) and run it from the script's context menu to produce an output file (`runner script <input> <output>`); the output is auto-created and linked if absent
 - "Open with…" in the file context menu to pick the application (the native Open-with dialog on Windows)
+- Reopen a recently opened folder from File > Open Recent
 
 ### Preview And Editing
 
 - Preview pane for text, HTML, Markdown, CSV, images, and videos
-- Inline previews for text and Markdown files
+- Thumbnail previews of the first page of PDFs and the cover of EPUBs, cached under `.mycel/thumbnails` and generated when the preview is opened
+- Inline previews for text and Markdown files, showing up to 200 lines so a taller frame reveals more text
+- Text and other plain preview frames can be freely resized on both axes by dragging the lower-right corner; image, PDF, and EPUB frames keep their source aspect ratio
 - Select and copy text inside previews
 - Lightweight preview frames for images, PDFs, and other files
+- Large-file safe: images are decoded downscaled for previews, and images with an extreme pixel count (decompression bombs) are skipped with a placeholder
 - Plain-text edit mode for the selected editable file
 - Preview pane placement can be switched between left, right, and bottom
 - Clear preview/edit mode indicators with labels, background color, and borders
@@ -176,7 +180,7 @@ On macOS, two-finger trackpad slide pans the canvas while trackpad pinch remains
 | Operation | Action |
 | --- | --- |
 | Enter | Toggle selected file previews or selected folder collapse |
-| Drag the lower-right corner of a preview | Resize the preview |
+| Drag the lower-right corner of a preview | Resize the preview (text frames resize freely on both axes; image/PDF/EPUB keep their aspect ratio) |
 | Select preview text and press Ctrl + C | Copy text |
 | Click the preview pane for an editable selected file | Enter plain-text edit mode |
 | E | Edit the selected file as plain text |

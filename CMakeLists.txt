@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(Mycel VERSION 0.5.3 LANGUAGES CXX)
+project(Mycel VERSION 0.5.4 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,7 +9,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Network Multimedia MultimediaWidgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Network Multimedia MultimediaWidgets CorePrivate)
 find_package(Qt6Quick QUIET CONFIG)
 find_package(Qt6QuickWidgets QUIET CONFIG)
 find_package(Qt6PrintSupport QUIET CONFIG)
@@ -17,6 +17,7 @@ find_package(Qt6WebChannel QUIET CONFIG)
 find_package(Qt6Positioning QUIET CONFIG)
 find_package(Qt6WebEngineCore QUIET CONFIG)
 find_package(Qt6WebEngineWidgets QUIET CONFIG)
+find_package(Qt6Pdf QUIET CONFIG)
 
 add_executable(mycel
     src/main.cpp
@@ -46,12 +47,21 @@ if(WIN32)
 endif()
 
 target_link_libraries(mycel PRIVATE Qt6::Widgets Qt6::Network Qt6::Multimedia Qt6::MultimediaWidgets)
+# QZipReader (used to extract EPUB cover images) lives in Qt Core's private API.
+target_link_libraries(mycel PRIVATE Qt6::CorePrivate)
 
 if(TARGET Qt6::WebEngineWidgets)
     target_link_libraries(mycel PRIVATE Qt6::WebEngineWidgets)
     target_compile_definitions(mycel PRIVATE MYCEL_HAS_WEBENGINE=1)
 else()
     target_compile_definitions(mycel PRIVATE MYCEL_HAS_WEBENGINE=0)
+endif()
+
+if(TARGET Qt6::Pdf)
+    target_link_libraries(mycel PRIVATE Qt6::Pdf)
+    target_compile_definitions(mycel PRIVATE MYCEL_HAS_PDF=1)
+else()
+    target_compile_definitions(mycel PRIVATE MYCEL_HAS_PDF=0)
 endif()
 
 target_compile_definitions(mycel PRIVATE

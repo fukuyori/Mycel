@@ -11,9 +11,12 @@
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
+#include <QtCore/QCryptographicHash>
 #include <QtCore/QMimeData>
 #include <QtCore/QProcess>
 #include <QtCore/QStandardPaths>
+#include <QtCore/QXmlStreamReader>
+#include <QtCore/private/qzipreader_p.h>
 #include <QtCore/QPointF>
 #include <QtCore/QPointer>
 #include <QtCore/QRectF>
@@ -70,6 +73,10 @@
 #if MYCEL_HAS_WEBENGINE
 #include <QtWebEngineCore/QWebEngineSettings>
 #include <QtWebEngineWidgets/QWebEngineView>
+#endif
+#if MYCEL_HAS_PDF
+#include <QtPdf/QPdfDocument>
+#include <QtPdf/QPdfDocumentRenderOptions>
 #endif
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QDialog>
@@ -447,6 +454,27 @@ QSize imagePixelSizeForFile(const QFileInfo& info)
     return imageSize;
 }
 
+// Reads an image bounded for preview use. Images whose pixel count is absurd (decompression bombs)
+// are rejected outright, and large images are decoded downscaled instead of at full resolution so a
+// big file never loads its full-size bitmap into memory. maxSide caps the longest decoded edge
+// (<= 0 means no downscale). Returns a null image when the file cannot be read or is too large.
+QImage boundedPreviewImage(const QFileInfo& info, int maxSide)
+{
+    QImageReader reader(info.absoluteFilePath());
+    reader.setAutoTransform(true);
+    const QSize sourceSize = reader.size();  // header-only read, does not decode pixels
+    if (sourceSize.isValid() && !sourceSize.isEmpty()) {
+        constexpr qint64 kMaxSourcePixels = 120LL * 1000 * 1000;  // ~120 MP guards against bombs
+        if (static_cast<qint64>(sourceSize.width()) * sourceSize.height() > kMaxSourcePixels) {
+            return {};
+        }
+        if (maxSide > 0 && (sourceSize.width() > maxSide || sourceSize.height() > maxSide)) {
+            reader.setScaledSize(sourceSize.scaled(maxSide, maxSide, Qt::KeepAspectRatio));
+        }
+    }
+    return reader.read();
+}
+
 QPixmap cachedImagePixmapForFile(const QFileInfo& info)
 {
     const QString path = info.absoluteFilePath();
@@ -459,8 +487,10 @@ QPixmap cachedImagePixmapForFile(const QFileInfo& info)
         return pixmap;
     }
 
-    pixmap.load(path);
-    if (!pixmap.isNull()) {
+    // Decode at most at preview resolution; the inline frame never needs full-size source bitmaps.
+    const QImage image = boundedPreviewImage(info, 2560);
+    if (!image.isNull()) {
+        pixmap = QPixmap::fromImage(image);
         QPixmapCache::insert(cacheKey, pixmap);
     }
     return pixmap;
@@ -528,13 +558,198 @@ QSizeF imagePreviewSizeForScale(const QFileInfo& info, qreal scale)
     return QSizeF(imageWidth * clampedScale, imageHeight * clampedScale);
 }
 
+#if MYCEL_HAS_PDF
+// First-page size in points, cached so the PDF is not reloaded on every layout/paint.
+QSizeF pdfFirstPagePointSize(const QFileInfo& info)
+{
+    static QHash<QString, QSizeF> cache;
+    const QString key = info.absoluteFilePath() + QLatin1Char('|') +
+                        QString::number(info.lastModified().toMSecsSinceEpoch());
+    const auto found = cache.constFind(key);
+    if (found != cache.constEnd()) {
+        return found.value();
+    }
+    QSizeF pts;
+    QPdfDocument doc;
+    if (doc.load(info.absoluteFilePath()) == QPdfDocument::Error::None && doc.pageCount() > 0) {
+        pts = doc.pagePointSize(0);
+    }
+    cache.insert(key, pts);  // cache even empty results to avoid reloading bad/locked files
+    return pts;
+}
+#endif
+
+bool isPdfThumbnailFile(const QFileInfo& info)
+{
+    return info.suffix().compare(QStringLiteral("pdf"), Qt::CaseInsensitive) == 0;
+}
+
+bool isEpubThumbnailFile(const QFileInfo& info)
+{
+    return info.suffix().compare(QStringLiteral("epub"), Qt::CaseInsensitive) == 0;
+}
+
+// Extract the cover image from an EPUB (a ZIP): META-INF/container.xml -> OPF package document ->
+// the manifest's cover image (EPUB3 properties="cover-image", or EPUB2 <meta name="cover">), with
+// a fallback to the first image in the manifest. Returns a null image on failure.
+QImage epubCoverImage(const QFileInfo& info)
+{
+    QZipReader zip(info.absoluteFilePath());
+    if (!zip.isReadable()) {
+        return {};
+    }
+
+    const QByteArray container = zip.fileData(QStringLiteral("META-INF/container.xml"));
+    if (container.isEmpty()) {
+        return {};
+    }
+    QString opfPath;
+    {
+        QXmlStreamReader xml(container);
+        while (!xml.atEnd()) {
+            xml.readNext();
+            if (xml.isStartElement() && xml.name() == QLatin1String("rootfile")) {
+                opfPath = xml.attributes().value(QLatin1String("full-path")).toString();
+                break;
+            }
+        }
+    }
+    if (opfPath.isEmpty()) {
+        return {};
+    }
+
+    const QByteArray opf = zip.fileData(opfPath);
+    if (opf.isEmpty()) {
+        return {};
+    }
+    const QString opfDir = QFileInfo(opfPath).path();
+
+    QString coverImageHref;                  // EPUB3: item with properties="cover-image"
+    QString coverMetaId;                     // EPUB2: <meta name="cover" content="ID">
+    QString firstImageHref;                  // fallback
+    QHash<QString, QString> idToHref;        // manifest item id -> href
+    {
+        QXmlStreamReader xml(opf);
+        while (!xml.atEnd()) {
+            xml.readNext();
+            if (!xml.isStartElement()) {
+                continue;
+            }
+            if (xml.name() == QLatin1String("meta")) {
+                const auto attrs = xml.attributes();
+                if (attrs.value(QLatin1String("name")) == QLatin1String("cover")) {
+                    coverMetaId = attrs.value(QLatin1String("content")).toString();
+                }
+            } else if (xml.name() == QLatin1String("item")) {
+                const auto attrs = xml.attributes();
+                const QString id = attrs.value(QLatin1String("id")).toString();
+                const QString href = attrs.value(QLatin1String("href")).toString();
+                const QString media = attrs.value(QLatin1String("media-type")).toString();
+                const QString props = attrs.value(QLatin1String("properties")).toString();
+                if (!id.isEmpty()) {
+                    idToHref.insert(id, href);
+                }
+                if (props.contains(QLatin1String("cover-image"))) {
+                    coverImageHref = href;
+                }
+                if (firstImageHref.isEmpty() && media.startsWith(QLatin1String("image/"))) {
+                    firstImageHref = href;
+                }
+            }
+        }
+    }
+
+    QString href = coverImageHref;
+    if (href.isEmpty() && !coverMetaId.isEmpty()) {
+        href = idToHref.value(coverMetaId);
+    }
+    if (href.isEmpty()) {
+        href = firstImageHref;
+    }
+    if (href.isEmpty()) {
+        return {};
+    }
+
+    // hrefs are relative to the OPF location and may be percent-encoded.
+    href = QUrl::fromPercentEncoding(href.toUtf8());
+    QString imagePath = opfDir.isEmpty() ? href : opfDir + QLatin1Char('/') + href;
+    imagePath = QDir::cleanPath(imagePath);
+    const QByteArray imageData = zip.fileData(imagePath);
+    if (imageData.isEmpty()) {
+        return {};
+    }
+    QImage image;
+    image.loadFromData(imageData);
+    return image;
+}
+
+// Cover image pixel size, cached so the EPUB is not re-extracted for every layout pass.
+QSizeF epubCoverPixelSize(const QFileInfo& info)
+{
+    static QHash<QString, QSizeF> cache;
+    const QString key = info.absoluteFilePath() + QLatin1Char('|') +
+                        QString::number(info.lastModified().toMSecsSinceEpoch());
+    const auto found = cache.constFind(key);
+    if (found != cache.constEnd()) {
+        return found.value();
+    }
+    const QImage cover = epubCoverImage(info);
+    const QSizeF size = cover.isNull() ? QSizeF() : QSizeF(cover.size());
+    cache.insert(key, size);
+    return size;
+}
+
 QSizeF clampedPreviewSizeForFile(const QFileInfo& info, const QSizeF& size, bool preferHeight = false)
 {
     if (isImagePreviewFile(info)) {
         return clampedImagePreviewSize(info, size, preferHeight);
     }
-    return QSizeF(std::clamp(size.width(), 260.0, 900.0),
-                  std::clamp(size.height(), 110.0, 520.0));
+    // Documents (PDF first page / EPUB cover) keep their source aspect ratio so the frame always
+    // matches the thumbnail (no side gaps); resizing drives the size from the dragged dimension.
+    QSizeF source;
+#if MYCEL_HAS_PDF
+    if (isPdfThumbnailFile(info)) {
+        source = pdfFirstPagePointSize(info);
+    }
+#endif
+    if (source.isEmpty() && isEpubThumbnailFile(info)) {
+        source = epubCoverPixelSize(info);
+    }
+    if (!source.isEmpty() && source.width() > 0.0 && source.height() > 0.0) {
+        const qreal aspect = source.width() / source.height();
+        qreal height = preferHeight ? size.height() : size.width() / aspect;
+        height = std::clamp(height, 90.0, 700.0);
+        return QSizeF(height * aspect, height);
+    }
+    return QSizeF(std::clamp(size.width(), 260.0, 1000.0),
+                  std::clamp(size.height(), 110.0, 900.0));
+}
+
+// Image and document (PDF/EPUB) previews keep their source aspect ratio, so resizing them drives a
+// single dragged dimension. Every other preview frame (text, etc.) resizes freely on both axes.
+bool isAspectLockedPreviewFile(const QFileInfo& info)
+{
+    if (isImagePreviewFile(info)) {
+        return true;
+    }
+#if MYCEL_HAS_PDF
+    if (isPdfThumbnailFile(info)) {
+        return true;
+    }
+#endif
+    return isEpubThumbnailFile(info);
+}
+
+// Target frame size while dragging the resize grip. Aspect-locked previews move one axis (the
+// dominant drag direction); free previews follow the grip on both axes.
+QSizeF previewResizeTargetSize(const QFileInfo& info, const QSizeF& startSize, const QPointF& delta)
+{
+    if (isAspectLockedPreviewFile(info)) {
+        return std::abs(delta.x()) >= std::abs(delta.y())
+                   ? QSizeF(startSize.width() + delta.x(), startSize.height())
+                   : QSizeF(startSize.width(), startSize.height() + delta.y());
+    }
+    return QSizeF(startSize.width() + delta.x(), startSize.height() + delta.y());
 }
 
 QSizeF automaticPreviewSize(const QFileInfo& info)
@@ -557,6 +772,26 @@ QSizeF automaticPreviewSize(const QFileInfo& info)
         const qreal previewWidth = imageWidth * scale;
         const qreal previewHeight = imageHeight * scale;
         return clampedPreviewSizeForFile(info, QSizeF(previewWidth, previewHeight));
+    }
+
+    {
+        // Size the preview frame to the document's aspect (PDF first page / EPUB cover).
+        QSizeF source;
+#if MYCEL_HAS_PDF
+        if (isPdfThumbnailFile(info)) {
+            source = pdfFirstPagePointSize(info);
+        }
+#endif
+        if (source.isEmpty() && isEpubThumbnailFile(info)) {
+            source = epubCoverPixelSize(info);
+        }
+        if (isPdfThumbnailFile(info) || isEpubThumbnailFile(info)) {
+            if (!source.isEmpty() && source.width() > 0.0 && source.height() > 0.0) {
+                const qreal scale = std::min(width / source.width(), maxHeight / source.height());
+                return QSizeF(source.width() * scale, source.height() * scale);
+            }
+            return QSizeF(width * 0.55, maxHeight);  // portrait fallback
+        }
     }
 
     if (isVideoPreviewFile(info)) {
@@ -606,7 +841,7 @@ QSizeF automaticPreviewSize(const QFileInfo& info)
 
     QTextStream stream(&file);
     QStringList lines;
-    while (lines.size() < 7 && !stream.atEnd()) {
+    while (lines.size() < 24 && !stream.atEnd()) {
         lines << stream.readLine();
     }
     if (lines.isEmpty()) {
@@ -767,7 +1002,8 @@ struct TreeLayoutEngine {
 
     // Assign node centers. Children that are file-link targets are skipped here and placed
     // beside their link source by layoutFileLinks instead.
-    static void layoutTree(Node& node, qreal leftX, qreal& yCursor, const QSet<QString>& linkedTargets)
+    static void layoutTree(Node& node, qreal leftX, qreal& yCursor, const QSet<QString>& linkedTargets,
+                           Node& root, const std::vector<FileLink>& links)
     {
         node.center.setX(leftX + node.size.width() / 2.0);
         const auto isTreeChild = [&linkedTargets](const std::unique_ptr<Node>& child) {
@@ -776,7 +1012,9 @@ struct TreeLayoutEngine {
         const bool hasTreeChildren = std::any_of(node.children.begin(), node.children.end(), isTreeChild);
         if (!hasTreeChildren) {
             node.center.setY(yCursor);
-            yCursor += YStep + (node.previewOpen ? node.previewSize.height() + 28.0 : 0.0);
+            // Reserve room for the whole link fan (e.g. a tall .pdf linked to this short .txt),
+            // not just this node's own preview, so the next row clears it.
+            yCursor += nodeRowSpan(node, root, links);
             return;
         }
 
@@ -785,7 +1023,7 @@ struct TreeLayoutEngine {
             if (linkedTargets.contains(child->path)) {
                 continue;
             }
-            layoutTree(*child, childLeftX, yCursor, linkedTargets);
+            layoutTree(*child, childLeftX, yCursor, linkedTargets, root, links);
         }
 
         const auto first = std::find_if(node.children.begin(), node.children.end(), isTreeChild);
@@ -841,6 +1079,22 @@ struct TreeLayoutEngine {
     static qreal nodeVerticalSpan(const Node& node)
     {
         return YStep + (node.previewOpen ? node.previewSize.height() + 28.0 : 0.0);
+    }
+
+    // Vertical room a node needs in the tree, including the fan of file-link targets to its right
+    // (recursively). A short .txt whose linked .pdf has a tall preview must still reserve the
+    // .pdf's height so the next row does not overlap that preview.
+    static qreal nodeRowSpan(const Node& node, Node& root, const std::vector<FileLink>& links)
+    {
+        qreal fan = 0.0;
+        for (const FileLink& link : links) {
+            if (link.from == node.path) {
+                if (Node* to = findNodeByPath(root, link.to)) {
+                    fan += nodeRowSpan(*to, root, links);  // stacked targets sum; a chain takes the max
+                }
+            }
+        }
+        return std::max(nodeVerticalSpan(node), fan);
     }
 
     // Right-most x of a node's drawn content (accounts for an open preview wider than the card).
@@ -922,7 +1176,13 @@ struct TreeLayoutEngine {
             qreal slotTop = stackTop;  // center the stack on the source anchor
             for (Node* to : targets) {
                 const qreal span = nodeVerticalSpan(*to);
-                to->center = QPointF(linkedLeftX + to->size.width() / 2.0, slotTop + span / 2.0);
+                // A node's visible content (header + open preview) hangs DOWN from the card top, so
+                // center that whole extent in the slot — otherwise a tall preview spills over the
+                // target below it.
+                const qreal visualHeight = to->previewOpen ? 34.0 + to->previewSize.height()
+                                                           : to->size.height();
+                const qreal centerY = slotTop + (span - visualHeight) / 2.0 + to->size.height() / 2.0;
+                to->center = QPointF(linkedLeftX + to->size.width() / 2.0, centerY);
                 slotTop += span;
             }
         }
@@ -1331,6 +1591,7 @@ FileKindStyle fileKindStyleFor(const QFileInfo& info)
     if (is({"txt", "log"})) return {QStringLiteral("TXT"), slate};
     if (is({"csv", "tsv"})) return {QStringLiteral("CSV"), green};
     if (is({"pdf"})) return {QStringLiteral("PDF"), red};
+    if (is({"epub"})) return {QStringLiteral("EPUB"), purple};
     if (is({"doc", "docx", "rtf"})) return {QStringLiteral("DOC"), blue};
     if (is({"xls", "xlsx"})) return {QStringLiteral("XLS"), green};
     if (is({"ppt", "pptx"})) return {QStringLiteral("PPT"), amber};
@@ -1913,6 +2174,8 @@ private:
     bool hasUserFill() const;
     QStringList windowInlinePreviewLines() const;
     QString windowMarkdownPreviewText() const;
+    bool windowIsDocumentThumbnail(const QFileInfo& info) const;
+    QPixmap windowDocumentThumbnail(const QFileInfo& info) const;
     void updateDragAtScene(const QPointF& scenePos);
     void finishDragAtScene(Qt::MouseButton button, const QPointF& scenePos);
     void resizePreview(const QSizeF& size, bool preferHeight);
@@ -2070,17 +2333,22 @@ private:
                           Qt::AlignVCenter | Qt::AlignLeft, shortLabel(node_->name));
 
         const QFileInfo info(node_->path);
+        QPixmap previewPixmap;
         if (isImagePreviewFile(info)) {
-            const QRectF imageArea = body.adjusted(2.0, 2.0, -38.0, -38.0);
-            const QPixmap pixmap = cachedImagePixmapForFile(info);
-            if (!pixmap.isNull() && imageArea.width() > 1.0 && imageArea.height() > 1.0) {
+            previewPixmap = cachedImagePixmapForFile(info);
+        } else if (windowIsDocumentThumbnail(info)) {
+            previewPixmap = windowDocumentThumbnail(info);  // PDF first-page thumbnail
+        }
+        if (!previewPixmap.isNull()) {
+            const QRectF imageArea = body.adjusted(6.0, 6.0, -6.0, -6.0);  // symmetric → centered
+            if (imageArea.width() > 1.0 && imageArea.height() > 1.0) {
                 painter->save();
                 painter->setRenderHint(QPainter::SmoothPixmapTransform, !fastCanvasRendering());
-                const QSizeF scaled = pixmap.size().scaled(imageArea.size().toSize(), Qt::KeepAspectRatio);
+                const QSizeF scaled = previewPixmap.size().scaled(imageArea.size().toSize(), Qt::KeepAspectRatio);
                 const QRectF target(QPointF(imageArea.left() + (imageArea.width() - scaled.width()) / 2.0,
                                             imageArea.top() + (imageArea.height() - scaled.height()) / 2.0),
                                     scaled);
-                painter->drawPixmap(target, pixmap, QRectF(QPointF(0.0, 0.0), pixmap.size()));
+                painter->drawPixmap(target, previewPixmap, QRectF(QPointF(0.0, 0.0), previewPixmap.size()));
                 painter->restore();
             }
         }
@@ -2501,11 +2769,8 @@ protected:
                 return;
             }
             const QPointF delta = mapToScene(event->pos()) - imageResizeStartScene_;
-            const QSizeF targetSize = std::abs(delta.x()) >= std::abs(delta.y())
-                                          ? QSizeF(imageResizeStartSize_.width() + delta.x(),
-                                                   imageResizeStartSize_.height())
-                                          : QSizeF(imageResizeStartSize_.width(),
-                                                   imageResizeStartSize_.height() + delta.y());
+            const QSizeF targetSize = previewResizeTargetSize(QFileInfo(imageResizePath_),
+                                                              imageResizeStartSize_, delta);
             const bool preferHeight = std::abs(delta.y()) > std::abs(delta.x());
             if (isImagePreviewFile(QFileInfo(imageResizePath_))) {
                 imageResizeCurrentScale_ = imagePreviewScaleForSize(QFileInfo(imageResizePath_),
@@ -2552,11 +2817,8 @@ protected:
                 } else {
                     const QPointF delta = mapToScene(event->pos()) - imageResizeStartScene_;
                     const bool preferHeight = std::abs(delta.y()) > std::abs(delta.x());
-                    const QSizeF targetSize = std::abs(delta.x()) >= std::abs(delta.y())
-                                                  ? QSizeF(imageResizeStartSize_.width() + delta.x(),
-                                                           imageResizeStartSize_.height())
-                                                  : QSizeF(imageResizeStartSize_.width(),
-                                                           imageResizeStartSize_.height() + delta.y());
+                    const QSizeF targetSize = previewResizeTargetSize(QFileInfo(imageResizePath_),
+                                                                      imageResizeStartSize_, delta);
                     resizeItem->savePreviewSize(targetSize, preferHeight);
                 }
             } else {
@@ -3745,6 +4007,7 @@ public:
         addDockWidget(Qt::BottomDockWidgetArea, debugDock_);
         debugDock_->hide();
 
+        // ---- Actions (shared by the menu bar and the toolbar) ----
         undoAction_ = new QAction(QStringLiteral("元に戻す"), this);
         undoAction_->setShortcut(QKeySequence::Undo);
         undoAction_->setShortcutContext(Qt::WidgetWithChildrenShortcut);
@@ -3757,43 +4020,46 @@ public:
         redoAction_->setEnabled(false);
         view_->addAction(redoAction_);
         connect(redoAction_, &QAction::triggered, this, [this] { performRedo(); });
-        QMenu* editMenu = menuBar()->addMenu(QStringLiteral("編集"));
-        editMenu->addAction(undoAction_);
-        editMenu->addAction(redoAction_);
 
-        auto* toolbar = addToolBar(QStringLiteral("Mycel"));
-        toolbar->addAction(undoAction_);
-        toolbar->addAction(redoAction_);
-        toolbar->addSeparator();
-        QAction* openAction = toolbar->addAction(QStringLiteral("Open"));
-        QAction* refreshAction = toolbar->addAction(QStringLiteral("Refresh"));
+        QAction* openAction = new QAction(QStringLiteral("フォルダを開く"), this);
+        QAction* exportAction = new QAction(QStringLiteral("エクスポート"), this);
+        QAction* importAction = new QAction(QStringLiteral("インポート"), this);
+        QAction* quitAction = new QAction(QStringLiteral("終了"), this);
+        quitAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Q")));
+        quitAction->setShortcutContext(Qt::ApplicationShortcut);
+        addAction(quitAction);
+
+        QAction* refreshAction = new QAction(QStringLiteral("更新"), this);
         refreshAction->setShortcut(QKeySequence(Qt::Key_F5));
-        QAction* fitAction = toolbar->addAction(QStringLiteral("Fit"));
+        QAction* fitAction = new QAction(QStringLiteral("全体表示"), this);
         fitAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+0")));
-        QAction* exportAction = toolbar->addAction(QStringLiteral("Export"));
-        QAction* importAction = toolbar->addAction(QStringLiteral("Import"));
-        QAction* openSelectedPreviewsAction = toolbar->addAction(QStringLiteral("Open Previews"));
-        QAction* closeSelectedPreviewsAction = toolbar->addAction(QStringLiteral("Close Previews"));
-        editorPaneAction_ = toolbar->addAction(QStringLiteral("Preview"));
+        QAction* maximizeAction = new QAction(QStringLiteral("最大化"), this);
+        maximizeAction->setShortcut(QKeySequence(Qt::Key_F11));
+        maximizeAction->setShortcutContext(Qt::ApplicationShortcut);
+        addAction(maximizeAction);
+        QAction* openSelectedPreviewsAction = new QAction(QStringLiteral("プレビューを開く"), this);
+        QAction* closeSelectedPreviewsAction = new QAction(QStringLiteral("プレビューを閉じる"), this);
+        editorPaneAction_ = new QAction(QStringLiteral("プレビューペイン"), this);
         editorPaneAction_->setCheckable(true);
         editorPaneAction_->setShortcut(QKeySequence(QStringLiteral("Ctrl+E")));
         editorPaneAction_->setShortcutContext(Qt::ApplicationShortcut);
         editorPaneAction_->setChecked(QSettings().value(QStringLiteral("editor/paneVisible"), true).toBool());
         sideEditorPanel_->setVisible(editorPaneAction_->isChecked());
-        debugPaneAction_ = toolbar->addAction(QStringLiteral("Debug"));
+        debugPaneAction_ = new QAction(QStringLiteral("デバッグ"), this);
         debugPaneAction_->setCheckable(true);
         debugPaneAction_->setShortcut(QKeySequence(QStringLiteral("F12")));
         debugPaneAction_->setShortcutContext(Qt::ApplicationShortcut);
-        auto* editorPositionButton = new QToolButton(this);
-        editorPositionButton->setText(QStringLiteral("Preview Place"));
-        editorPositionButton->setPopupMode(QToolButton::InstantPopup);
-        auto* editorPositionMenu = new QMenu(editorPositionButton);
-        editorPositionButton->setMenu(editorPositionMenu);
+
+        QAction* renameSelectedAction = new QAction(this);
+        renameSelectedAction->setShortcut(QKeySequence(Qt::Key_F2));
+        renameSelectedAction->setShortcutContext(Qt::ApplicationShortcut);
+        addAction(renameSelectedAction);
+
         auto* editorPositionGroup = new QActionGroup(this);
         editorPositionGroup->setExclusive(true);
-        QAction* editorLeftAction = editorPositionMenu->addAction(QStringLiteral("Left"));
-        QAction* editorRightAction = editorPositionMenu->addAction(QStringLiteral("Right"));
-        QAction* editorBottomAction = editorPositionMenu->addAction(QStringLiteral("Bottom"));
+        QAction* editorLeftAction = new QAction(QStringLiteral("左"), this);
+        QAction* editorRightAction = new QAction(QStringLiteral("右"), this);
+        QAction* editorBottomAction = new QAction(QStringLiteral("下"), this);
         for (QAction* action : {editorLeftAction, editorRightAction, editorBottomAction}) {
             action->setCheckable(true);
             editorPositionGroup->addAction(action);
@@ -3801,7 +4067,103 @@ public:
         editorLeftAction->setData(QStringLiteral("left"));
         editorRightAction->setData(QStringLiteral("right"));
         editorBottomAction->setData(QStringLiteral("bottom"));
+
+        auto* themeGroup = new QActionGroup(this);
+        themeGroup->setExclusive(true);
+        lightThemeAction_ = new QAction(QStringLiteral("ライト"), this);
+        darkThemeAction_ = new QAction(QStringLiteral("ダーク"), this);
+        for (QAction* action : {lightThemeAction_, darkThemeAction_}) {
+            action->setCheckable(true);
+            themeGroup->addAction(action);
+        }
+        lightThemeAction_->setData(QStringLiteral("light"));
+        darkThemeAction_->setData(QStringLiteral("dark"));
+
+        // ---- Menu bar: ファイル / 編集 / 表示 / 設定 ----
+        QMenu* fileMenu = menuBar()->addMenu(QStringLiteral("ファイル"));
+        fileMenu->addAction(openAction);
+        QMenu* recentMenu = fileMenu->addMenu(QStringLiteral("履歴から開く"));
+        connect(recentMenu, &QMenu::aboutToShow, this, [this, recentMenu] {
+            recentMenu->clear();
+            bool any = false;
+            for (const QString& path : recentRootPaths()) {
+                if (QDir::cleanPath(path) == QDir::cleanPath(rootPath_)) {
+                    continue;  // skip the folder already open
+                }
+                QAction* item = recentMenu->addAction(QDir::toNativeSeparators(path));
+                connect(item, &QAction::triggered, this, [this, path] { openRootFolder(path); });
+                any = true;
+            }
+            if (!any) {
+                QAction* none = recentMenu->addAction(QStringLiteral("(履歴なし)"));
+                none->setEnabled(false);
+            }
+        });
+        fileMenu->addSeparator();
+        fileMenu->addAction(exportAction);
+        fileMenu->addAction(importAction);
+        fileMenu->addSeparator();
+        fileMenu->addAction(quitAction);
+
+        QMenu* editMenu = menuBar()->addMenu(QStringLiteral("編集"));
+        editMenu->addAction(undoAction_);
+        editMenu->addAction(redoAction_);
+
+        QMenu* viewMenu = menuBar()->addMenu(QStringLiteral("表示"));
+        viewMenu->addAction(refreshAction);
+        viewMenu->addAction(fitAction);
+        viewMenu->addAction(maximizeAction);
+        viewMenu->addSeparator();
+        viewMenu->addAction(openSelectedPreviewsAction);
+        viewMenu->addAction(closeSelectedPreviewsAction);
+        viewMenu->addSeparator();
+        viewMenu->addAction(editorPaneAction_);
+        viewMenu->addAction(debugPaneAction_);
+
+        QMenu* settingsMenu = menuBar()->addMenu(QStringLiteral("設定"));
+        QMenu* themeMenu = settingsMenu->addMenu(QStringLiteral("テーマ"));
+        themeMenu->addAction(lightThemeAction_);
+        themeMenu->addAction(darkThemeAction_);
+        QMenu* positionMenu = settingsMenu->addMenu(QStringLiteral("プレビュー位置"));
+        positionMenu->addAction(editorLeftAction);
+        positionMenu->addAction(editorRightAction);
+        positionMenu->addAction(editorBottomAction);
+
+        // ---- Toolbar: ファイル → 履歴 → 表示 → 設定 ----
+        auto* toolbar = addToolBar(QStringLiteral("Mycel"));
+        toolbar->setMovable(false);
+        toolbar->addAction(openAction);
+        toolbar->addAction(exportAction);
+        toolbar->addAction(importAction);
+        toolbar->addSeparator();
+        toolbar->addAction(undoAction_);
+        toolbar->addAction(redoAction_);
+        toolbar->addSeparator();
+        toolbar->addAction(refreshAction);
+        toolbar->addAction(fitAction);
+        toolbar->addAction(openSelectedPreviewsAction);
+        toolbar->addAction(closeSelectedPreviewsAction);
+        toolbar->addAction(editorPaneAction_);
+        toolbar->addAction(debugPaneAction_);
+        toolbar->addSeparator();
+        auto* editorPositionButton = new QToolButton(this);
+        editorPositionButton->setText(QStringLiteral("配置"));
+        editorPositionButton->setPopupMode(QToolButton::InstantPopup);
+        auto* editorPositionToolMenu = new QMenu(editorPositionButton);
+        editorPositionToolMenu->addAction(editorLeftAction);
+        editorPositionToolMenu->addAction(editorRightAction);
+        editorPositionToolMenu->addAction(editorBottomAction);
+        editorPositionButton->setMenu(editorPositionToolMenu);
         toolbar->addWidget(editorPositionButton);
+        auto* themeButton = new QToolButton(this);
+        themeButton->setText(QStringLiteral("テーマ"));
+        themeButton->setPopupMode(QToolButton::InstantPopup);
+        auto* themeToolMenu = new QMenu(themeButton);
+        themeToolMenu->addAction(lightThemeAction_);
+        themeToolMenu->addAction(darkThemeAction_);
+        themeButton->setMenu(themeToolMenu);
+        toolbar->addWidget(themeButton);
+
         applyEditorPanePosition(QSettings().value(QStringLiteral("editor/panePosition"), QStringLiteral("right")).toString(),
                                 false);
         for (QAction* action : editorPositionGroup->actions()) {
@@ -3810,57 +4172,10 @@ public:
                 break;
             }
         }
-        auto* themeButton = new QToolButton(this);
-        themeButton->setText(QStringLiteral("Theme"));
-        themeButton->setPopupMode(QToolButton::InstantPopup);
-        auto* themeMenu = new QMenu(themeButton);
-        themeButton->setMenu(themeMenu);
-        auto* themeGroup = new QActionGroup(this);
-        themeGroup->setExclusive(true);
-        lightThemeAction_ = themeMenu->addAction(QStringLiteral("Light"));
-        darkThemeAction_ = themeMenu->addAction(QStringLiteral("Dark"));
-        for (QAction* action : {lightThemeAction_, darkThemeAction_}) {
-            action->setCheckable(true);
-            themeGroup->addAction(action);
-        }
-        lightThemeAction_->setData(QStringLiteral("light"));
-        darkThemeAction_->setData(QStringLiteral("dark"));
-        toolbar->addWidget(themeButton);
-        QAction* renameSelectedAction = new QAction(this);
-        renameSelectedAction->setShortcut(QKeySequence(Qt::Key_F2));
-        renameSelectedAction->setShortcutContext(Qt::ApplicationShortcut);
-        addAction(renameSelectedAction);
-        QAction* maximizeAction = new QAction(this);
-        maximizeAction->setShortcut(QKeySequence(Qt::Key_F11));
-        maximizeAction->setShortcutContext(Qt::ApplicationShortcut);
-        addAction(maximizeAction);
-        QAction* quitAction = new QAction(this);
-        quitAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Q")));
-        quitAction->setShortcutContext(Qt::ApplicationShortcut);
-        addAction(quitAction);
 
         connect(openAction, &QAction::triggered, this, [this] {
-            const QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("Open directory"), rootPath_);
-            if (!dir.isEmpty()) {
-                saveViewState();
-                saveCollapsedFile();
-                rootPath_ = normalizedDirectoryPath(dir);
-                rememberRootPath(rootPath_);
-                collapsedPaths_.clear();
-                previewPaths_.clear();
-                previewSizes_.clear();
-                previewImageScales_.clear();
-                loadOrderFile();
-                loadColorFile();
-                loadPreviewFile();
-                loadLinkFile();
-                if (!loadCollapsedFile()) {
-                    applyLargeTreeStartupCollapse();
-                }
-                restoreWindowStateFromSettingsFile();
-                rebuild(true);
-                QTimer::singleShot(0, this, [this] { syncEditorPaneVisibility(); });
-            }
+            const QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("フォルダを開く"), rootPath_);
+            openRootFolder(dir);
         });
         connect(refreshAction, &QAction::triggered, this, [this] { refreshAll(); });
         connect(fitAction, &QAction::triggered, this, [this] { fitToMap(); });
@@ -4610,6 +4925,42 @@ public:
         openPath(node->path);
     }
 
+    // Switch the whole board to a different root folder (used by ファイル > フォルダを開く and the
+    // ファイル > 履歴から開く list). Persists view state of the current root before switching.
+    void openRootFolder(const QString& dir)
+    {
+        if (dir.isEmpty()) {
+            return;
+        }
+        const QString normalized = normalizedDirectoryPath(dir);
+        if (!QFileInfo(normalized).isDir()) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"),
+                                 QStringLiteral("フォルダが見つかりません:\n%1").arg(QDir::toNativeSeparators(dir)));
+            return;
+        }
+        if (QDir::cleanPath(normalized) == QDir::cleanPath(rootPath_)) {
+            return;  // already open
+        }
+        saveViewState();
+        saveCollapsedFile();
+        rootPath_ = normalized;
+        rememberRootPath(rootPath_);
+        collapsedPaths_.clear();
+        previewPaths_.clear();
+        previewSizes_.clear();
+        previewImageScales_.clear();
+        loadOrderFile();
+        loadColorFile();
+        loadPreviewFile();
+        loadLinkFile();
+        if (!loadCollapsedFile()) {
+            applyLargeTreeStartupCollapse();
+        }
+        restoreWindowStateFromSettingsFile();
+        rebuild(true);
+        QTimer::singleShot(0, this, [this] { syncEditorPaneVisibility(); });
+    }
+
     void openPath(const QString& path)
     {
         if (path.isEmpty()) {
@@ -4661,6 +5012,58 @@ public:
             QProcess::startDetached(app, {target});
         }
 #endif
+    }
+
+    // Order a folder's direct children by name or by modified date. Folders are kept before files
+    // (matching the default scan order); descending reverses within each group. Recorded as one
+    // undoable step (it only changes the persisted custom order).
+    void sortFolderChildren(const QString& folderPath, bool byDate, bool descending)
+    {
+        const QFileInfo folderInfo(folderPath);
+        if (!folderInfo.exists() || !folderInfo.isDir()) {
+            return;
+        }
+        QDir dir(folderInfo.absoluteFilePath());
+        QFileInfoList entries = dir.entryInfoList(
+            QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System, QDir::NoSort);
+        std::sort(entries.begin(), entries.end(), [byDate, descending](const QFileInfo& a, const QFileInfo& b) {
+            if (a.isDir() != b.isDir()) {
+                return a.isDir();  // folders first, regardless of direction
+            }
+            int cmp;
+            if (byDate) {
+                const QDateTime ta = a.lastModified();
+                const QDateTime tb = b.lastModified();
+                cmp = ta < tb ? -1 : (ta > tb ? 1 : 0);
+                if (cmp == 0) {
+                    cmp = QString::compare(a.fileName(), b.fileName(), Qt::CaseInsensitive);
+                }
+            } else {
+                cmp = QString::compare(a.fileName(), b.fileName(), Qt::CaseInsensitive);
+            }
+            return descending ? cmp > 0 : cmp < 0;
+        });
+
+        QStringList order;
+        for (const QFileInfo& entry : entries) {
+            if (entry.fileName() == QStringLiteral(".mycel")) {
+                continue;
+            }
+            order.append(entry.fileName());
+        }
+
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+        fileOrders_[orderKeyForDirectory(folderInfo.absoluteFilePath())] = order;
+        saveOrderFile();
+        rebuild(false);
+        restoreFolderSelection(folderInfo.absoluteFilePath());
+        recordDebugEvent(QStringLiteral("sort folder: %1 by=%2 %3")
+                             .arg(relativeKeyForPath(folderPath),
+                                  byDate ? QStringLiteral("date") : QStringLiteral("name"),
+                                  descending ? QStringLiteral("desc") : QStringLiteral("asc")));
+        recordHistory(byDate ? QStringLiteral("日時で並べ替え") : QStringLiteral("名前で並べ替え"), {}, {},
+                      historyBefore, historySelection);
     }
 
     bool isGoScriptFile(const QString& path) const
@@ -5085,17 +5488,38 @@ public:
             showSidePreviewText(QStringLiteral("ファイルを開けませんでした。"), QStringLiteral("読み込み失敗"));
             return;
         }
+        if (isDocumentThumbnailFile(info)) {
+            // Generate a thumbnail only once the preview has been opened. Selecting a document with
+            // its preview closed must not render anything — show a placeholder instead.
+            const bool previewOpened = previewPaths_.contains(info.absoluteFilePath());
+            const QPixmap pixmap = previewOpened ? documentThumbnail(info) : cachedDocumentThumbnail(info);
+            if (!pixmap.isNull()) {
+                if (auto* imagePreview = dynamic_cast<AspectImagePreview*>(sidePreviewImage_)) {
+                    imagePreview->setPreviewPixmap(pixmap);
+                } else {
+                    sidePreviewImage_->setPixmap(pixmap);
+                }
+                sidePreviewStack_->setCurrentWidget(sidePreviewImage_);
+                setSidePaneMode(false, QStringLiteral("1ページ目プレビュー"));
+                sideEditorStatusLabel_->setText(QStringLiteral("1ページ目プレビュー"));
+            } else {
+                showSidePreviewText(QStringLiteral("プレビューを開くと表示します"),
+                                    QStringLiteral("ドキュメント"));
+            }
+            return;
+        }
         if (info.size() > 32 * 1024 * 1024 && !isVideoPreviewFile(info)) {
             showSidePreviewText(QStringLiteral("ファイルが大きいためプレビューしません。"), QStringLiteral("プレビュー不可"));
             return;
         }
 
         if (isImagePreviewFile(info)) {
-            QPixmap pixmap(info.absoluteFilePath());
-            if (pixmap.isNull()) {
-                showSidePreviewText(QStringLiteral("画像を読み込めませんでした。"), QStringLiteral("画像プレビュー失敗"));
+            const QImage image = boundedPreviewImage(info, 4096);
+            if (image.isNull()) {
+                showSidePreviewText(QStringLiteral("画像が大きすぎるか、読み込めませんでした。"), QStringLiteral("画像プレビュー失敗"));
                 return;
             }
+            const QPixmap pixmap = QPixmap::fromImage(image);
             if (auto* imagePreview = dynamic_cast<AspectImagePreview*>(sidePreviewImage_)) {
                 imagePreview->setPreviewPixmap(pixmap);
             } else {
@@ -5183,6 +5607,113 @@ public:
         return sideHtmlWeb_;
     }
 #endif
+
+    // Documents whose first page can be rendered to a thumbnail (currently PDF).
+    bool isDocumentThumbnailFile(const QFileInfo& info) const
+    {
+#if MYCEL_HAS_PDF
+        if (isPdfThumbnailFile(info)) {
+            return true;
+        }
+#endif
+        return isEpubThumbnailFile(info);
+    }
+
+    // Render the first page (PDF) or cover (EPUB) of a document to an image, at a modest
+    // resolution. Empty on failure / unsupported build.
+    QImage renderDocumentFirstPage(const QFileInfo& info) const
+    {
+        constexpr int kRenderWidth = 400;  // preview frames are at most ~500 px wide
+#if MYCEL_HAS_PDF
+        if (isPdfThumbnailFile(info)) {
+            QPdfDocument doc;
+            if (doc.load(info.absoluteFilePath()) != QPdfDocument::Error::None || doc.pageCount() < 1) {
+                return {};
+            }
+            QSizeF pointSize = doc.pagePointSize(0);
+            if (pointSize.isEmpty() || pointSize.width() <= 0.0) {
+                pointSize = QSizeF(595.0, 842.0);  // A4 fallback
+            }
+            const qreal scale = kRenderWidth / pointSize.width();
+            const QSize renderSize(qRound(pointSize.width() * scale), qRound(pointSize.height() * scale));
+            return doc.render(0, renderSize, QPdfDocumentRenderOptions());
+        }
+#endif
+        if (isEpubThumbnailFile(info)) {
+            QImage cover = epubCoverImage(info);
+            if (!cover.isNull() && cover.width() > kRenderWidth) {
+                cover = cover.scaledToWidth(kRenderWidth, Qt::SmoothTransformation);
+            }
+            return cover;
+        }
+        return {};
+    }
+
+    // Disk cache path for a document's thumbnail under .mycel/thumbnails. The key embeds the
+    // source's modified time and size so a changed file produces a new thumbnail.
+    // Bump this when the rendering (e.g. resolution) changes, so existing caches are invalidated.
+    static constexpr int kThumbnailVersion = 400;
+
+    QString thumbnailCachePathFor(const QFileInfo& info) const
+    {
+        const QString key = QStringLiteral("%1|%2|%3|%4")
+                                .arg(info.absoluteFilePath())
+                                .arg(info.lastModified().toMSecsSinceEpoch())
+                                .arg(info.size())
+                                .arg(kThumbnailVersion);
+        const QString hash = QString::fromLatin1(
+            QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha1).toHex());
+        return QDir(rootPath_).filePath(QStringLiteral(".mycel/thumbnails/") + hash + QStringLiteral(".png"));
+    }
+
+    QString documentThumbnailMemKey(const QFileInfo& info) const
+    {
+        return QStringLiteral("mycel:thumb:%1:%2:%3:%4")
+            .arg(info.absoluteFilePath())
+            .arg(info.lastModified().toMSecsSinceEpoch())
+            .arg(info.size())
+            .arg(kThumbnailVersion);
+    }
+
+    // Return an already-generated thumbnail from the memory/disk cache, or null. Never renders —
+    // used where we must not pay the cost of generating a preview (e.g. on mere selection).
+    QPixmap cachedDocumentThumbnail(const QFileInfo& info)
+    {
+        const QString memKey = documentThumbnailMemKey(info);
+        QPixmap pixmap;
+        if (QPixmapCache::find(memKey, &pixmap)) {
+            return pixmap;
+        }
+        const QString cachePath = mycelStorageEnabled_ ? thumbnailCachePathFor(info) : QString();
+        if (!cachePath.isEmpty() && QFileInfo::exists(cachePath) && pixmap.load(cachePath) && !pixmap.isNull()) {
+            QPixmapCache::insert(memKey, pixmap);
+            return pixmap;
+        }
+        return {};
+    }
+
+    // First-page thumbnail for a document. Returns the cached image if present, otherwise renders
+    // the first page and caches it on disk (.mycel/thumbnails) and in memory. Call this only when
+    // the preview is actually being opened, not on selection.
+    QPixmap documentThumbnail(const QFileInfo& info)
+    {
+        QPixmap pixmap = cachedDocumentThumbnail(info);
+        if (!pixmap.isNull()) {
+            return pixmap;
+        }
+        const QImage image = renderDocumentFirstPage(info);
+        if (image.isNull()) {
+            return {};
+        }
+        pixmap = QPixmap::fromImage(image);
+        QPixmapCache::insert(documentThumbnailMemKey(info), pixmap);
+        if (mycelStorageEnabled_) {
+            const QString cachePath = thumbnailCachePathFor(info);
+            QDir().mkpath(QFileInfo(cachePath).absolutePath());
+            image.save(cachePath, "PNG");
+        }
+        return pixmap;
+    }
 
     void showSidePreviewText(const QString& text, const QString& status)
     {
@@ -5453,7 +5984,7 @@ public:
         }
 
         QTextStream stream(&file);
-        while (lines.size() < 7 && !stream.atEnd()) {
+        while (lines.size() < 200 && !stream.atEnd()) {
             const QString line = stream.readLine();
             if (!isPreviewMetadataLine(line)) {
                 lines << line;
@@ -5463,6 +5994,28 @@ public:
             lines << QStringLiteral("空のファイル");
         }
         return lines;
+    }
+
+    bool hasSavedPreviewSizePath(const QString& path) const
+    {
+        return previewSizes_.find(path) != previewSizes_.end() ||
+               previewImageScales_.find(path) != previewImageScales_.end();
+    }
+
+    // Drop a file's saved preview size/scale so it reverts to the automatic (default) size.
+    void resetPreviewSizePath(const QString& path)
+    {
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+        const bool hadSize = previewSizes_.erase(path) > 0;
+        const bool hadScale = previewImageScales_.erase(path) > 0;
+        if (!hadSize && !hadScale) {
+            return;
+        }
+        savePreviewFile();
+        rebuild(false);
+        selectNodePath(path, true);
+        recordHistory(QStringLiteral("プレビューサイズ初期化"), {}, {}, historyBefore, historySelection);
     }
 
     QString inlineMarkdownPreviewText(Node* node) const
@@ -9792,7 +10345,7 @@ private:
 
         qreal yCursor = 0.0;
         const QSet<QString> linkedTargets = TreeLayoutEngine::linkedTargetPaths(fileLinks_);
-        TreeLayoutEngine::layoutTree(*root_, 0.0, yCursor, linkedTargets);
+        TreeLayoutEngine::layoutTree(*root_, 0.0, yCursor, linkedTargets, *root_, fileLinks_);
         TreeLayoutEngine::layoutFileLinks(*root_, fileLinks_);
         TreeLayoutEngine::translateTree(*root_, QPointF(140.0, 120.0 - root_->center.y()));
         TreeLayoutEngine::updateSubtreeBounds(*root_, linkedTargets);
@@ -10065,6 +10618,12 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         QAction* folderBelowAction = newFolderMenu->addAction(QStringLiteral("下の階層に作成"));
         QAction* folderSameAction = newFolderMenu->addAction(QStringLiteral("同じ階層に作成"));
         folderSameAction->setEnabled(!isRootFolder);
+        QMenu* sortMenu = menu.addMenu(QStringLiteral("並べ替え"));
+        QAction* sortNameAscAction = sortMenu->addAction(QStringLiteral("名前順（昇順）"));
+        QAction* sortNameDescAction = sortMenu->addAction(QStringLiteral("名前順（降順）"));
+        sortMenu->addSeparator();
+        QAction* sortDateAscAction = sortMenu->addAction(QStringLiteral("日時順（昇順）"));
+        QAction* sortDateDescAction = sortMenu->addAction(QStringLiteral("日時順（降順）"));
         QAction* renameAction = menu.addAction(QStringLiteral("名前変更"));
         renameAction->setEnabled(!isRootFolder);
         QAction* copyAction = menu.addAction(QStringLiteral("コピー"));
@@ -10097,6 +10656,17 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
             QTimer::singleShot(0, window, [window, dir, after] {
                 if (window) {
                     window->createFolderInDirectory(dir, after);
+                }
+            });
+            return;
+        }
+        if (selected == sortNameAscAction || selected == sortNameDescAction ||
+            selected == sortDateAscAction || selected == sortDateDescAction) {
+            const bool byDate = (selected == sortDateAscAction || selected == sortDateDescAction);
+            const bool descending = (selected == sortNameDescAction || selected == sortDateDescAction);
+            QTimer::singleShot(0, window, [window, folderPath, byDate, descending] {
+                if (window) {
+                    window->sortFolderChildren(folderPath, byDate, descending);
                 }
             });
             return;
@@ -10154,6 +10724,8 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
     } else {
         const QString filePath = itemPath;
         QAction* previewAction = menu.addAction(QStringLiteral("プレビューを開く/閉じる"));
+        QAction* resetPreviewSizeAction = menu.addAction(QStringLiteral("プレビューサイズを初期化"));
+        resetPreviewSizeAction->setEnabled(window->hasSavedPreviewSizePath(filePath));
         QAction* unlinkAction = menu.addAction(QStringLiteral("関連を解除"));
         unlinkAction->setEnabled(window->hasIncomingFileLinkPath(filePath));
         QAction* editAction = menu.addAction(QStringLiteral("編集"));
@@ -10223,6 +10795,12 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
             QTimer::singleShot(0, window, [window, filePath] {
                 if (window) {
                     window->toggleInlinePreviewPath(filePath);
+                }
+            });
+        } else if (selected == resetPreviewSizeAction) {
+            QTimer::singleShot(0, window, [window, filePath] {
+                if (window) {
+                    window->resetPreviewSizePath(filePath);
                 }
             });
         } else if (selected == unlinkAction) {
@@ -10304,6 +10882,16 @@ QStringList NodeItem::windowInlinePreviewLines() const
     return window_->inlinePreviewLines(node_);
 }
 
+bool NodeItem::windowIsDocumentThumbnail(const QFileInfo& info) const
+{
+    return window_->isDocumentThumbnailFile(info);
+}
+
+QPixmap NodeItem::windowDocumentThumbnail(const QFileInfo& info) const
+{
+    return window_->documentThumbnail(info);
+}
+
 QString NodeItem::windowMarkdownPreviewText() const
 {
     return window_->inlineMarkdownPreviewText(node_);
@@ -10342,6 +10930,10 @@ void NodeItem::createPreviewWidget()
 
     if (isImagePreviewFile(info)) {
         return;
+    }
+
+    if (window_->isDocumentThumbnailFile(info)) {
+        return;  // first-page thumbnail is painted by paintPreviewFrame, no text widget needed
     }
 
     if (isVideoPreviewFile(info)) {
