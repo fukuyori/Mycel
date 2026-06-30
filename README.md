@@ -4,7 +4,7 @@ Mycel is a C++/Qt mind-map tool that uses the system's folder and file structure
 
 Instead of treating files as a vertical file list, Mycel lays out folders and files as connected nodes on a whiteboard-style canvas. It is designed for exploring project structure, understanding document sets, and organizing information as a map while keeping the underlying data in normal system folders and files.
 
-- Current version: 0.5.2
+- Current version: 0.5.3
 - Release history: [CHANGELOG.md](CHANGELOG.md)
 - Documentation index: [docs/README.ja.md](docs/README.ja.md)
 - Development plan: [docs/development-plan.ja.md](docs/development-plan.ja.md)
@@ -39,6 +39,7 @@ Instead of treating files as a vertical file list, Mycel lays out folders and fi
 - Deleted items are moved to `.mycel/trash` so a delete can be reverted with undo (the trash is cleared on startup and shutdown)
 - Run a Go source file as a script from the context menu (`go run`), with the output shown in a window
 - Pipelines: link an input file to a script (`.py`/`.go`) and run it from the script's context menu to produce an output file (`runner script <input> <output>`); the output is auto-created and linked if absent
+- "Open with…" in the file context menu to pick the application (the native Open-with dialog on Windows)
 
 ### Preview And Editing
 

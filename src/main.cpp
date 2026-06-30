@@ -3684,10 +3684,9 @@ public:
         sidePreviewText_->setLineWrapMode(QTextEdit::WidgetWidth);
         sidePreviewImage_ = new AspectImagePreview(sidePreviewStack_);
         sidePreviewImage_->setAlignment(Qt::AlignCenter);
-#if MYCEL_HAS_WEBENGINE
-        sideHtmlWeb_ = new QWebEngineView(sidePreviewStack_);
-        sideHtmlWeb_->settings()->setAttribute(QWebEngineSettings::JavascriptEnabled, true);
-#endif
+        // sideHtmlWeb_ (QtWebEngine) is created lazily on first HTML preview — see
+        // ensureHtmlPreviewView(). Initializing Chromium at startup is the heaviest part of launch
+        // and is only needed for HTML files, so it is deferred.
         sidePreviewVideo_ = new QVideoWidget(sidePreviewStack_);
         sideEditor_ = new TextEditor(sideEditorPanel_);
         sideEditor_->setReadOnly(true);
@@ -3701,11 +3700,6 @@ public:
             "selection-color: #ffffff; }"));
         sidePreviewStack_->addWidget(sidePreviewText_);
         sidePreviewStack_->addWidget(sidePreviewImage_);
-#if MYCEL_HAS_WEBENGINE
-        if (sideHtmlWeb_) {
-            sidePreviewStack_->addWidget(sideHtmlWeb_);
-        }
-#endif
         if (sidePreviewVideo_) {
             sidePreviewStack_->addWidget(sidePreviewVideo_);
         }
@@ -3713,17 +3707,6 @@ public:
         sidePreviewText_->installEventFilter(this);
         sidePreviewText_->viewport()->installEventFilter(this);
         sidePreviewImage_->installEventFilter(this);
-#if MYCEL_HAS_WEBENGINE
-        if (sideHtmlWeb_) {
-            sideHtmlWeb_->installEventFilter(this);
-            connect(sideHtmlWeb_, &QWebEngineView::loadStarted, this, [this] {
-                recordDebugEvent(QStringLiteral("html preview load started"));
-            });
-            connect(sideHtmlWeb_, &QWebEngineView::loadFinished, this, [this](bool ok) {
-                recordDebugEvent(QStringLiteral("html preview load finished: %1").arg(ok ? QStringLiteral("ok") : QStringLiteral("failed")));
-            });
-        }
-#endif
         if (sidePreviewVideo_) {
             sidePreviewVideo_->installEventFilter(this);
             sidePreviewAudioOutput_ = new QAudioOutput(this);
@@ -4651,6 +4634,35 @@ public:
         QDesktopServices::openUrl(QUrl::fromLocalFile(path));
     }
 
+    // Let the user choose which application opens this file. On Windows this shows the native
+    // "Open with" dialog; on other platforms the user picks an application and Mycel launches it
+    // with the file as an argument.
+    void openWithApplication(const QString& path)
+    {
+        const QFileInfo info(path);
+        if (!info.exists()) {
+            return;
+        }
+        const QString target = info.absoluteFilePath();
+        recordDebugEvent(QStringLiteral("open with: %1").arg(relativeKeyForPath(path)));
+#if defined(Q_OS_WIN)
+        QProcess::startDetached(QStringLiteral("rundll32.exe"),
+                                {QStringLiteral("shell32.dll,OpenAs_RunDLL"), QDir::toNativeSeparators(target)});
+#elif defined(Q_OS_MACOS)
+        const QString app = QFileDialog::getOpenFileName(this, QStringLiteral("アプリケーションを選択"),
+                                                         QStringLiteral("/Applications"),
+                                                         QStringLiteral("アプリケーション (*.app)"));
+        if (!app.isEmpty()) {
+            QProcess::startDetached(QStringLiteral("open"), {QStringLiteral("-a"), app, target});
+        }
+#else
+        const QString app = QFileDialog::getOpenFileName(this, QStringLiteral("アプリケーションを選択"));
+        if (!app.isEmpty()) {
+            QProcess::startDetached(app, {target});
+        }
+#endif
+    }
+
     bool isGoScriptFile(const QString& path) const
     {
         const QFileInfo info(path);
@@ -5127,8 +5139,9 @@ public:
             sideEditorStatusLabel_->setText(QStringLiteral("Markdown プレビュー"));
         } else if (isHtmlPreviewFile(info)) {
 #if MYCEL_HAS_WEBENGINE
-            sideHtmlWeb_->setHtml(text, QUrl::fromLocalFile(info.absolutePath() + QStringLiteral("/")));
-            sidePreviewStack_->setCurrentWidget(sideHtmlWeb_);
+            QWebEngineView* web = ensureHtmlPreviewView();
+            web->setHtml(text, QUrl::fromLocalFile(info.absolutePath() + QStringLiteral("/")));
+            sidePreviewStack_->setCurrentWidget(web);
 #else
             sidePreviewText_->setHtml(text);
             sidePreviewStack_->setCurrentWidget(sidePreviewText_);
@@ -5147,6 +5160,29 @@ public:
         }
         sidePreviewStack_->setCurrentWidget(sidePreviewText_);
     }
+
+#if MYCEL_HAS_WEBENGINE
+    // QtWebEngine (Chromium) is heavy to initialize and spawns helper processes, yet it is only
+    // needed to preview HTML files. Create the view on first use so launch stays fast and light
+    // for the common case where no HTML file is previewed.
+    QWebEngineView* ensureHtmlPreviewView()
+    {
+        if (sideHtmlWeb_) {
+            return sideHtmlWeb_;
+        }
+        sideHtmlWeb_ = new QWebEngineView(sidePreviewStack_);
+        sideHtmlWeb_->settings()->setAttribute(QWebEngineSettings::JavascriptEnabled, true);
+        sidePreviewStack_->addWidget(sideHtmlWeb_);
+        sideHtmlWeb_->installEventFilter(this);
+        connect(sideHtmlWeb_, &QWebEngineView::loadStarted, this,
+                [this] { recordDebugEvent(QStringLiteral("html preview load started")); });
+        connect(sideHtmlWeb_, &QWebEngineView::loadFinished, this, [this](bool ok) {
+            recordDebugEvent(QStringLiteral("html preview load finished: %1")
+                                 .arg(ok ? QStringLiteral("ok") : QStringLiteral("failed")));
+        });
+        return sideHtmlWeb_;
+    }
+#endif
 
     void showSidePreviewText(const QString& text, const QString& status)
     {
@@ -10140,6 +10176,7 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         QAction* clearColorAction = nullptr;
         addColorMenu(menu, colorActions, clearColorAction);
         QAction* openAction = menu.addAction(QStringLiteral("開く"));
+        QAction* openWithAction = menu.addAction(QStringLiteral("別のアプリで開く…"));
         QAction* selected = menu.exec(screenPos);
         const QString parentDir = QFileInfo(filePath).absolutePath();
         if (selected == newFolderSameAction) {
@@ -10235,6 +10272,12 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
             QTimer::singleShot(0, window, [window, filePath] {
                 if (window) {
                     window->openPath(filePath);
+                }
+            });
+        } else if (selected == openWithAction) {
+            QTimer::singleShot(0, window, [window, filePath] {
+                if (window) {
+                    window->openWithApplication(filePath);
                 }
             });
         }
