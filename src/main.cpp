@@ -64,6 +64,7 @@
 #include <QtGui/QWheelEvent>
 #include <QtGui/QAction>
 #include <QtGui/QCloseEvent>
+#include <QtGui/QScreen>
 #include <QtMultimedia/QAudioOutput>
 #include <QtMultimedia/QMediaPlayer>
 #include <QtMultimediaWidgets/QVideoWidget>
@@ -3253,11 +3254,20 @@ private:
 
 class TextFontSettings {
 public:
-    static int configuredPointSize()
+    enum class Surface {
+        Editor,
+        Preview,
+    };
+
+    static int configuredPointSize(Surface surface)
     {
         QSettings settings;
-        return std::clamp(settings.value(QStringLiteral("editor/fontPointSize"), DefaultPointSize).toInt(),
-                          MinPointSize, MaxPointSize);
+        const QString key = surface == Surface::Editor
+                                ? QStringLiteral("editor/fontPointSize")
+                                : QStringLiteral("preview/fontPointSize");
+        return std::clamp(settings.value(key, settings.value(QStringLiteral("editor/fontPointSize"), DefaultPointSize)).toInt(),
+                          MinPointSize,
+                          MaxPointSize);
     }
 
     static QFont editorFont(int pointSize)
@@ -3300,14 +3310,14 @@ public:
         registered.erase(std::remove(registered.begin(), registered.end(), preview), registered.end());
     }
 
-    static void changeConfiguredPointSize(int delta)
+    static void changeConfiguredPointSize(Surface surface, int delta)
     {
-        setConfiguredPointSize(configuredPointSize() + delta);
+        setConfiguredPointSize(surface, configuredPointSize(surface) + delta);
     }
 
-    static void resetConfiguredPointSize()
+    static void resetConfiguredPointSize(Surface surface)
     {
-        setConfiguredPointSize(DefaultPointSize);
+        setConfiguredPointSize(surface, DefaultPointSize);
     }
 
 private:
@@ -3327,36 +3337,42 @@ private:
         return registered;
     }
 
-    static void setConfiguredPointSize(int pointSize)
+    static void setConfiguredPointSize(Surface surface, int pointSize)
     {
         const int clampedPointSize = std::clamp(pointSize, MinPointSize, MaxPointSize);
         QSettings settings;
-        settings.setValue(QStringLiteral("editor/fontPointSize"), clampedPointSize);
+        settings.setValue(surface == Surface::Editor
+                              ? QStringLiteral("editor/fontPointSize")
+                              : QStringLiteral("preview/fontPointSize"),
+                          clampedPointSize);
         settings.sync();
-        for (QPlainTextEdit* editor : editors()) {
-            applyToEditor(editor);
-        }
-        for (QTextEdit* preview : previews()) {
-            applyToPreview(preview);
+        if (surface == Surface::Editor) {
+            for (QPlainTextEdit* editor : editors()) {
+                applyToEditor(editor);
+            }
+        } else {
+            for (QTextEdit* preview : previews()) {
+                applyToPreview(preview);
+            }
         }
     }
 
     static void applyToEditor(QPlainTextEdit* editor)
     {
         if (editor) {
-            editor->setFont(editorFont(configuredPointSize()));
+            editor->setFont(editorFont(configuredPointSize(Surface::Editor)));
         }
     }
 
     static void applyToPreview(QTextEdit* preview)
     {
         if (preview) {
-            preview->setFont(previewFont(configuredPointSize()));
+            preview->setFont(previewFont(configuredPointSize(Surface::Preview)));
         }
     }
 };
 
-bool handleTextZoomKey(QKeyEvent* event)
+bool handleTextZoomKey(QKeyEvent* event, TextFontSettings::Surface surface)
 {
     if (!event || !(event->modifiers() & Qt::ControlModifier)) {
         return false;
@@ -3365,16 +3381,16 @@ bool handleTextZoomKey(QKeyEvent* event)
     switch (event->key()) {
     case Qt::Key_Plus:
     case Qt::Key_Equal:
-        TextFontSettings::changeConfiguredPointSize(1);
+        TextFontSettings::changeConfiguredPointSize(surface, 1);
         event->accept();
         return true;
     case Qt::Key_Minus:
     case Qt::Key_Underscore:
-        TextFontSettings::changeConfiguredPointSize(-1);
+        TextFontSettings::changeConfiguredPointSize(surface, -1);
         event->accept();
         return true;
     case Qt::Key_0:
-        TextFontSettings::resetConfiguredPointSize();
+        TextFontSettings::resetConfiguredPointSize(surface);
         event->accept();
         return true;
     default:
@@ -3382,7 +3398,7 @@ bool handleTextZoomKey(QKeyEvent* event)
     }
 }
 
-bool handleTextZoomGesture(QEvent* event, qreal& accumulatedZoom)
+bool handleTextZoomGesture(QEvent* event, qreal& accumulatedZoom, TextFontSettings::Surface surface)
 {
     if (!event || event->type() != QEvent::NativeGesture) {
         return false;
@@ -3395,7 +3411,7 @@ bool handleTextZoomGesture(QEvent* event, qreal& accumulatedZoom)
 
     accumulatedZoom += gesture->value();
     if (std::abs(accumulatedZoom) >= 0.08) {
-        TextFontSettings::changeConfiguredPointSize(accumulatedZoom > 0.0 ? 1 : -1);
+        TextFontSettings::changeConfiguredPointSize(surface, accumulatedZoom > 0.0 ? 1 : -1);
         accumulatedZoom = 0.0;
     }
     event->accept();
@@ -3417,7 +3433,7 @@ public:
 protected:
     bool event(QEvent* event) override
     {
-        if (handleTextZoomGesture(event, accumulatedZoom_)) {
+        if (handleTextZoomGesture(event, accumulatedZoom_, TextFontSettings::Surface::Preview)) {
             return true;
         }
         return QTextEdit::event(event);
@@ -3425,7 +3441,7 @@ protected:
 
     void keyPressEvent(QKeyEvent* event) override
     {
-        if (handleTextZoomKey(event)) {
+        if (handleTextZoomKey(event, TextFontSettings::Surface::Preview)) {
             return;
         }
         QTextEdit::keyPressEvent(event);
@@ -3438,7 +3454,7 @@ protected:
             const QPoint pixelDelta = event->pixelDelta();
             const int amount = !delta.isNull() ? delta.y() : pixelDelta.y();
             if (amount != 0) {
-                TextFontSettings::changeConfiguredPointSize(amount > 0 ? 1 : -1);
+                TextFontSettings::changeConfiguredPointSize(TextFontSettings::Surface::Preview, amount > 0 ? 1 : -1);
             }
             event->accept();
             return;
@@ -3653,7 +3669,7 @@ public:
 protected:
     bool event(QEvent* event) override
     {
-        if (handleTextZoomGesture(event, accumulatedZoom_)) {
+        if (handleTextZoomGesture(event, accumulatedZoom_, TextFontSettings::Surface::Editor)) {
             return true;
         }
         return QPlainTextEdit::event(event);
@@ -3661,7 +3677,7 @@ protected:
 
     void keyPressEvent(QKeyEvent* event) override
     {
-        if (handleTextZoomKey(event)) {
+        if (handleTextZoomKey(event, TextFontSettings::Surface::Editor)) {
             return;
         }
         QPlainTextEdit::keyPressEvent(event);
@@ -3674,7 +3690,7 @@ protected:
             const QPoint pixelDelta = event->pixelDelta();
             const int amount = !delta.isNull() ? delta.y() : pixelDelta.y();
             if (amount != 0) {
-                TextFontSettings::changeConfiguredPointSize(amount > 0 ? 1 : -1);
+                TextFontSettings::changeConfiguredPointSize(TextFontSettings::Surface::Editor, amount > 0 ? 1 : -1);
             }
             event->accept();
             return;
@@ -3739,6 +3755,11 @@ public:
     }
 
 protected:
+    void reject() override
+    {
+        close();
+    }
+
     void closeEvent(QCloseEvent* event) override
     {
         if (!modified_) {
@@ -4800,22 +4821,7 @@ public:
             return false;
         }
 
-        const bool previousSuppressSelectionUpdate = suppressSideEditorSelectionUpdate_;
-        suppressSideEditorSelectionUpdate_ = true;
-        selectNodePath(path);
-        suppressSideEditorSelectionUpdate_ = previousSuppressSelectionUpdate;
-
-        if (editorPaneAction_ && !editorPaneAction_->isChecked()) {
-            editorPaneAction_->setChecked(true);
-        } else {
-            sideEditorPanel_->setVisible(true);
-        }
-
-        loadSideEditorFile(path);
-        sideEditorStatusLabel_->setText(QStringLiteral("編集中"));
-        sideEditor_->setFocus(Qt::MouseFocusReason);
-        sideEditor_->moveCursor(QTextCursor::End);
-        return true;
+        return openCenteredTextEditor(path);
     }
 
     void focusBoard()
@@ -5761,11 +5767,7 @@ public:
             return;
         }
 
-        TextEditorDialog dialog(node->path, this);
-        dialog.exec();
-        if (dialog.wasSaved()) {
-            rebuild(false);
-        }
+        openCenteredTextEditor(node->path);
     }
 
     void editTextFilePath(const QString& path)
@@ -5780,11 +5782,65 @@ public:
             return;
         }
 
+        openCenteredTextEditor(path);
+    }
+
+    bool openCenteredTextEditor(const QString& path)
+    {
+        if (!canEditTextFilePath(path)) {
+            return false;
+        }
+        if (!saveSideEditorNow()) {
+            return false;
+        }
+
+        const bool previousSuppressSelectionUpdate = suppressSideEditorSelectionUpdate_;
+        suppressSideEditorSelectionUpdate_ = true;
+        selectNodePath(path);
+        suppressSideEditorSelectionUpdate_ = previousSuppressSelectionUpdate;
+
+        sideEditorEditing_ = false;
+        if (sidePreviewStack_ &&
+            (sidePreviewStack_->currentWidget() == sideEditor_ ||
+             (sideEditorPanel_ && sideEditorPanel_->isVisible()))) {
+            loadSidePreviewFile(path);
+        }
+
         TextEditorDialog dialog(path, this);
+        centerTextEditorDialog(&dialog);
         dialog.exec();
         if (dialog.wasSaved()) {
             rebuild(false);
+            selectNodePath(path);
+            if (sideEditorPanel_ && sideEditorPanel_->isVisible()) {
+                loadSidePreviewFile(path);
+            }
         }
+        focusBoard();
+        return true;
+    }
+
+    void centerTextEditorDialog(QDialog* dialog) const
+    {
+        if (!dialog) {
+            return;
+        }
+
+        const QRect anchorRect = view_ && view_->viewport()
+                                     ? QRect(view_->viewport()->mapToGlobal(QPoint(0, 0)), view_->viewport()->size())
+                                     : QRect(mapToGlobal(QPoint(0, 0)), size());
+        const QSize dialogSize = dialog->size();
+        QPoint topLeft(anchorRect.center().x() - dialogSize.width() / 2,
+                       anchorRect.center().y() - dialogSize.height() / 2);
+
+        const QRect screenRect = screen() ? screen()->availableGeometry() : QRect();
+        if (!screenRect.isNull()) {
+            const int maxX = std::max(screenRect.left(), screenRect.right() - dialogSize.width() + 1);
+            const int maxY = std::max(screenRect.top(), screenRect.bottom() - dialogSize.height() + 1);
+            topLeft.setX(std::clamp(topLeft.x(), screenRect.left(), maxX));
+            topLeft.setY(std::clamp(topLeft.y(), screenRect.top(), maxY));
+        }
+        dialog->move(topLeft);
     }
 
     void updateSideEditorForSelection()
@@ -6791,8 +6847,8 @@ public:
                 "Ctrl + E : プレビューペインの表示/非表示\n"
                 "E : 選択ファイルをプレーンテキストで編集\n"
                 "O : 選択項目を OS の既定アプリで開く\n"
-                "編集モード内 Ctrl + S : 保存し、1行目の Subject: に合わせてファイル名を変更して Subject 行を削除\n"
-                "編集モード内 Esc : 保存してプレビューへ戻る\n"
+                "テキスト編集画面内 Ctrl + S : 保存\n"
+                "テキスト編集画面内 Esc : 未保存時に確認して閉じる\n"
                 "Tab : 同じ階層の次の表示項目へ移動\n"
                 "Shift + Tab : 同じ階層の前の表示項目へ移動\n"
                 "↑ / ↓ : 同じフォルダ内の前/次の項目へ移動\n"
