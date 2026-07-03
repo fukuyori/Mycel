@@ -4,7 +4,7 @@ Mycel is a C++/Qt mind-map tool that uses the system's folder and file structure
 
 Instead of treating files as a vertical file list, Mycel lays out folders and files as connected nodes on a whiteboard-style canvas. It is designed for exploring project structure, understanding document sets, and organizing information as a map while keeping the underlying data in normal system folders and files.
 
-- Current version: 0.6.1
+- Current version: 0.6.2
 - Release history: [CHANGELOG.md](CHANGELOG.md)
 - Documentation index: [docs/README.ja.md](docs/README.ja.md)
 - Development plan: [docs/development-plan.ja.md](docs/development-plan.ja.md)
@@ -19,7 +19,7 @@ Instead of treating files as a vertical file list, Mycel lays out folders and fi
 - Light and dark themes
 - Folder collapse and expand
 - Mixed file/folder ordering
-- File-to-file linking by dropping a file on the right edge of another file
+- File-to-file linking by dropping a file on the right edge of another file; a folder can also be linked to the right of a file (its subtree expands there)
 - Linked target files placed to the right of their source file
 - Type-aware file icons with per-type badges and accent colors (PY, GO, MD, CSV, PDF, images, audio, video, and more)
 - Multi-selection, range selection, and range zoom

@@ -1175,9 +1175,34 @@ struct TreeLayoutEngine {
         return QPointF(x, node.center.y());
     }
 
+    // Vertical room a link target needs. A folder target expands its own subtree to the right, so it
+    // needs the whole subtree height (mirrors layoutTree's yCursor advance); a file needs one row.
+    static qreal linkedTargetSpan(const Node& node, const QSet<QString>& linkedTargets,
+                                  Node& root, const std::vector<FileLink>& links)
+    {
+        if (!node.isDir) {
+            return nodeVerticalSpan(node);
+        }
+        const auto isTreeChild = [&linkedTargets](const std::unique_ptr<Node>& child) {
+            return !linkedTargets.contains(child->path);
+        };
+        const bool hasTreeChildren = std::any_of(node.children.begin(), node.children.end(), isTreeChild);
+        if (!hasTreeChildren) {
+            return nodeRowSpan(node, root, links);
+        }
+        qreal total = 0.0;
+        for (const auto& child : node.children) {
+            if (!linkedTargets.contains(child->path)) {
+                total += linkedTargetSpan(*child, linkedTargets, root, links);
+            }
+        }
+        return total;
+    }
+
     // Place each file-link target to the right of its link source. Multiple targets of the
     // same source are stacked and centered on the source's link anchor (the preview's right
     // edge when a preview is open), so they fan up and down from there. Runs after layoutTree.
+    // A folder target lays out its whole subtree at the link position (like a mini-tree).
     static void layoutFileLinks(Node& root, const std::vector<FileLink>& links)
     {
         // Collect each source's targets, preserving link order.
@@ -1185,7 +1210,7 @@ struct TreeLayoutEngine {
         for (const FileLink& link : links) {
             Node* from = findNodeByPath(root, link.from);
             Node* to = findNodeByPath(root, link.to);
-            if (!from || !to || from->isDir || to->isDir || from == to) {
+            if (!from || !to || from->isDir || from == to) {  // source must be a file; target may be a folder
                 continue;
             }
             targetsBySource[from->path].push_back(to);
@@ -1198,9 +1223,13 @@ struct TreeLayoutEngine {
             if (!from) {
                 continue;
             }
+            std::vector<qreal> spans;
+            spans.reserve(targets.size());
             qreal totalSpan = 0.0;
             for (const Node* to : targets) {
-                totalSpan += nodeVerticalSpan(*to);
+                const qreal span = linkedTargetSpan(*to, linkedTargets, root, links);
+                spans.push_back(span);
+                totalSpan += span;
             }
             const QPointF anchor = linkSourceAnchor(*from);
             const qreal stackTop = anchor.y() - totalSpan / 2.0;
@@ -1208,10 +1237,14 @@ struct TreeLayoutEngine {
 
             // Push the target column clear of any tree node whose frame (card or open
             // preview) overlaps the rows the stack will occupy, so targets don't land on the
-            // preview of the node above or below the source.
+            // preview of the node above or below the source. Skip linked targets and their
+            // subtrees (they are positioned here, not yet laid out in the tree).
             qreal columnLeft = anchor.x();
             std::function<void(const Node&)> clearOverlaps = [&](const Node& node) {
-                if (&node != from && !linkedTargets.contains(node.path)) {
+                if (linkedTargets.contains(node.path)) {
+                    return;
+                }
+                if (&node != from) {
                     const qreal top = node.center.y() - node.size.height() / 2.0;
                     const qreal bottom = top + (node.previewOpen ? 34.0 + node.previewSize.height()
                                                                  : node.size.height());
@@ -1227,15 +1260,25 @@ struct TreeLayoutEngine {
 
             const qreal linkedLeftX = columnLeft + ParentChildGap;
             qreal slotTop = stackTop;  // center the stack on the source anchor
-            for (Node* to : targets) {
-                const qreal span = nodeVerticalSpan(*to);
-                // A node's visible content (header + open preview) hangs DOWN from the card top, so
-                // center that whole extent in the slot — otherwise a tall preview spills over the
-                // target below it.
-                const qreal visualHeight = to->previewOpen ? 34.0 + to->previewSize.height()
-                                                           : to->size.height();
-                const qreal centerY = slotTop + (span - visualHeight) / 2.0 + to->size.height() / 2.0;
-                to->center = QPointF(linkedLeftX + to->size.width() / 2.0, centerY);
+            for (std::size_t i = 0; i < targets.size(); ++i) {
+                Node* to = targets[i];
+                const qreal span = spans[i];
+                if (to->isDir) {
+                    // Lay out the folder subtree at a temporary origin, then translate so the folder
+                    // node lands centered in its slot at the link column.
+                    qreal localCursor = 0.0;
+                    layoutTree(*to, 0.0, localCursor, linkedTargets, root, links);
+                    const qreal targetCenterY = slotTop + span / 2.0;
+                    translateTree(*to, QPointF(linkedLeftX, targetCenterY - to->center.y()));
+                } else {
+                    // A node's visible content (header + open preview) hangs DOWN from the card top,
+                    // so center that whole extent in the slot — otherwise a tall preview spills over
+                    // the target below it.
+                    const qreal visualHeight = to->previewOpen ? 34.0 + to->previewSize.height()
+                                                               : to->size.height();
+                    const qreal centerY = slotTop + (span - visualHeight) / 2.0 + to->size.height() / 2.0;
+                    to->center = QPointF(linkedLeftX + to->size.width() / 2.0, centerY);
+                }
                 slotTop += span;
             }
         }
@@ -2508,7 +2551,7 @@ private:
         for (const FileLink& link : *links_) {
             const Node* from = nodeByPath(link.from);
             const Node* to = nodeByPath(link.to);
-            if (!from || !to || from->isDir || to->isDir) {
+            if (!from || !to || from->isDir) {  // source must be a file; target may be a folder
                 continue;
             }
 
@@ -2528,11 +2571,11 @@ private:
 
     bool hasIncomingFileLink(const Node& node) const
     {
-        if (!links_ || node.isDir) {
+        if (!links_) {
             return false;
         }
         for (const FileLink& link : *links_) {
-            if (link.to == node.path) {
+            if (link.to == node.path) {  // a linked folder connects via the link line, not its parent edge
                 return true;
             }
         }
@@ -3857,20 +3900,21 @@ public:
         return best;
     }
 
-    // The file node the dragged file would be linked to, or nullptr. Links require
-    // metadata storage, a single non-directory source, and a non-directory target.
+    // The file node the dragged item would be linked beside, or nullptr. Links require metadata
+    // storage, a single dragged source (file or folder), and a non-directory link target (the file
+    // whose right edge is hovered). The dragged item is placed to the right of that file.
     static NodeItem* linkTarget(const QGraphicsScene& scene, const NodeItem* source,
                                 bool multiDrag, bool mycelStorageEnabled, const QPointF& scenePos)
     {
         constexpr qreal LinkDropIntentMargin = 72.0;
-        if (!mycelStorageEnabled || !source || !source->node() || source->node()->isDir || multiDrag) {
+        if (!mycelStorageEnabled || !source || !source->node() || multiDrag) {
             return nullptr;
         }
 
         for (QGraphicsItem* item : scene.items()) {
             auto* candidate = dynamic_cast<NodeItem*>(item);
             if (!candidate || candidate == source || !candidate->node() || candidate->node()->isDir) {
-                continue;
+                continue;  // the link anchor (right-edge target) is always a file
             }
             if (candidate->containsLinkDropScenePoint(scenePos, LinkDropIntentMargin)) {
                 return candidate;
@@ -7450,7 +7494,7 @@ public:
                                      QStringLiteral(".mycel なしの制限モードでは関連付けできません。"));
             return;
         }
-        if (!from || !to || from->isDir || to->isDir || from->path == to->path) {
+        if (!from || !to || from->isDir || from->path == to->path) {  // link source must be a file; target may be a folder
             return;
         }
 
@@ -7504,7 +7548,7 @@ public:
 
     void removeIncomingFileLinks(Node* node)
     {
-        if (!mycelStorageEnabled_ || !node || node->isDir) {
+        if (!mycelStorageEnabled_ || !node) {  // a linked folder can be unlinked too
             return;
         }
 
@@ -11075,6 +11119,8 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         pasteAction->setEnabled(window->canPasteClipboardToFolderPath(folderPath));
         QAction* deleteAction = menu.addAction(QStringLiteral("削除"));
         deleteAction->setEnabled(!isRootFolder);
+        QAction* unlinkAction = menu.addAction(QStringLiteral("関連を解除"));
+        unlinkAction->setEnabled(window->hasIncomingFileLinkPath(folderPath));
         menu.addSeparator();
         // Group 4: organize / appearance
         QMenu* sortMenu = menu.addMenu(QStringLiteral("並べ替え"));
@@ -11161,6 +11207,12 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
             QTimer::singleShot(0, window, [window, folderPath] {
                 if (window) {
                     window->deleteFolderPath(folderPath);
+                }
+            });
+        } else if (selected == unlinkAction) {
+            QTimer::singleShot(0, window, [window, folderPath] {
+                if (window) {
+                    window->removeIncomingFileLinksPath(folderPath);
                 }
             });
         } else if (selected && selected->data().canConvert<QColor>()) {
