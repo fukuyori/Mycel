@@ -12040,7 +12040,10 @@ void mycelMessageHandler(QtMsgType type, const QMessageLogContext& context, cons
                     QFile::remove(logFile.fileName() + QStringLiteral(".1"));
                     QFile::rename(logFile.fileName(), logFile.fileName() + QStringLiteral(".1"));
                 }
-                logFile.open(QIODevice::WriteOnly | QIODevice::Append);
+                if (!logFile.open(QIODevice::WriteOnly | QIODevice::Append)) {
+                    // Logging is best-effort; if the file can't be opened we
+                    // simply skip file logging (isOpen() check below guards writes).
+                }
             }
         }
         if (logFile.isOpen()) {

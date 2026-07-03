@@ -9,6 +9,9 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
+# CorePrivate ヘッダの使用に伴う Qt 純正の警告を抑制（内部ヘッダ利用は意図的）
+set(QT_NO_PRIVATE_MODULE_WARNING ON)
+
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network Multimedia MultimediaWidgets CorePrivate)
 find_package(Qt6Quick QUIET CONFIG)
 find_package(Qt6QuickWidgets QUIET CONFIG)
