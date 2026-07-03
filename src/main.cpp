@@ -21,6 +21,8 @@
 #include <QtCore/QPointer>
 #include <QtCore/QRectF>
 #include <QtCore/QRegularExpression>
+#include <QtCore/QBuffer>
+#include <QtCore/QMutex>
 #include <QtCore/QSaveFile>
 #include <QtCore/QSettings>
 #include <QtCore/QThread>
@@ -683,9 +685,19 @@ QImage epubCoverImage(const QFileInfo& info)
     if (imageData.isEmpty()) {
         return {};
     }
-    QImage image;
-    image.loadFromData(imageData);
-    return image;
+    // Check the pixel count before decoding: a crafted EPUB can carry a tiny compressed cover that
+    // expands to a huge bitmap (decompression bomb).
+    QBuffer buffer;
+    buffer.setData(imageData);
+    buffer.open(QIODevice::ReadOnly);
+    QImageReader reader(&buffer);
+    reader.setAutoTransform(true);
+    const QSize coverSize = reader.size();
+    if (coverSize.isValid() && !coverSize.isEmpty() &&
+        static_cast<qint64>(coverSize.width()) * coverSize.height() > 120LL * 1000 * 1000) {
+        return {};
+    }
+    return reader.read();
 }
 
 // Cover image pixel size, cached so the EPUB is not re-extracted for every layout pass.
@@ -1393,7 +1405,10 @@ QString youtubeVideoIdFromUrl(const QUrl& url)
     if (videoId.contains(QLatin1Char('?')) || videoId.contains(QLatin1Char('&'))) {
         videoId = videoId.left(videoId.indexOf(QRegularExpression(QStringLiteral("[?&]"))));
     }
-    if (videoId.size() < 6 || videoId.size() > 32) {
+    // Strict charset: the id is spliced into URLs (watch page, img.youtube.com thumbnail path),
+    // so reject anything beyond the YouTube id alphabet to rule out path manipulation.
+    static const QRegularExpression idPattern(QStringLiteral("^[A-Za-z0-9_-]{6,32}$"));
+    if (!idPattern.match(videoId).hasMatch()) {
         return {};
     }
     return videoId;
@@ -2000,6 +2015,28 @@ public:
     Node* node() const { return node_; }
     QString path() const { return node_ ? node_->path : QString(); }
     QPointF layoutCenter() const { return layoutCenter_; }
+
+    // In-place refresh after a metadata-only relayout: move to the recomputed center, create or
+    // drop the inline preview widget to match previewOpen, and repaint. Reusing the live item
+    // (instead of recreating the scene) keeps the selection and avoids widget churn.
+    void syncFromNode()
+    {
+        prepareGeometryChange();
+        layoutCenter_ = node_->center;
+        setPos(node_->center);
+        setOpacity(1.0);           // clear any leftover drag visuals
+        setZValue(NodeLayerZ);
+        const bool wantsPreviewWidget = node_->previewOpen && !node_->isDir;
+        if (!wantsPreviewWidget && previewProxy_) {
+            delete previewProxy_;
+            previewProxy_ = nullptr;
+        } else if (wantsPreviewWidget && !previewProxy_) {
+            createPreviewWidget();
+        } else if (previewProxy_) {
+            syncPreviewWidgetGeometry();
+        }
+        update();
+    }
     void setInternalDropHover(bool hover)
     {
         if (internalDropHover_ == hover) {
@@ -2526,6 +2563,15 @@ public:
         setZValue(ConnectionLayerZ);
         setAcceptedMouseButtons(Qt::NoButton);
         rebuildNodeIndex();
+    }
+
+    // After a metadata-only relayout the node positions/bounds changed in place: refresh the
+    // cached bounds and the path index without recreating the layer.
+    void refreshGeometry()
+    {
+        prepareGeometryChange();
+        rebuildNodeIndex();
+        update();
     }
 
     QRectF boundingRect() const override
@@ -4537,6 +4583,7 @@ public:
             view_->setScene(nullptr);
         }
         nodeItemsByPath_.clear();
+        connectionLayer_ = nullptr;
         scene_.clear();
         if (mycelStorageEnabled_) {
             cleanHistoryTrash();  // session over: undo history is gone, so its trash can go too
@@ -5160,6 +5207,11 @@ public:
         if (QDir::cleanPath(normalized) == QDir::cleanPath(rootPath_)) {
             return;  // already open
         }
+        // Persist the outgoing root's canvas state now (parent⇄child navigation included), and
+        // cancel any re-centering still pending from this root's own restore so it can neither
+        // suppress this save nor recenter the next root's view.
+        ++viewRestoreGeneration_;
+        pendingViewRestoreReapplies_ = 0;
         saveViewState();
         saveCollapsedFile();
         rootPath_ = normalized;
@@ -10684,6 +10736,14 @@ private:
         scrollObject.insert(QStringLiteral("horizontal"), view_->horizontalScrollBar()->value());
         scrollObject.insert(QStringLiteral("vertical"), view_->verticalScrollBar()->value());
 
+        // The viewport centre in scene coordinates. Unlike raw scrollbar values this is
+        // independent of the viewport size, so restoring it works even though the window's
+        // final size (e.g. maximized) is only reached after the restore runs.
+        const QPointF center = view_->mapToScene(view_->viewport()->rect().center());
+        QJsonObject centerObject;
+        centerObject.insert(QStringLiteral("x"), center.x());
+        centerObject.insert(QStringLiteral("y"), center.y());
+
         const QRect geometry = (isMaximized() || isFullScreen()) ? normalGeometry() : this->geometry();
         QJsonObject geometryObject;
         geometryObject.insert(QStringLiteral("x"), geometry.x());
@@ -10700,6 +10760,7 @@ private:
         rootObject.insert(QStringLiteral("version"), 1);
         rootObject.insert(QStringLiteral("transform"), transformObject);
         rootObject.insert(QStringLiteral("scroll"), scrollObject);
+        rootObject.insert(QStringLiteral("center"), centerObject);
         rootObject.insert(QStringLiteral("window"), windowObject);
         return rootObject;
     }
@@ -10722,10 +10783,17 @@ private:
         return doc.object();
     }
 
-    bool readViewStateObject(const QJsonObject& rootObject, QTransform& transform, int& horizontal, int& vertical) const
+    bool readViewStateObject(const QJsonObject& rootObject, QTransform& transform, int& horizontal, int& vertical,
+                             QPointF& center, bool& hasCenter) const
     {
         const QJsonObject transformObject = rootObject.value(QStringLiteral("transform")).toObject();
         const QJsonObject scrollObject = rootObject.value(QStringLiteral("scroll")).toObject();
+        const QJsonObject centerObject = rootObject.value(QStringLiteral("center")).toObject();
+        hasCenter = centerObject.contains(QStringLiteral("x")) && centerObject.contains(QStringLiteral("y"));
+        if (hasCenter) {
+            center = QPointF(centerObject.value(QStringLiteral("x")).toDouble(0.0),
+                             centerObject.value(QStringLiteral("y")).toDouble(0.0));
+        }
 
         const qreal m11 = transformObject.value(QStringLiteral("m11")).toDouble(0.0);
         const qreal m12 = transformObject.value(QStringLiteral("m12")).toDouble(0.0);
@@ -10746,14 +10814,15 @@ private:
         return true;
     }
 
-    bool loadViewState(QTransform& transform, int& horizontal, int& vertical) const
+    bool loadViewState(QTransform& transform, int& horizontal, int& vertical,
+                       QPointF& center, bool& hasCenter) const
     {
         const std::optional<QJsonObject> rootObject = loadViewStateObject();
         if (!rootObject) {
             return false;
         }
 
-        return readViewStateObject(*rootObject, transform, horizontal, vertical);
+        return readViewStateObject(*rootObject, transform, horizontal, vertical, center, hasCenter);
     }
 
     void saveViewState()
@@ -10800,8 +10869,9 @@ private:
 
     void scheduleViewStateSave()
     {
-        if (inlineRenameActivitySuspended_ || restoringViewState_ || !mycelStorageEnabled_) {
-            return;
+        if (inlineRenameActivitySuspended_ || restoringViewState_ || pendingViewRestoreReapplies_ > 0 ||
+            !mycelStorageEnabled_) {
+            return;  // ignore scroll churn while the restored view is still settling
         }
         viewStateSaveTimer_.start();
     }
@@ -10821,6 +10891,7 @@ private:
             view_->cancelTransientNodeInteraction();
         }
         nodeItemsByPath_.clear();  // items are about to be destroyed with the scene
+        connectionLayer_ = nullptr;
         scene_.clear();
         if (!root_) {
             suppressSideEditorSelectionUpdate_ = previousSuppressSelectionUpdate;
@@ -10836,7 +10907,8 @@ private:
         TreeLayoutEngine::translateTree(*root_, QPointF(140.0, 120.0 - root_->center.y()));
         TreeLayoutEngine::updateSubtreeBounds(*root_, linkedTargets);
 
-        scene_.addItem(new ConnectionLayerItem(root_.get(), &fileLinks_));
+        connectionLayer_ = new ConnectionLayerItem(root_.get(), &fileLinks_);
+        scene_.addItem(connectionLayer_);
         visitNodes(*root_, [this](Node& node) {
             auto* item = new NodeItem(&node, this);
             scene_.addItem(item);
@@ -10864,6 +10936,7 @@ private:
     // so the caller can extend the scene bounds to include them.
     QRectF addParentRootItems()
     {
+        parentRootItemsBounds_ = QRectF();
         const QStringList parents = parentRootChain();  // [outermost ... immediate parent]
         if (parents.isEmpty() || !root_) {
             return {};
@@ -10891,6 +10964,7 @@ private:
 
             connectTo = QPointF(centerX - halfW, centerY);
         }
+        parentRootItemsBounds_ = combined;
         return combined;
     }
 
@@ -10919,7 +10993,10 @@ private:
 
     // Metadata-only re-render: preview open/close/size and link changes do not alter the file
     // structure, so re-layout the cached tree instead of re-stat'ing the whole directory tree
-    // from disk (rebuild). Big win on large or cloud-synced roots.
+    // from disk (rebuild). The layout is recomputed on the same Node objects and the existing
+    // NodeItems are moved in place — no scene rebuild, so the selection and inline preview
+    // widgets of untouched nodes survive. Falls back to a full re-render if any node has no
+    // live item.
     void relayout()
     {
         if (!root_) {
@@ -10929,7 +11006,33 @@ private:
         saveSideEditorNow();
         finishInlineRename(false);
         refreshCachedNodeMetadata(*root_);
-        renderCurrentTree(false);
+
+        assignTopLevelBranches(*root_);
+        qreal yCursor = 0.0;
+        const QSet<QString> linkedTargets = TreeLayoutEngine::linkedTargetPaths(fileLinks_);
+        TreeLayoutEngine::layoutTree(*root_, 0.0, yCursor, linkedTargets, *root_, fileLinks_);
+        TreeLayoutEngine::layoutFileLinks(*root_, fileLinks_);
+        TreeLayoutEngine::translateTree(*root_, QPointF(140.0, 120.0 - root_->center.y()));
+        TreeLayoutEngine::updateSubtreeBounds(*root_, linkedTargets);
+
+        bool allItemsFound = true;
+        visitNodes(*root_, [&](Node& node) {
+            if (NodeItem* item = nodeItemsByPath_.value(node.path, nullptr)) {
+                item->syncFromNode();
+            } else {
+                allItemsFound = false;
+            }
+        });
+        if (!allItemsFound || !connectionLayer_) {
+            renderCurrentTree(false);
+            return;
+        }
+        connectionLayer_->refreshGeometry();
+
+        const QRectF bounds = root_->subtreeBounds.united(parentRootItemsBounds_);
+        scene_.setSceneRect(bounds.adjusted(-FreeCanvasMargin, -FreeCanvasMargin,
+                                            FreeCanvasMargin, FreeCanvasMargin));
+        scene_.update();
     }
 
     void scheduleRestoreViewStateOrFit()
@@ -10942,15 +11045,45 @@ private:
         QTransform transform;
         int horizontal = 0;
         int vertical = 0;
-        if (!loadViewState(transform, horizontal, vertical)) {
+        QPointF center;
+        bool hasCenter = false;
+        if (!loadViewState(transform, horizontal, vertical, center, hasCenter)) {
             fitToMap();
             return;
         }
 
         restoringViewState_ = true;
         view_->setTransform(transform);
-        view_->horizontalScrollBar()->setValue(horizontal);
-        view_->verticalScrollBar()->setValue(vertical);
+        if (hasCenter) {
+            view_->centerOn(center);
+        } else {
+            // Legacy view.json without a scene-space centre: raw scrollbar values.
+            view_->horizontalScrollBar()->setValue(horizontal);
+            view_->verticalScrollBar()->setValue(vertical);
+        }
+        restoringViewState_ = false;
+
+        // The window may still be settling (show/maximize resizes the viewport after this runs,
+        // shifting the visible area). Re-center once the geometry has settled, and keep the
+        // view-state saves suppressed until then so a drifted position is never written back.
+        // The generation guard voids these re-applies if the root switches before they fire.
+        if (hasCenter) {
+            pendingViewRestoreCenter_ = center;
+            pendingViewRestoreReapplies_ = 2;
+            const int generation = ++viewRestoreGeneration_;
+            QTimer::singleShot(150, this, [this, generation] { reapplyRestoredViewCenter(generation); });
+            QTimer::singleShot(450, this, [this, generation] { reapplyRestoredViewCenter(generation); });
+        }
+    }
+
+    void reapplyRestoredViewCenter(int generation)
+    {
+        if (generation != viewRestoreGeneration_ || pendingViewRestoreReapplies_ <= 0 || !view_) {
+            return;  // a newer restore or a root switch superseded this re-apply
+        }
+        --pendingViewRestoreReapplies_;
+        restoringViewState_ = true;
+        view_->centerOn(pendingViewRestoreCenter_);
         restoringViewState_ = false;
     }
 
@@ -11062,6 +11195,10 @@ private:
     // Path → live NodeItem index; rebuilt whenever the scene is re-rendered. Keeps hot lookups
     // (drag/resize/selection by path) O(1) instead of scanning every scene item.
     QHash<QString, NodeItem*> nodeItemsByPath_;
+    // The scene's connector layer and the parent-root items' combined bounds, kept so a
+    // metadata-only relayout can refresh geometry in place without recreating the scene.
+    ConnectionLayerItem* connectionLayer_ = nullptr;
+    QRectF parentRootItemsBounds_;
     std::unique_ptr<HistoryEntry> historyGroup_;
     bool applyingHistory_ = false;
     int historyTrashCounter_ = 0;
@@ -11098,6 +11235,12 @@ private:
     bool sideEditorDirty_ = false;
     bool sideEditorEditing_ = false;
     bool restoringViewState_ = false;
+    // Startup/root-switch view restore: the scene-space centre to re-apply once the window
+    // geometry settles, and how many re-applies remain (saves are suppressed meanwhile).
+    // The generation counter voids scheduled re-applies superseded by a newer restore/switch.
+    QPointF pendingViewRestoreCenter_;
+    int pendingViewRestoreReapplies_ = 0;
+    int viewRestoreGeneration_ = 0;
     bool suppressSideEditorSelectionUpdate_ = false;
     std::unique_ptr<Node> root_;
 };
@@ -11878,6 +12021,44 @@ void NodeItem::activate()
     });
 }
 
+// Persist warnings and worse to a small rotating log so crashes and Qt runtime problems can be
+// diagnosed after the fact (%LOCALAPPDATA%/Mycel/mycel.log, rotated once past 512KB).
+QtMessageHandler g_previousMessageHandler = nullptr;
+
+void mycelMessageHandler(QtMsgType type, const QMessageLogContext& context, const QString& message)
+{
+    if (type != QtDebugMsg && type != QtInfoMsg) {
+        static QMutex mutex;
+        QMutexLocker locker(&mutex);
+        static QFile logFile;
+        if (!logFile.isOpen()) {
+            const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+            if (!dir.isEmpty()) {
+                QDir().mkpath(dir);
+                logFile.setFileName(dir + QStringLiteral("/mycel.log"));
+                if (QFileInfo(logFile.fileName()).size() > 512 * 1024) {
+                    QFile::remove(logFile.fileName() + QStringLiteral(".1"));
+                    QFile::rename(logFile.fileName(), logFile.fileName() + QStringLiteral(".1"));
+                }
+                logFile.open(QIODevice::WriteOnly | QIODevice::Append);
+            }
+        }
+        if (logFile.isOpen()) {
+            const char* level = type == QtWarningMsg    ? "WARN"
+                                : type == QtCriticalMsg ? "CRITICAL"
+                                                        : "FATAL";
+            logFile.write(QStringLiteral("%1 [%2] %3\n")
+                              .arg(QDateTime::currentDateTime().toString(Qt::ISODateWithMs),
+                                   QLatin1String(level), message)
+                              .toUtf8());
+            logFile.flush();  // a fatal message must reach disk before the abort
+        }
+    }
+    if (g_previousMessageHandler) {
+        g_previousMessageHandler(type, context, message);
+    }
+}
+
 }  // namespace
 
 int main(int argc, char* argv[])
@@ -11909,6 +12090,7 @@ int main(int argc, char* argv[])
     QApplication app(argc, argv);
     app.setOrganizationName(QStringLiteral("Mycel"));
     app.setApplicationName(QStringLiteral("Mycel"));
+    g_previousMessageHandler = qInstallMessageHandler(mycelMessageHandler);
     app.setWindowIcon(QIcon(":/icons/mycel.png"));
     if (!resolveStartupStorageMode(options)) {
         return 0;
