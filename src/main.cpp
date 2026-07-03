@@ -21,7 +21,9 @@
 #include <QtCore/QPointer>
 #include <QtCore/QRectF>
 #include <QtCore/QRegularExpression>
+#include <QtCore/QSaveFile>
 #include <QtCore/QSettings>
+#include <QtCore/QThread>
 #include <QtCore/QSet>
 #include <QtCore/QSizeF>
 #include <QtCore/QString>
@@ -867,6 +869,37 @@ QSizeF automaticPreviewSize(const QFileInfo& info)
 bool directoryHasMycel(const QString& path)
 {
     return QFileInfo(QDir(path).filePath(QStringLiteral(".mycel"))).isDir();
+}
+
+// Atomically write a JSON document (temp file + rename via QSaveFile) so a crash or power loss
+// mid-write can never corrupt existing .mycel metadata — important on cloud-synced folders.
+// On Windows the final rename fails while a sync client (Dropbox etc.) briefly holds the target
+// open, so retry a few times and, as a last resort, fall back to a direct write: that save loses
+// atomicity but the data is never dropped.
+bool writeJsonFileAtomic(const QString& path, const QJsonObject& object)
+{
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    const QByteArray payload = QJsonDocument(object).toJson(QJsonDocument::Indented);
+
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (attempt > 0) {
+            QThread::msleep(30);
+        }
+        QSaveFile file(path);
+        if (!file.open(QIODevice::WriteOnly)) {
+            continue;
+        }
+        file.write(payload);
+        if (file.commit()) {
+            return true;
+        }
+    }
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return false;
+    }
+    return file.write(payload) == payload.size();
 }
 
 // The exact folder-with-Mycel-badge glyph used for sub-root nodes, rendered into a pixmap so the
@@ -4503,6 +4536,7 @@ public:
         if (view_) {
             view_->setScene(nullptr);
         }
+        nodeItemsByPath_.clear();
         scene_.clear();
         if (mycelStorageEnabled_) {
             cleanHistoryTrash();  // session over: undo history is gone, so its trash can go too
@@ -5185,11 +5219,7 @@ public:
 
     static void writeJsonObjectFile(const QString& path, const QJsonObject& object)
     {
-        QDir().mkpath(QFileInfo(path).absolutePath());
-        QFile file(path);
-        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            file.write(QJsonDocument(object).toJson(QJsonDocument::Indented));
-        }
+        writeJsonFileAtomic(path, object);
     }
 
     // Merge a keyed object section (e.g. "colors"/"directories"/"previews") from a child .mycel file
@@ -5339,10 +5369,7 @@ public:
         QJsonObject rootObject;
         rootObject.insert(QStringLiteral("version"), 1);
         rootObject.insert(QStringLiteral("parentRoot"), child.relativeFilePath(parentDir));
-        QFile file(child.filePath(QStringLiteral(".mycel/parent.json")));
-        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            file.write(QJsonDocument(rootObject).toJson(QJsonDocument::Indented));
-        }
+        writeJsonFileAtomic(child.filePath(QStringLiteral(".mycel/parent.json")), rootObject);
     }
 
     // Read the recorded parent root of a root directory, resolved to an absolute path. Empty when no
@@ -6497,7 +6524,7 @@ public:
             return;
         }
         savePreviewFile();
-        rebuild(false);
+        relayout();
         selectNodePath(path, true);
         recordHistory(QStringLiteral("プレビューサイズ初期化"), {}, {}, historyBefore, historySelection);
     }
@@ -6611,7 +6638,7 @@ public:
             previewSizes_[node->path] = clampedPreviewSizeForFile(info, size, preferHeight);
         }
         savePreviewFile();
-        rebuild(false);
+        relayout();
         recordHistory(QStringLiteral("プレビューサイズ変更"), {}, {}, historyBefore, historySelection);
     }
 
@@ -6631,7 +6658,7 @@ public:
         previewImageScales_[node->path] = normalizedScale;
         previewSizes_[node->path] = size;
         savePreviewFile();
-        rebuild(false);
+        relayout();
         recordHistory(QStringLiteral("プレビューサイズ変更"), {}, {}, historyBefore, historySelection);
     }
 
@@ -6709,7 +6736,7 @@ public:
         const QStringList historySelection = selectedNodePaths();
         userColors_[node->path] = color;
         saveColorFile();
-        rebuild(false);
+        scene_.update();  // color only affects painting, not layout
         recordHistory(QStringLiteral("色変更"), {}, {}, historyBefore, historySelection);
     }
 
@@ -6726,7 +6753,7 @@ public:
         const QStringList historySelection = selectedNodePaths();
         userColors_[path] = color;
         saveColorFile();
-        rebuild(false);
+        scene_.update();  // color only affects painting, not layout
         selectNodePath(path, true);
         recordHistory(QStringLiteral("色変更"), {}, {}, historyBefore, historySelection);
     }
@@ -6740,7 +6767,7 @@ public:
         const QStringList historySelection = selectedNodePaths();
         userColors_.erase(node->path);
         saveColorFile();
-        rebuild(false);
+        scene_.update();  // color only affects painting, not layout
         recordHistory(QStringLiteral("色クリア"), {}, {}, historyBefore, historySelection);
     }
 
@@ -6753,7 +6780,7 @@ public:
         const QStringList historySelection = selectedNodePaths();
         userColors_.erase(path);
         saveColorFile();
-        rebuild(false);
+        scene_.update();  // color only affects painting, not layout
         selectNodePath(path, true);
         recordHistory(QStringLiteral("色クリア"), {}, {}, historyBefore, historySelection);
     }
@@ -7469,16 +7496,8 @@ public:
 
     NodeItem* nodeItemForPath(const QString& path) const
     {
-        if (path.isEmpty()) {
-            return nullptr;
-        }
-        for (QGraphicsItem* item : scene_.items()) {
-            auto* nodeItem = dynamic_cast<NodeItem*>(item);
-            if (nodeItem && nodeItem->path() == path) {
-                return nodeItem;
-            }
-        }
-        return nullptr;
+        // O(1) lookup via the index maintained by renderCurrentTree (rebuilt with the scene).
+        return path.isEmpty() ? nullptr : nodeItemsByPath_.value(path, nullptr);
     }
 
     NodeItem* updateInternalDropHover(NodeItem* source, const QPointF& scenePos)
@@ -7556,7 +7575,7 @@ public:
 
         for (const FileLink& link : fileLinks_) {
             if (link.from == from->path && link.to == to->path) {
-                rebuild(false);
+                relayout();  // already linked: just restore the layout after the drag
                 return;
             }
         }
@@ -7572,7 +7591,7 @@ public:
 
         fileLinks_.push_back({from->path, to->path});
         saveLinkFile();
-        rebuild(false);
+        relayout();
         recordHistory(QStringLiteral("関連付け"), {}, {}, historyBefore, historySelection);
     }
 
@@ -7620,7 +7639,7 @@ public:
         }
 
         saveLinkFile();
-        rebuild(false);
+        relayout();
         recordHistory(QStringLiteral("関連付け解除"), {}, {}, historyBefore, historySelection);
     }
 
@@ -7926,7 +7945,7 @@ public:
 
         if (changed) {
             savePreviewFile();
-            rebuild(false);
+            relayout();
             restoreSelection(selectedPaths);
             recordHistory(QStringLiteral("プレビュー切替"), {}, {}, historyBefore, historySelection);
         }
@@ -7941,7 +7960,7 @@ public:
         const QStringList historySelection = selectedNodePaths();
         previewPaths_.insert(path);
         savePreviewFile();
-        rebuild(false);
+        relayout();
         selectNodePath(path);
         recordHistory(QStringLiteral("プレビュー切替"), {}, {}, historyBefore, historySelection);
         return true;
@@ -7956,7 +7975,7 @@ public:
         const QStringList historySelection = selectedNodePaths();
         previewPaths_.remove(path);
         savePreviewFile();
-        rebuild(false);
+        relayout();
         selectNodePath(path);
         recordHistory(QStringLiteral("プレビュー切替"), {}, {}, historyBefore, historySelection);
         return true;
@@ -8049,7 +8068,7 @@ public:
             }
             previewPaths_.insert(path);
             savePreviewFile();
-            rebuild(false);
+            relayout();
             selectNodePath(path);
             recordDebugEvent(QStringLiteral("youtube thumbnail cached: %1").arg(relativeKeyForPath(path)));
         });
@@ -10372,12 +10391,9 @@ private:
         rootObject.insert(QStringLiteral("version"), 1);
         rootObject.insert(QStringLiteral("directories"), directories);
 
-        QFile file(orderFilePath());
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (!writeJsonFileAtomic(orderFilePath(), rootObject)) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("並び順を保存できませんでした。"));
-            return;
         }
-        file.write(QJsonDocument(rootObject).toJson(QJsonDocument::Indented));
     }
 
     void loadColorFile()
@@ -10423,12 +10439,9 @@ private:
         rootObject.insert(QStringLiteral("version"), 1);
         rootObject.insert(QStringLiteral("colors"), colors);
 
-        QFile file(colorFilePath());
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (!writeJsonFileAtomic(colorFilePath(), rootObject)) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("色設定を保存できませんでした。"));
-            return;
         }
-        file.write(QJsonDocument(rootObject).toJson(QJsonDocument::Indented));
     }
 
     void loadPreviewFile()
@@ -10519,12 +10532,9 @@ private:
         rootObject.insert(QStringLiteral("version"), 1);
         rootObject.insert(QStringLiteral("previews"), previews);
 
-        QFile file(previewFilePath());
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (!writeJsonFileAtomic(previewFilePath(), rootObject)) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("プレビュー状態を保存できませんでした。"));
-            return;
         }
-        file.write(QJsonDocument(rootObject).toJson(QJsonDocument::Indented));
     }
 
     bool loadCollapsedFile()
@@ -10576,12 +10586,9 @@ private:
         rootObject.insert(QStringLiteral("version"), 1);
         rootObject.insert(QStringLiteral("folders"), folders);
 
-        QFile file(collapsedFilePath());
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (!writeJsonFileAtomic(collapsedFilePath(), rootObject)) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("折りたたみ状態を保存できませんでした。"));
-            return;
         }
-        file.write(QJsonDocument(rootObject).toJson(QJsonDocument::Indented));
     }
 
     void loadLinkFile()
@@ -10653,12 +10660,9 @@ private:
         rootObject.insert(QStringLiteral("version"), 1);
         rootObject.insert(QStringLiteral("links"), links);
 
-        QFile file(linkFilePath());
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (!writeJsonFileAtomic(linkFilePath(), rootObject)) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("関連設定を保存できませんでした。"));
-            return;
         }
-        file.write(QJsonDocument(rootObject).toJson(QJsonDocument::Indented));
     }
 
     QJsonObject currentViewStateObject() const
@@ -10765,11 +10769,7 @@ private:
             return;
         }
 
-        QFile file(viewStateFilePath());
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            return;
-        }
-        file.write(QJsonDocument(rootObject).toJson(QJsonDocument::Indented));
+        writeJsonFileAtomic(viewStateFilePath(), rootObject);
     }
 
     void restoreWindowStateFromSettingsFile()
@@ -10820,6 +10820,7 @@ private:
         if (view_) {
             view_->cancelTransientNodeInteraction();
         }
+        nodeItemsByPath_.clear();  // items are about to be destroyed with the scene
         scene_.clear();
         if (!root_) {
             suppressSideEditorSelectionUpdate_ = previousSuppressSelectionUpdate;
@@ -10837,7 +10838,9 @@ private:
 
         scene_.addItem(new ConnectionLayerItem(root_.get(), &fileLinks_));
         visitNodes(*root_, [this](Node& node) {
-            scene_.addItem(new NodeItem(&node, this));
+            auto* item = new NodeItem(&node, this);
+            scene_.addItem(item);
+            nodeItemsByPath_.insert(node.path, item);
         });
         suppressSideEditorSelectionUpdate_ = previousSuppressSelectionUpdate;
 
@@ -10898,6 +10901,35 @@ private:
         root_ = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_,
                          mycelStorageEnabled_);
         renderCurrentTree(fitAfterRebuild);
+    }
+
+    // Re-apply metadata-derived display fields (preview open state and size) to the cached tree.
+    void refreshCachedNodeMetadata(Node& node)
+    {
+        node.previewOpen = !node.isDir && previewPaths_.contains(node.path);
+        if (node.previewOpen) {
+            const auto found = previewSizes_.find(node.path);
+            node.previewSize = found == previewSizes_.end() ? automaticPreviewSize(QFileInfo(node.path))
+                                                            : found->second;
+        }
+        for (auto& child : node.children) {
+            refreshCachedNodeMetadata(*child);
+        }
+    }
+
+    // Metadata-only re-render: preview open/close/size and link changes do not alter the file
+    // structure, so re-layout the cached tree instead of re-stat'ing the whole directory tree
+    // from disk (rebuild). Big win on large or cloud-synced roots.
+    void relayout()
+    {
+        if (!root_) {
+            rebuild(false);
+            return;
+        }
+        saveSideEditorNow();
+        finishInlineRename(false);
+        refreshCachedNodeMetadata(*root_);
+        renderCurrentTree(false);
     }
 
     void scheduleRestoreViewStateOrFit()
@@ -11027,6 +11059,9 @@ private:
     // ---- Undo/Redo history (types defined above, near the history methods) -------------
     std::vector<HistoryEntry> undoStack_;
     std::vector<HistoryEntry> redoStack_;
+    // Path → live NodeItem index; rebuilt whenever the scene is re-rendered. Keeps hot lookups
+    // (drag/resize/selection by path) O(1) instead of scanning every scene item.
+    QHash<QString, NodeItem*> nodeItemsByPath_;
     std::unique_ptr<HistoryEntry> historyGroup_;
     bool applyingHistory_ = false;
     int historyTrashCounter_ = 0;
