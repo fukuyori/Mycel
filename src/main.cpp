@@ -5097,6 +5097,174 @@ public:
         QTimer::singleShot(0, this, [this] { syncEditorPaneVisibility(); });
     }
 
+    // Turn a plain folder into a new child root: create its own .mycel, record the current root as
+    // its parent, and refresh so the parent now shows it as a sub-root boundary.
+    void makeFolderChildRoot(const QString& folderPath)
+    {
+        if (!mycelStorageEnabled_ || folderPath.isEmpty()) {
+            return;
+        }
+        const QFileInfo info(folderPath);
+        if (!info.isDir()) {
+            return;
+        }
+        if (QDir::cleanPath(folderPath) == QDir::cleanPath(rootPath_)) {
+            return;  // the opened root is already a root
+        }
+        if (directoryHasMycel(folderPath)) {
+            return;  // already a root
+        }
+        if (!QDir(folderPath).mkpath(QStringLiteral(".mycel"))) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"),
+                                 QStringLiteral(".mycel フォルダを作成できませんでした。"));
+            return;
+        }
+        writeParentRootRecord(folderPath, rootPath_);  // record this root as the new child's parent
+        recordDebugEvent(QStringLiteral("make child root: %1").arg(relativeKeyForPath(folderPath)));
+        rebuild(false);  // the folder is now a sub-root; keep the current view
+    }
+
+    static QJsonObject readJsonObjectFile(const QString& path)
+    {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            return {};
+        }
+        return QJsonDocument::fromJson(file.readAll()).object();
+    }
+
+    static void writeJsonObjectFile(const QString& path, const QJsonObject& object)
+    {
+        QDir().mkpath(QFileInfo(path).absolutePath());
+        QFile file(path);
+        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            file.write(QJsonDocument(object).toJson(QJsonDocument::Indented));
+        }
+    }
+
+    // Merge a keyed object section (e.g. "colors"/"directories"/"previews") from a child .mycel file
+    // into the parent's, re-keying each entry from child-relative to parent-relative.
+    void mergeChildObjectSection(const QString& parentPath, const QString& childPath, const QString& section,
+                                 const std::function<QString(const QString&)>& reKey)
+    {
+        const QJsonObject childSection = readJsonObjectFile(childPath).value(section).toObject();
+        if (childSection.isEmpty()) {
+            return;
+        }
+        QJsonObject parentRoot = readJsonObjectFile(parentPath);
+        QJsonObject merged = parentRoot.value(section).toObject();
+        for (auto it = childSection.begin(); it != childSection.end(); ++it) {
+            merged.insert(reKey(it.key()), it.value());
+        }
+        parentRoot.insert(QStringLiteral("version"), 1);
+        parentRoot.insert(section, merged);
+        writeJsonObjectFile(parentPath, parentRoot);
+    }
+
+    // Merge a string-array section (e.g. "folders") from a child .mycel file into the parent's.
+    void mergeChildStringArray(const QString& parentPath, const QString& childPath, const QString& section,
+                               const std::function<QString(const QString&)>& reKey)
+    {
+        const QJsonArray childArray = readJsonObjectFile(childPath).value(section).toArray();
+        if (childArray.isEmpty()) {
+            return;
+        }
+        QJsonObject parentRoot = readJsonObjectFile(parentPath);
+        QJsonArray merged = parentRoot.value(section).toArray();
+        QSet<QString> seen;
+        for (const QJsonValue& value : merged) {
+            seen.insert(value.toString());
+        }
+        for (const QJsonValue& value : childArray) {
+            const QString key = reKey(value.toString());
+            if (!seen.contains(key)) {
+                merged.append(key);
+                seen.insert(key);
+            }
+        }
+        parentRoot.insert(QStringLiteral("version"), 1);
+        parentRoot.insert(section, merged);
+        writeJsonObjectFile(parentPath, parentRoot);
+    }
+
+    // Merge the "links" array (from/to pairs) from a child .mycel file into the parent's.
+    void mergeChildLinks(const QString& parentPath, const QString& childPath,
+                         const std::function<QString(const QString&)>& reKey)
+    {
+        const QJsonArray childArray = readJsonObjectFile(childPath).value(QStringLiteral("links")).toArray();
+        if (childArray.isEmpty()) {
+            return;
+        }
+        QJsonObject parentRoot = readJsonObjectFile(parentPath);
+        QJsonArray merged = parentRoot.value(QStringLiteral("links")).toArray();
+        for (const QJsonValue& value : childArray) {
+            const QJsonObject link = value.toObject();
+            QJsonObject relinked;
+            relinked.insert(QStringLiteral("from"), reKey(link.value(QStringLiteral("from")).toString()));
+            relinked.insert(QStringLiteral("to"), reKey(link.value(QStringLiteral("to")).toString()));
+            merged.append(relinked);
+        }
+        parentRoot.insert(QStringLiteral("version"), 1);
+        parentRoot.insert(QStringLiteral("links"), merged);
+        writeJsonObjectFile(parentPath, parentRoot);
+    }
+
+    // Integrate a sub-root back into its parent: merge the child's metadata (colors, order, previews,
+    // collapse, links) into the parent's .mycel with re-keyed paths, remove the child's own .mycel,
+    // then reload so the parent shows it as a plain (expandable) folder again.
+    void integrateChildRootIntoParent(const QString& childDir)
+    {
+        if (!mycelStorageEnabled_ || childDir.isEmpty() || !directoryHasMycel(childDir)) {
+            return;
+        }
+        if (QDir::cleanPath(childDir) == QDir::cleanPath(rootPath_)) {
+            return;  // cannot integrate the opened root itself
+        }
+        const auto reply = QMessageBox::question(
+            this, QStringLiteral("Mycel"),
+            QStringLiteral("「%1」を親に統合します。\n子の .mycel を解除し、設定を親に取り込みます。よろしいですか？")
+                .arg(QFileInfo(childDir).fileName()),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (reply != QMessageBox::Yes) {
+            return;
+        }
+
+        // Flush the parent's current in-memory state to disk before merging JSON files.
+        saveOrderFile();
+        saveColorFile();
+        savePreviewFile();
+        saveCollapsedFile();
+        saveLinkFile();
+
+        const QString cd = childDir;
+        const std::function<QString(const QString&)> reKey = [this, cd](const QString& childKey) {
+            const QString absolute = childKey.isEmpty() ? cd : QDir(cd).absoluteFilePath(childKey);
+            return QDir::cleanPath(QDir(rootPath_).relativeFilePath(absolute));
+        };
+        QDir child(childDir);
+        mergeChildObjectSection(colorFilePath(), child.filePath(QStringLiteral(".mycel/colors.json")),
+                                QStringLiteral("colors"), reKey);
+        mergeChildObjectSection(orderFilePath(), child.filePath(QStringLiteral(".mycel/order.json")),
+                                QStringLiteral("directories"), reKey);
+        mergeChildObjectSection(previewFilePath(), child.filePath(QStringLiteral(".mycel/previews.json")),
+                                QStringLiteral("previews"), reKey);
+        mergeChildStringArray(collapsedFilePath(), child.filePath(QStringLiteral(".mycel/collapsed.json")),
+                              QStringLiteral("folders"), reKey);
+        mergeChildLinks(linkFilePath(), child.filePath(QStringLiteral(".mycel/links.json")), reKey);
+
+        // Remove the child's .mycel so the parent treats it as a plain folder again.
+        QDir(child.filePath(QStringLiteral(".mycel"))).removeRecursively();
+
+        // Reload the merged parent metadata and re-render (keep the current view).
+        loadOrderFile();
+        loadColorFile();
+        loadPreviewFile();
+        loadLinkFile();
+        loadCollapsedFile();
+        recordDebugEvent(QStringLiteral("integrate child root: %1").arg(relativeKeyForPath(childDir)));
+        rebuild(false);
+    }
+
     // Switch the board into a sub-root, first recording the current root as that child's parent
     // inside the child's own .mycel so the parent bar can be restored whenever the child is opened.
     void switchIntoSubRoot(const QString& childPath)
@@ -10867,6 +11035,7 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         if (node_->isSubRoot) {
             QAction* openRootAction = menu.addAction(QStringLiteral("このルートを開く"));
             menu.addSeparator();
+            QAction* integrateAction = menu.addAction(QStringLiteral("親に統合（.mycel を解除）"));
             QAction* subSelected = menu.exec(screenPos);
             if (subSelected == openRootAction) {
                 QTimer::singleShot(0, window, [window, folderPath] {
@@ -10874,10 +11043,20 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
                         window->switchIntoSubRoot(folderPath);
                     }
                 });
+            } else if (subSelected == integrateAction) {
+                QTimer::singleShot(0, window, [window, folderPath] {
+                    if (window) {
+                        window->integrateChildRootIntoParent(folderPath);
+                    }
+                });
             }
             return;
         }
+        // Group 1: open / view
+        QAction* openAction = menu.addAction(QStringLiteral("開く"));
         QAction* collapseAction = menu.addAction(node_->collapsed ? QStringLiteral("展開") : QStringLiteral("折りたたむ"));
+        menu.addSeparator();
+        // Group 2: create
         QMenu* newFileMenu = menu.addMenu(QStringLiteral("ファイルを作成"));
         QAction* fileBelowAction = newFileMenu->addAction(QStringLiteral("下の階層に作成"));
         QAction* fileSameAction = newFileMenu->addAction(QStringLiteral("同じ階層に作成"));
@@ -10886,12 +11065,8 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         QAction* folderBelowAction = newFolderMenu->addAction(QStringLiteral("下の階層に作成"));
         QAction* folderSameAction = newFolderMenu->addAction(QStringLiteral("同じ階層に作成"));
         folderSameAction->setEnabled(!isRootFolder);
-        QMenu* sortMenu = menu.addMenu(QStringLiteral("並べ替え"));
-        QAction* sortNameAscAction = sortMenu->addAction(QStringLiteral("名前順（昇順）"));
-        QAction* sortNameDescAction = sortMenu->addAction(QStringLiteral("名前順（降順）"));
-        sortMenu->addSeparator();
-        QAction* sortDateAscAction = sortMenu->addAction(QStringLiteral("日時順（昇順）"));
-        QAction* sortDateDescAction = sortMenu->addAction(QStringLiteral("日時順（降順）"));
+        menu.addSeparator();
+        // Group 3: edit / clipboard
         QAction* renameAction = menu.addAction(QStringLiteral("名前変更"));
         renameAction->setEnabled(!isRootFolder);
         QAction* copyAction = menu.addAction(QStringLiteral("コピー"));
@@ -10900,12 +11075,31 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         pasteAction->setEnabled(window->canPasteClipboardToFolderPath(folderPath));
         QAction* deleteAction = menu.addAction(QStringLiteral("削除"));
         deleteAction->setEnabled(!isRootFolder);
+        menu.addSeparator();
+        // Group 4: organize / appearance
+        QMenu* sortMenu = menu.addMenu(QStringLiteral("並べ替え"));
+        QAction* sortNameAscAction = sortMenu->addAction(QStringLiteral("名前順（昇順）"));
+        QAction* sortNameDescAction = sortMenu->addAction(QStringLiteral("名前順（降順）"));
+        sortMenu->addSeparator();
+        QAction* sortDateAscAction = sortMenu->addAction(QStringLiteral("日時順（昇順）"));
+        QAction* sortDateDescAction = sortMenu->addAction(QStringLiteral("日時順（降順）"));
         std::vector<QAction*> colorActions;
         QAction* clearColorAction = nullptr;
         addColorMenu(menu, colorActions, clearColorAction);
-        QAction* openAction = menu.addAction(QStringLiteral("開く"));
+        menu.addSeparator();
+        // Group 5: root management
+        QAction* makeChildRootAction = menu.addAction(QStringLiteral("子ルートにする（.mycel を作成）"));
+        makeChildRootAction->setEnabled(!isRootFolder && window->mycelStorageEnabled());
         QAction* selected = menu.exec(screenPos);
         const QString parentDir = QFileInfo(folderPath).absolutePath();
+        if (selected == makeChildRootAction) {
+            QTimer::singleShot(0, window, [window, folderPath] {
+                if (window) {
+                    window->makeFolderChildRoot(folderPath);
+                }
+            });
+            return;
+        }
         if (selected == fileBelowAction || selected == fileSameAction) {
             const bool same = (selected == fileSameAction);
             const QString dir = same ? parentDir : folderPath;
@@ -10991,32 +11185,43 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         }
     } else {
         const QString filePath = itemPath;
+        // Group 1: open / view
+        QAction* openAction = menu.addAction(QStringLiteral("開く"));
+        QAction* openWithAction = menu.addAction(QStringLiteral("別のアプリで開く…"));
         QAction* previewAction = menu.addAction(QStringLiteral("プレビューを開く/閉じる"));
-        QAction* resetPreviewSizeAction = menu.addAction(QStringLiteral("プレビューサイズを初期化"));
-        resetPreviewSizeAction->setEnabled(window->hasSavedPreviewSizePath(filePath));
-        QAction* unlinkAction = menu.addAction(QStringLiteral("関連を解除"));
-        unlinkAction->setEnabled(window->hasIncomingFileLinkPath(filePath));
         QAction* editAction = menu.addAction(QStringLiteral("編集"));
         editAction->setEnabled(window->canEditTextFilePath(filePath));
+        // Group 2: run (scripts) — present only for runnable scripts
         QAction* runPipelineAction = window->isPipelineScriptFile(filePath)
                                          ? menu.addAction(QStringLiteral("パイプライン実行"))
                                          : nullptr;
         QAction* runGoAction = window->isGoScriptFile(filePath)
                                    ? menu.addAction(QStringLiteral("Go スクリプトとして実行"))
                                    : nullptr;
-        QAction* renameAction = menu.addAction(QStringLiteral("名前変更"));
-        QAction* copyAction = menu.addAction(QStringLiteral("コピー"));
-        QAction* deleteAction = menu.addAction(QStringLiteral("削除"));
-        QAction* newFolderSameAction = menu.addAction(QStringLiteral("フォルダを作成（同じ階層）"));
+        if (runPipelineAction || runGoAction) {
+            menu.insertSeparator(runPipelineAction ? runPipelineAction : runGoAction);
+        }
+        menu.addSeparator();
+        // Group 3: create
         QMenu* newFileMenu = menu.addMenu(QStringLiteral("ファイルを作成"));
         QAction* newFileSameAction = newFileMenu->addAction(QStringLiteral("同じ階層に作成"));
         QAction* newFileLinkAction = newFileMenu->addAction(QStringLiteral("横リンクで作成"));
         newFileLinkAction->setEnabled(window->mycelStorageEnabled());
+        QAction* newFolderSameAction = menu.addAction(QStringLiteral("フォルダを作成（同じ階層）"));
+        menu.addSeparator();
+        // Group 4: edit / clipboard
+        QAction* renameAction = menu.addAction(QStringLiteral("名前変更"));
+        QAction* copyAction = menu.addAction(QStringLiteral("コピー"));
+        QAction* deleteAction = menu.addAction(QStringLiteral("削除"));
+        QAction* unlinkAction = menu.addAction(QStringLiteral("関連を解除"));
+        unlinkAction->setEnabled(window->hasIncomingFileLinkPath(filePath));
+        menu.addSeparator();
+        // Group 5: appearance
+        QAction* resetPreviewSizeAction = menu.addAction(QStringLiteral("プレビューサイズを初期化"));
+        resetPreviewSizeAction->setEnabled(window->hasSavedPreviewSizePath(filePath));
         std::vector<QAction*> colorActions;
         QAction* clearColorAction = nullptr;
         addColorMenu(menu, colorActions, clearColorAction);
-        QAction* openAction = menu.addAction(QStringLiteral("開く"));
-        QAction* openWithAction = menu.addAction(QStringLiteral("別のアプリで開く…"));
         QAction* selected = menu.exec(screenPos);
         const QString parentDir = QFileInfo(filePath).absolutePath();
         if (selected == newFolderSameAction) {
