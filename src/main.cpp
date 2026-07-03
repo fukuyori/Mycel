@@ -83,6 +83,7 @@
 #include <QtWidgets/QDockWidget>
 #include <QtWidgets/QFileDialog>
 #include <QtWidgets/QGraphicsItem>
+#include <QtWidgets/QGraphicsPathItem>
 #include <QtWidgets/QGraphicsProxyWidget>
 #include <QtWidgets/QGraphicsScene>
 #include <QtWidgets/QGraphicsSceneContextMenuEvent>
@@ -194,6 +195,7 @@ struct Node {
     QString name;
     bool isDir = false;
     bool collapsed = false;
+    bool isSubRoot = false;  // a child directory that has its own .mycel: shown as a boundary node
     int depth = 0;
     int branch = -1;
     int hiddenChildren = 0;
@@ -861,11 +863,57 @@ QSizeF automaticPreviewSize(const QFileInfo& info)
     return QSizeF(width, std::clamp(doc.size().height() + 24.0, minHeight, 220.0));
 }
 
+bool directoryHasMycel(const QString& path)
+{
+    return QFileInfo(QDir(path).filePath(QStringLiteral(".mycel"))).isDir();
+}
+
+// The exact folder-with-Mycel-badge glyph used for sub-root nodes, rendered into a pixmap so the
+// same mark can be reused wherever a Mycel sub-root/parent-root is shown (e.g. the parent overlay).
+// Keeps the parent (as shown by the child) identical in appearance to a sub-root (as shown by the parent).
+QPixmap subRootFolderPixmap()
+{
+    static QPixmap cached;
+    if (!cached.isNull()) {
+        return cached;
+    }
+    QPixmap pm(46, 40);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    const QPointF at(3.0, 1.0);
+    QPainterPath path;
+    path.moveTo(at.x(), at.y() + 9.0);
+    path.quadTo(at.x(), at.y() + 4.0, at.x() + 5.0, at.y() + 4.0);
+    path.lineTo(at.x() + 16.0, at.y() + 4.0);
+    path.lineTo(at.x() + 22.0, at.y() + 10.0);
+    path.lineTo(at.x() + 36.0, at.y() + 10.0);
+    path.quadTo(at.x() + 40.0, at.y() + 10.0, at.x() + 40.0, at.y() + 14.0);
+    path.lineTo(at.x() + 40.0, at.y() + 31.0);
+    path.quadTo(at.x() + 40.0, at.y() + 36.0, at.x() + 35.0, at.y() + 36.0);
+    path.lineTo(at.x() + 5.0, at.y() + 36.0);
+    path.quadTo(at.x(), at.y() + 36.0, at.x(), at.y() + 31.0);
+    path.closeSubpath();
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor("#ffc94d"));
+    p.drawPath(path);
+    p.setPen(QPen(QColor("#f6b93f"), 1.8));
+    p.drawLine(QPointF(at.x() + 3.0, at.y() + 14.0), QPointF(at.x() + 37.0, at.y() + 14.0));
+    const QPixmap badge = QPixmap(QStringLiteral(":/icons/mycel.png"))
+                              .scaled(18, 18, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    if (!badge.isNull()) {
+        p.drawPixmap(QPointF(at.x() + 22.0, at.y() + 18.0), badge);
+    }
+    p.end();
+    cached = pm;
+    return cached;
+}
+
 std::unique_ptr<Node> scanTree(const QString& path, int depth, int branch,
                                const QSet<QString>& collapsedPaths, const QSet<QString>& previewPaths,
                                const std::map<QString, QSizeF>& previewSizes,
                                const std::map<QString, QStringList>& fileOrders,
-                               const QString& rootPath)
+                               const QString& rootPath, bool detectSubRoots)
 {
     QFileInfo info(path);
     auto node = std::make_unique<Node>();
@@ -873,6 +921,10 @@ std::unique_ptr<Node> scanTree(const QString& path, int depth, int branch,
     node->parentPath = info.absoluteDir().absolutePath();
     node->name = info.fileName().isEmpty() ? info.absoluteFilePath() : info.fileName();
     node->isDir = info.isDir();
+    // A child directory carrying its own .mycel is a sub-root: display it as a single boundary node
+    // (do not descend into it). The opened root itself (depth 0) is never a sub-root.
+    node->isSubRoot = detectSubRoots && node->isDir && depth >= 1 &&
+                      directoryHasMycel(info.absoluteFilePath());
     node->collapsed = node->isDir && collapsedPaths.contains(info.absoluteFilePath());
     node->previewOpen = !node->isDir && previewPaths.contains(info.absoluteFilePath());
     node->depth = depth;
@@ -891,7 +943,7 @@ std::unique_ptr<Node> scanTree(const QString& path, int depth, int branch,
         node->previewSize = found == previewSizes.end() ? automaticPreviewSize(info) : found->second;
     }
 
-    if (!node->isDir || depth >= MaxDepth) {
+    if (!node->isDir || depth >= MaxDepth || node->isSubRoot) {
         return node;
     }
 
@@ -934,7 +986,8 @@ std::unique_ptr<Node> scanTree(const QString& path, int depth, int branch,
     const int visible = std::min(MaxChildren, static_cast<int>(entries.size()));
     for (int i = 0; i < visible; ++i) {
         node->children.push_back(scanTree(entries[i].absoluteFilePath(), depth + 1, branch,
-                                          collapsedPaths, previewPaths, previewSizes, fileOrders, rootPath));
+                                          collapsedPaths, previewPaths, previewSizes, fileOrders, rootPath,
+                                          detectSubRoots));
     }
     node->hiddenChildren = entries.size() - visible;
     return node;
@@ -2114,6 +2167,15 @@ public:
             paintFolder(painter, QPointF(box.left() + 18.0, -17.0), node_->depth == 0 ? QColor("#46a4ff") : QColor("#ffc94d"));
         } else {
             paintFile(painter, QPointF(box.left() + 6.0, -14.0), QFileInfo(node_->path));
+        }
+
+        // A sub-root (child folder with its own .mycel) gets a Mycel badge on its folder icon.
+        if (node_->isSubRoot) {
+            static const QPixmap mycelBadge = QPixmap(QStringLiteral(":/icons/mycel.png"))
+                                                  .scaled(20, 20, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            if (!mycelBadge.isNull()) {
+                painter->drawPixmap(QPointF(box.left() + 40.0, 1.0), mycelBadge);
+            }
         }
 
         QFont font = painter->font();
@@ -3903,6 +3965,75 @@ private:
     QGraphicsScene& scene_;
 };
 
+// A curved connector between two points, matching the parent-child edge style.
+QPainterPath edgePathBetweenPoints(const QPointF& start, const QPointF& end)
+{
+    const qreal distance = std::max<qreal>(96.0, end.x() - start.x());
+    const qreal splitX = start.x() + std::clamp(distance * 0.46, 58.0, 128.0);
+    QPainterPath path(start);
+    path.cubicTo(QPointF(start.x() + distance * 0.16, start.y()),
+                 QPointF(splitX - 34.0, end.y()), QPointF(splitX, end.y()));
+    path.cubicTo(QPointF(splitX + 30.0, end.y()),
+                 QPointF(end.x() - 38.0, end.y()), end);
+    return path;
+}
+
+// A folder-style node shown to the left of the root that represents a parent .mycel root. Rendered
+// identically to a sub-root (folder + Mycel badge + name) and scales with zoom like any node, so the
+// parent (seen from the child) matches a child (seen from the parent). Single click selects
+// (highlights); double click switches up to that parent root.
+class ParentRootItem final : public QGraphicsItem {
+public:
+    ParentRootItem(QString path, QString name)
+        : path_(std::move(path)), name_(std::move(name))
+    {
+        setFlag(ItemIsSelectable, true);
+        setZValue(NodeLayerZ);
+        QFont font;
+        font.setPointSize(12);
+        const QFontMetricsF metrics(font);
+        const qreal width = std::max(128.0, metrics.horizontalAdvance(shortLabel(name_)) + 46.0 + 34.0);
+        box_ = QRectF(-width / 2.0, -23.0, width, 46.0);
+    }
+
+    void setActivateHandler(std::function<void(QString)> handler) { handler_ = std::move(handler); }
+    qreal boxWidth() const { return box_.width(); }
+
+    QRectF boundingRect() const override { return box_.adjusted(-8.0, -8.0, 8.0, 8.0); }
+
+    void paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget*) override
+    {
+        const ThemeColors colors = currentThemeColors();
+        painter->setRenderHint(QPainter::Antialiasing, !fastCanvasRendering());
+        if (isSelected()) {
+            painter->setPen(QPen(colors.nodeSelectedBorder, 2.0));
+            painter->setBrush(colors.nodeSelectedFill);
+            painter->drawRoundedRect(box_.adjusted(-4.0, -3.0, 4.0, 3.0), 8.0, 8.0);
+        }
+        painter->drawPixmap(QPointF(box_.left() + 15.0, -18.0), subRootFolderPixmap());
+        QFont font = painter->font();
+        font.setPointSize(12);
+        painter->setFont(font);
+        painter->setPen(colors.nodeText);
+        painter->drawText(QRectF(box_.left() + 66.0, box_.top(), box_.width() - 76.0, box_.height()),
+                          Qt::AlignVCenter | Qt::AlignLeft, shortLabel(name_));
+    }
+
+protected:
+    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent*) override
+    {
+        if (handler_) {
+            handler_(path_);
+        }
+    }
+
+private:
+    QString path_;
+    QString name_;
+    QRectF box_;
+    std::function<void(QString)> handler_;
+};
+
 class MainWindow final : public QMainWindow {
 public:
     explicit MainWindow(QString rootPath, bool mycelStorageEnabled, QWidget* parent = nullptr)
@@ -4801,6 +4932,10 @@ public:
 
     bool toggleSelectedPreviewOrCollapse()
     {
+        if (Node* node = singleSelectedNode(); node && node->isSubRoot) {
+            switchIntoSubRoot(node->path);  // Enter on a sub-root switches into it
+            return true;
+        }
         if (toggleSelectedFoldersCollapsed()) {
             return true;
         }
@@ -4956,9 +5091,90 @@ public:
         if (!loadCollapsedFile()) {
             applyLargeTreeStartupCollapse();
         }
-        restoreWindowStateFromSettingsFile();
+        // Keep the current window position/size when switching roots — do NOT apply the target
+        // root's saved window geometry (that is only restored on initial startup).
         rebuild(true);
         QTimer::singleShot(0, this, [this] { syncEditorPaneVisibility(); });
+    }
+
+    // Switch the board into a sub-root, first recording the current root as that child's parent
+    // inside the child's own .mycel so the parent bar can be restored whenever the child is opened.
+    void switchIntoSubRoot(const QString& childPath)
+    {
+        if (childPath.isEmpty()) {
+            return;
+        }
+        if (mycelStorageEnabled_) {
+            writeParentRootRecord(childPath, rootPath_);
+        }
+        openRootFolder(childPath);
+    }
+
+    // Persist the parent root into <childDir>/.mycel/parent.json. The parent is stored as a path
+    // relative to the child so the record survives moving the whole tree.
+    void writeParentRootRecord(const QString& childDir, const QString& parentDir)
+    {
+        QDir child(childDir);
+        if (!child.mkpath(QStringLiteral(".mycel"))) {
+            return;
+        }
+        QJsonObject rootObject;
+        rootObject.insert(QStringLiteral("version"), 1);
+        rootObject.insert(QStringLiteral("parentRoot"), child.relativeFilePath(parentDir));
+        QFile file(child.filePath(QStringLiteral(".mycel/parent.json")));
+        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            file.write(QJsonDocument(rootObject).toJson(QJsonDocument::Indented));
+        }
+    }
+
+    // Read the recorded parent root of a root directory, resolved to an absolute path. Empty when no
+    // record exists or the recorded parent no longer has its own .mycel.
+    QString recordedParentRoot(const QString& rootDir) const
+    {
+        QFile file(QDir(rootDir).filePath(QStringLiteral(".mycel/parent.json")));
+        if (!file.open(QIODevice::ReadOnly)) {
+            return QString();
+        }
+        const QJsonObject object = QJsonDocument::fromJson(file.readAll()).object();
+        const QString relative = object.value(QStringLiteral("parentRoot")).toString();
+        if (relative.isEmpty()) {
+            return QString();
+        }
+        const QString parent = QDir::cleanPath(QDir(rootDir).absoluteFilePath(relative));
+        // The recorded parent is the root the user actually navigated down from, so trust it as long
+        // as the directory still exists — do not require it to carry its own .mycel.
+        return QFileInfo(parent).isDir() ? parent : QString();
+    }
+
+    // The chain of parent roots from the outermost down to the immediate parent of the opened root.
+    // Built by following the parent recorded in each .mycel; if none is recorded, falls back to the
+    // nearest ancestor directories on disk that carry a .mycel. Empty for a top-level root.
+    QStringList parentRootChain() const
+    {
+        QStringList chain;
+        if (!mycelStorageEnabled_) {
+            return chain;
+        }
+        QSet<QString> seen;
+        QString current = QDir::cleanPath(rootPath_);
+        for (int i = 0; i < 64; ++i) {
+            const QString parent = recordedParentRoot(current);
+            if (parent.isEmpty() || seen.contains(parent)) {
+                break;
+            }
+            seen.insert(parent);
+            chain.prepend(parent);
+            current = parent;
+        }
+        if (chain.isEmpty()) {
+            QDir dir(rootPath_);
+            while (dir.cdUp()) {
+                if (directoryHasMycel(dir.absolutePath())) {
+                    chain.prepend(dir.absolutePath());
+                }
+            }
+        }
+        return chain;
     }
 
     void openPath(const QString& path)
@@ -8446,7 +8662,7 @@ public:
         const QString cleanRoot = QDir::cleanPath(root_->path);
         if (cleanPath == cleanRoot) {
             auto rescanned = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_,
-                                      fileOrders_, rootPath_);
+                                      fileOrders_, rootPath_, mycelStorageEnabled_);
             if (sameVisibleStructure(*root_, *rescanned)) {
                 return SubtreeRefresh::Unchanged;
             }
@@ -8467,7 +8683,8 @@ public:
         for (auto& child : parent->children) {
             if (QDir::cleanPath(child->path) == cleanPath) {
                 auto rescanned = scanTree(cleanPath, existing->depth, existing->branch,
-                                          collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_);
+                                          collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_,
+                                          mycelStorageEnabled_);
                 if (sameVisibleStructure(*child, *rescanned)) {
                     return SubtreeRefresh::Unchanged;
                 }
@@ -8525,7 +8742,7 @@ public:
 
         if (needFullRescan) {
             auto rescanned = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_,
-                                      fileOrders_, rootPath_);
+                                      fileOrders_, rootPath_, mycelStorageEnabled_);
             if (!root_ || !sameVisibleStructure(*root_, *rescanned)) {
                 root_ = std::move(rescanned);
                 changed = true;
@@ -10356,7 +10573,9 @@ private:
         });
         suppressSideEditorSelectionUpdate_ = previousSuppressSelectionUpdate;
 
-        const QRectF bounds = root_->subtreeBounds;
+        QRectF bounds = root_->subtreeBounds;
+        bounds = bounds.united(addParentRootItems());
+
         scene_.setSceneRect(bounds.adjusted(-FreeCanvasMargin, -FreeCanvasMargin,
                                             FreeCanvasMargin, FreeCanvasMargin));
         if (fitAfterRender) {
@@ -10369,11 +10588,47 @@ private:
         resetFileSystemWatcher();
     }
 
+    // Render the chain of parent .mycel roots as folder nodes to the left of the root, each joined to
+    // the node on its right by a connector. Returns their combined scene rect (empty for a top root)
+    // so the caller can extend the scene bounds to include them.
+    QRectF addParentRootItems()
+    {
+        const QStringList parents = parentRootChain();  // [outermost ... immediate parent]
+        if (parents.isEmpty() || !root_) {
+            return {};
+        }
+        const qreal centerY = root_->center.y();
+        const qreal gap = 90.0;
+        QPointF connectTo(root_->center.x() - root_->size.width() / 2.0, centerY);  // left edge to join
+        QRectF combined;
+        for (int i = parents.size() - 1; i >= 0; --i) {
+            const QString dir = parents.at(i);
+            auto* item = new ParentRootItem(dir, QFileInfo(dir).fileName());
+            item->setActivateHandler([this](const QString& path) { openRootFolder(path); });
+            const qreal halfW = item->boxWidth() / 2.0;
+            const qreal centerX = connectTo.x() - gap - halfW;
+            item->setPos(QPointF(centerX, centerY));
+            scene_.addItem(item);
+            combined = combined.united(item->mapRectToScene(item->boundingRect()));
+
+            QColor color = neutralStroke();
+            color.setAlpha(connectorLineAlpha());
+            auto* edge = new QGraphicsPathItem(edgePathBetweenPoints(QPointF(centerX + halfW, centerY), connectTo));
+            edge->setPen(QPen(color, 2.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            edge->setZValue(ConnectionLayerZ);
+            scene_.addItem(edge);
+
+            connectTo = QPointF(centerX - halfW, centerY);
+        }
+        return combined;
+    }
+
     void rebuild(bool fitAfterRebuild)
     {
         saveSideEditorNow();
         finishInlineRename(false);
-        root_ = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_);
+        root_ = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_,
+                         mycelStorageEnabled_);
         renderCurrentTree(fitAfterRebuild);
     }
 
@@ -10609,6 +10864,19 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
     if (node_->isDir) {
         const QString folderPath = itemPath;
         const bool isRootFolder = node_ == window->rootNode();
+        if (node_->isSubRoot) {
+            QAction* openRootAction = menu.addAction(QStringLiteral("このルートを開く"));
+            menu.addSeparator();
+            QAction* subSelected = menu.exec(screenPos);
+            if (subSelected == openRootAction) {
+                QTimer::singleShot(0, window, [window, folderPath] {
+                    if (window) {
+                        window->switchIntoSubRoot(folderPath);
+                    }
+                });
+            }
+            return;
+        }
         QAction* collapseAction = menu.addAction(node_->collapsed ? QStringLiteral("展開") : QStringLiteral("折りたたむ"));
         QMenu* newFileMenu = menu.addMenu(QStringLiteral("ファイルを作成"));
         QAction* fileBelowAction = newFileMenu->addAction(QStringLiteral("下の階層に作成"));
@@ -11240,17 +11508,20 @@ void NodeItem::activate()
     QPointer<MainWindow> window = window_;
     const QString path = node_->path;
     const bool isDir = node_->isDir;
+    const bool isSubRoot = node_->isSubRoot;
 
     window->cancelQueuedInlinePreviewToggle();
     if (scene()) {
         window->selectNodeItem(this, false);
     }
 
-    QTimer::singleShot(0, window, [window, path, isDir] {
+    QTimer::singleShot(0, window, [window, path, isDir, isSubRoot] {
         if (!window) {
             return;
         }
-        if (isDir) {
+        if (isSubRoot) {
+            window->switchIntoSubRoot(path);  // switch into this sub-root, recording the parent
+        } else if (isDir) {
             window->toggleCollapsedPath(path);
         } else {
             window->toggleInlinePreviewPath(path);
