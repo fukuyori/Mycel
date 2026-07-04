@@ -4,7 +4,7 @@ Mycel is a C++/Qt mind-map tool that uses the system's folder and file structure
 
 Instead of treating files as a vertical file list, Mycel lays out folders and files as connected nodes on a whiteboard-style canvas. It is designed for exploring project structure, understanding document sets, and organizing information as a map while keeping the underlying data in normal system folders and files.
 
-- Current version: 0.6.7
+- Current version: 0.6.8
 - Release history: [CHANGELOG.md](CHANGELOG.md)
 - Documentation index: [docs/README.ja.md](docs/README.ja.md)
 - Development plan: [docs/development-plan.ja.md](docs/development-plan.ja.md)
@@ -25,6 +25,15 @@ Instead of treating files as a vertical file list, Mycel lays out folders and fi
 - Multi-selection, range selection, and range zoom
 - Hierarchical `.mycel` roots: a child folder that has its own `.mycel` is shown as a Mycel-badged sub-root boundary (its contents are not expanded); double-click it to switch the board into that root. The parent root is drawn to the left of the root node, connected by an edge, and double-clicking it switches back up. Window position and size are kept when switching roots
 - Turn a folder into a child root ("子ルートにする") or integrate a sub-root back into its parent ("親に統合"), merging the child's metadata into the parent, from the folder/sub-root context menu
+
+### Board Mode (free-form card layout)
+
+- Toggle between the tree and the board from the View menu / toolbar. All files (folders excluded) appear as cards that can be placed freely — no snapping, unbounded working area
+- Layouts are saved as **patterns** (one pattern = one JSON under `.mycel/boards/`, no limit) with create/rename/delete and a per-pattern view; the last mode and pattern are restored on startup
+- Initial layout is one row per folder (root-direct files first, then 1st-level folders in tree order, …) with row tops aligned and even spacing based on visual width
+- Card context menu: preview, open, open with, color, and hide (from the pattern); real files are never deleted or renamed from the board
+- The hidden-cards dialog lists hidden and not-yet-placed cards (files added later) and calls them onto the board; cards whose real file disappeared leave the screen automatically
+- Card moves, hide, and show are integrated with undo/redo (`Ctrl + Z` / `Ctrl + Y`)
 
 ### File Operations
 
@@ -75,7 +84,8 @@ Mycel writes local metadata into a `.mycel` directory under the opened root fold
 | `.mycel/previews.json` | Preview open/closed state and size |
 | `.mycel/collapsed.json` | Folder collapse state |
 | `.mycel/links.json` | File-to-file links |
-| `.mycel/view.json` | Canvas view, window size, maximized state, and full-screen state |
+| `.mycel/view.json` | Canvas view, window size, maximized state, full-screen state, and display mode (tree/board) |
+| `.mycel/boards/<name>.json` | Board patterns (card positions, hidden state, per-pattern view) |
 
 In `--no-mycel` mode, Mycel does not load or create these files. Reordering, node color changes, file-to-file linking, folder collapse restoration, and persisted view/window restoration are disabled in this mode.
 
