@@ -449,6 +449,7 @@ bool isCsvPreviewFile(const QFileInfo& info);
 bool isImagePreviewFile(const QFileInfo& info);
 bool isVideoPreviewFile(const QFileInfo& info);
 std::optional<QString> youtubeEmbedUrlForFile(const QFileInfo& info);
+std::optional<QUrl> urlForShortcutFile(const QFileInfo& info);
 
 QSize imagePixelSizeForFile(const QFileInfo& info)
 {
@@ -817,6 +818,10 @@ QSizeF automaticPreviewSize(const QFileInfo& info)
 
     if (youtubeEmbedUrlForFile(info)) {
         return QSizeF(560.0, 340.0);
+    }
+
+    if (urlForShortcutFile(info)) {
+        return QSizeF(520.0, 300.0);
     }
 
     if (isMarkdownPreviewFile(info)) {
@@ -1454,6 +1459,326 @@ std::optional<QUrl> firstUrlFromText(const QString& text)
         return std::nullopt;
     }
     return url;
+}
+
+QString urlShortcutFileName(const QUrl& url)
+{
+    QString stem = url.host().trimmed();
+    const QStringList pathParts = url.path().split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    if (!pathParts.isEmpty()) {
+        const QString lastPart = QUrl::fromPercentEncoding(pathParts.last().toUtf8()).trimmed();
+        if (!lastPart.isEmpty()) {
+            stem += stem.isEmpty() ? lastPart : QStringLiteral(" ") + lastPart;
+        }
+    }
+    if (stem.isEmpty()) {
+        stem = QStringLiteral("URL");
+    }
+
+    stem.replace(QRegularExpression(QStringLiteral(R"([<>:"/\\|?*\x00-\x1f])")), QStringLiteral(" "));
+    stem = stem.simplified();
+    while (stem.endsWith(QLatin1Char('.')) || stem.endsWith(QLatin1Char(' '))) {
+        stem.chop(1);
+    }
+    if (stem.isEmpty()) {
+        stem = QStringLiteral("URL");
+    }
+    if (stem.size() > 80) {
+        stem = stem.left(80).trimmed();
+    }
+    return stem + QStringLiteral(".url");
+}
+
+QByteArray urlShortcutBytes(const QUrl& url)
+{
+    const QString text = QStringLiteral("[InternetShortcut]\nURL=%1\n").arg(url.toString());
+    return text.toUtf8();
+}
+
+std::optional<QUrl> urlForShortcutFile(const QFileInfo& info)
+{
+    if (!info.exists() || !info.isFile() ||
+        info.suffix().compare(QStringLiteral("url"), Qt::CaseInsensitive) != 0 ||
+        info.size() > 64 * 1024) {
+        return std::nullopt;
+    }
+
+    QFile file(info.absoluteFilePath());
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return std::nullopt;
+    }
+    return firstUrlFromText(QString::fromUtf8(file.read(64 * 1024)));
+}
+
+QString htmlAttributeDecoded(QString value)
+{
+    value = value.trimmed();
+    if (!value.contains(QLatin1Char('&'))) {
+        return value;
+    }
+
+    QTextDocument doc;
+    doc.setHtml(value);
+    return doc.toPlainText().trimmed();
+}
+
+QString htmlTagAttributeValue(const QString& tag, const QString& attributeName)
+{
+    static const QRegularExpression attributePattern(
+        QStringLiteral("([A-Za-z_:][-A-Za-z0-9_:.]*)\\s*=\\s*(\"([^\"]*)\"|'([^']*)'|([^\\s\"'=<>`]+))"),
+        QRegularExpression::CaseInsensitiveOption);
+
+    const QString wanted = attributeName.toLower();
+    QRegularExpressionMatchIterator it = attributePattern.globalMatch(tag);
+    while (it.hasNext()) {
+        const QRegularExpressionMatch match = it.next();
+        if (match.captured(1).toLower() != wanted) {
+            continue;
+        }
+        QString value = match.captured(3);
+        if (value.isEmpty()) {
+            value = match.captured(4);
+        }
+        if (value.isEmpty()) {
+            value = match.captured(5);
+        }
+        return htmlAttributeDecoded(value);
+    }
+    return {};
+}
+
+std::optional<QUrl> resolvedHttpImageUrl(const QString& value, const QUrl& baseUrl)
+{
+    QString candidate = value.trimmed();
+    if (candidate.isEmpty() || candidate.startsWith(QStringLiteral("data:"), Qt::CaseInsensitive)) {
+        return std::nullopt;
+    }
+
+    const QUrl resolved = baseUrl.resolved(QUrl(candidate));
+    const QString scheme = resolved.scheme().toLower();
+    if (!resolved.isValid() || (scheme != QStringLiteral("http") && scheme != QStringLiteral("https"))) {
+        return std::nullopt;
+    }
+    return resolved;
+}
+
+std::optional<QUrl> resolvedHttpImageUrlFromSrcset(const QString& srcset, const QUrl& baseUrl)
+{
+    const QStringList candidates = srcset.split(QLatin1Char(','), Qt::SkipEmptyParts);
+    for (QString candidate : candidates) {
+        candidate = candidate.trimmed();
+        const int whitespace = candidate.indexOf(QRegularExpression(QStringLiteral("\\s")));
+        if (whitespace > 0) {
+            candidate = candidate.left(whitespace);
+        }
+        if (auto url = resolvedHttpImageUrl(candidate, baseUrl)) {
+            return url;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<QUrl> resolvedHttpImageUrlFromJsonishAttribute(QString value, const QUrl& baseUrl)
+{
+    value = value.trimmed();
+    if (value.isEmpty()) {
+        return std::nullopt;
+    }
+
+    static const QRegularExpression urlPattern(QStringLiteral(R"((https?:\\?/\\?/[^"\\]+))"),
+                                               QRegularExpression::CaseInsensitiveOption);
+    QRegularExpressionMatchIterator it = urlPattern.globalMatch(value);
+    while (it.hasNext()) {
+        QString candidate = it.next().captured(1);
+        candidate.replace(QStringLiteral("\\/"), QStringLiteral("/"));
+        candidate.replace(QStringLiteral("\\u0026"), QStringLiteral("&"));
+        if (auto url = resolvedHttpImageUrl(candidate, baseUrl)) {
+            return url;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<QUrl> imageUrlFromImgTag(const QString& tag, const QUrl& baseUrl)
+{
+    for (const QString& attribute : {QStringLiteral("data-old-hires"), QStringLiteral("src"),
+                                     QStringLiteral("data-src"), QStringLiteral("data-original"),
+                                     QStringLiteral("data-lazy-src")}) {
+        if (auto url = resolvedHttpImageUrl(htmlTagAttributeValue(tag, attribute), baseUrl)) {
+            return url;
+        }
+    }
+    if (auto url = resolvedHttpImageUrlFromSrcset(htmlTagAttributeValue(tag, QStringLiteral("srcset")), baseUrl)) {
+        return url;
+    }
+    if (auto url = resolvedHttpImageUrlFromJsonishAttribute(
+            htmlTagAttributeValue(tag, QStringLiteral("data-a-dynamic-image")), baseUrl)) {
+        return url;
+    }
+    return std::nullopt;
+}
+
+int htmlDimensionAttribute(const QString& tag, const QString& attributeName)
+{
+    const QString value = htmlTagAttributeValue(tag, attributeName);
+    if (value.contains(QLatin1Char('%'))) {
+        return 0;
+    }
+    static const QRegularExpression numberPattern(QStringLiteral("^\\s*(\\d{1,5})"));
+    const QRegularExpressionMatch match = numberPattern.match(value);
+    return match.hasMatch() ? match.captured(1).toInt() : 0;
+}
+
+bool imageRankTextContainsAny(const QString& text, const QStringList& words)
+{
+    for (const QString& word : words) {
+        if (text.contains(word)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int scoreImageCandidate(const QString& tag, const QUrl& imageUrl, const QUrl& baseUrl, int index)
+{
+    const QString id = htmlTagAttributeValue(tag, QStringLiteral("id"));
+    const QString classes = htmlTagAttributeValue(tag, QStringLiteral("class"));
+    const QString alt = htmlTagAttributeValue(tag, QStringLiteral("alt"));
+    const QString src = imageUrl.toString();
+    const QString rankText = QStringLiteral("%1 %2 %3 %4")
+                                 .arg(id, classes, alt, src)
+                                 .toLower();
+
+    int score = 100 - std::min(index, 30);
+    if (imageUrl.host().compare(baseUrl.host(), Qt::CaseInsensitive) == 0) {
+        score += 6;
+    }
+
+    const QString path = imageUrl.path().toLower();
+    if (path.endsWith(QStringLiteral(".jpg")) || path.endsWith(QStringLiteral(".jpeg")) ||
+        path.endsWith(QStringLiteral(".png")) || path.endsWith(QStringLiteral(".webp"))) {
+        score += 8;
+    } else if (path.endsWith(QStringLiteral(".svg")) || path.endsWith(QStringLiteral(".gif"))) {
+        score -= 70;
+    }
+
+    const int width = htmlDimensionAttribute(tag, QStringLiteral("width"));
+    const int height = htmlDimensionAttribute(tag, QStringLiteral("height"));
+    if (width > 0 && height > 0) {
+        if (width <= 2 || height <= 2) {
+            score -= 200;
+        } else if (width < 80 || height < 80) {
+            score -= 80;
+        } else {
+            const qint64 area = static_cast<qint64>(width) * static_cast<qint64>(height);
+            if (area >= 480000) {
+                score += 45;
+            } else if (area >= 120000) {
+                score += 30;
+            } else if (area >= 40000) {
+                score += 15;
+            }
+            const double ratio = static_cast<double>(width) / static_cast<double>(height);
+            score += (ratio >= 0.45 && ratio <= 3.8) ? 12 : -30;
+        }
+    }
+
+    if (imageRankTextContainsAny(rankText, {QStringLiteral("hero"), QStringLiteral("main"),
+                                            QStringLiteral("visual"), QStringLiteral("cover"),
+                                            QStringLiteral("eyecatch"), QStringLiteral("article"),
+                                            QStringLiteral("photo"), QStringLiteral("picture"),
+                                            QStringLiteral("product"), QStringLiteral("media"),
+                                            QStringLiteral("content")})) {
+        score += 30;
+    }
+    if (alt.size() >= 4) {
+        score += 6;
+    }
+    if (imageRankTextContainsAny(rankText, {QStringLiteral("logo"), QStringLiteral("icon"),
+                                            QStringLiteral("favicon"), QStringLiteral("sprite"),
+                                            QStringLiteral("pixel"), QStringLiteral("tracking"),
+                                            QStringLiteral("beacon"), QStringLiteral("spacer"),
+                                            QStringLiteral("transparent"), QStringLiteral("blank")})) {
+        score -= 120;
+    }
+    if (imageRankTextContainsAny(rankText, {QStringLiteral("avatar"), QStringLiteral("profile"),
+                                            QStringLiteral("badge"), QStringLiteral("button"),
+                                            QStringLiteral("emoji"), QStringLiteral("ad-"),
+                                            QStringLiteral("ads"), QStringLiteral("banner")})) {
+        score -= 55;
+    }
+    return score;
+}
+
+std::optional<QUrl> rankedImageUrlFromHtml(const QString& html, const QUrl& baseUrl,
+                                           const QRegularExpression& imgPattern)
+{
+    std::optional<QUrl> bestUrl;
+    int bestScore = std::numeric_limits<int>::min();
+    int index = 0;
+
+    QRegularExpressionMatchIterator imgIt = imgPattern.globalMatch(html);
+    while (imgIt.hasNext() && index < 40) {
+        const QString tag = imgIt.next().captured(0);
+        const auto url = imageUrlFromImgTag(tag, baseUrl);
+        if (!url) {
+            ++index;
+            continue;
+        }
+
+        const int score = scoreImageCandidate(tag, *url, baseUrl, index);
+        if (!bestUrl || score > bestScore) {
+            bestUrl = url;
+            bestScore = score;
+        }
+        ++index;
+    }
+
+    return bestScore > -20 ? bestUrl : std::nullopt;
+}
+
+std::optional<QUrl> firstImageUrlFromHtml(const QString& html, const QUrl& baseUrl)
+{
+    static const QRegularExpression metaPattern(QStringLiteral("<meta\\b[^>]*>"),
+                                                QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression imgPattern(QStringLiteral("<img\\b[^>]*>"),
+                                               QRegularExpression::CaseInsensitiveOption);
+
+    QRegularExpressionMatchIterator priorityImgIt = imgPattern.globalMatch(html);
+    const QString host = baseUrl.host().toLower();
+    const bool xPost = host == QStringLiteral("x.com") || host.endsWith(QStringLiteral(".x.com")) ||
+                       host == QStringLiteral("twitter.com") || host.endsWith(QStringLiteral(".twitter.com"));
+    while (priorityImgIt.hasNext()) {
+        const QString tag = priorityImgIt.next().captured(0);
+        const QString id = htmlTagAttributeValue(tag, QStringLiteral("id")).toLower();
+        const QString alt = htmlTagAttributeValue(tag, QStringLiteral("alt")).trimmed();
+        if (id != QStringLiteral("landingimage") &&
+            alt != QStringLiteral("見出し画像") &&
+            !(xPost && alt == QStringLiteral("画像"))) {
+            continue;
+        }
+        if (auto url = imageUrlFromImgTag(tag, baseUrl)) {
+            return url;
+        }
+    }
+
+    QRegularExpressionMatchIterator metaIt = metaPattern.globalMatch(html);
+    while (metaIt.hasNext()) {
+        const QString tag = metaIt.next().captured(0);
+        const QString property = htmlTagAttributeValue(tag, QStringLiteral("property")).toLower();
+        const QString name = htmlTagAttributeValue(tag, QStringLiteral("name")).toLower();
+        if (property != QStringLiteral("og:image") &&
+            property != QStringLiteral("og:image:url") &&
+            name != QStringLiteral("twitter:image") &&
+            name != QStringLiteral("twitter:image:src")) {
+            continue;
+        }
+        if (auto url = resolvedHttpImageUrl(htmlTagAttributeValue(tag, QStringLiteral("content")), baseUrl)) {
+            return url;
+        }
+    }
+
+    return rankedImageUrlFromHtml(html, baseUrl, imgPattern);
 }
 
 QString youtubeWatchUrlFromEmbedUrl(const QString& embedUrl)
@@ -3618,6 +3943,84 @@ private:
 
     QLabel* thumbnailLabel_ = nullptr;
     QString watchUrl_;
+    QPixmap originalThumbnail_;
+};
+
+class UrlThumbnailPreview final : public QWidget {
+public:
+    explicit UrlThumbnailPreview(const QUrl& url, const QString& thumbnailPath, QWidget* parent = nullptr) : QWidget(parent)
+    {
+        setProperty("mycelInlinePreview", true);
+        setAutoFillBackground(false);
+        url_ = url;
+        setToolTip(url_.toString());
+
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(4);
+
+        thumbnailLabel_ = new QLabel(this);
+        thumbnailLabel_->setProperty("mycelInlinePreview", true);
+        thumbnailLabel_->setAlignment(Qt::AlignCenter);
+        thumbnailLabel_->setMinimumSize(1, 1);
+        thumbnailLabel_->setStyleSheet(QStringLiteral("background: #f8fafc; color: #243036;"));
+        thumbnailLabel_->setCursor(Qt::PointingHandCursor);
+        thumbnailLabel_->setToolTip(url_.toString());
+        layout->addWidget(thumbnailLabel_, 1);
+
+        auto* footer = new QWidget(this);
+        footer->setProperty("mycelInlinePreview", true);
+        auto* footerLayout = new QHBoxLayout(footer);
+        footerLayout->setContentsMargins(4, 0, 4, 2);
+        footerLayout->addStretch(1);
+        auto* openButton = new QPushButton(QStringLiteral("開く"), footer);
+        openButton->setCursor(Qt::PointingHandCursor);
+        footerLayout->addWidget(openButton);
+        layout->addWidget(footer, 0);
+
+        connect(openButton, &QPushButton::clicked, this, [this] {
+            QDesktopServices::openUrl(url_);
+        });
+        thumbnailLabel_->installEventFilter(this);
+        originalThumbnail_.load(thumbnailPath);
+        if (originalThumbnail_.isNull()) {
+            thumbnailLabel_->setText(QStringLiteral("サムネイルがありません"));
+        } else {
+            updateThumbnailPixmap();
+        }
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (watched == thumbnailLabel_ && event->type() == QEvent::MouseButtonRelease) {
+            QDesktopServices::openUrl(url_);
+            return true;
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+
+    void resizeEvent(QResizeEvent* event) override
+    {
+        QWidget::resizeEvent(event);
+        updateThumbnailPixmap();
+    }
+
+private:
+    void updateThumbnailPixmap()
+    {
+        if (!thumbnailLabel_ || originalThumbnail_.isNull()) {
+            return;
+        }
+        const QSize target = thumbnailLabel_->size();
+        if (target.isEmpty()) {
+            return;
+        }
+        thumbnailLabel_->setPixmap(originalThumbnail_.scaled(target, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+
+    QLabel* thumbnailLabel_ = nullptr;
+    QUrl url_;
     QPixmap originalThumbnail_;
 };
 
@@ -6034,6 +6437,49 @@ public:
         sideEditorStatusLabel_->setText(QStringLiteral("保存済み"));
     }
 
+    bool showUrlShortcutSidePreview(const QFileInfo& info)
+    {
+        const auto url = urlForShortcutFile(info);
+        if (!url) {
+            return false;
+        }
+
+        QString cachePath;
+        if (const auto embedUrl = youtubeEmbedUrlForFile(info)) {
+            const QString youtubeCachePath = youtubeThumbnailCachePathForEmbedUrl(*embedUrl);
+            if (!youtubeCachePath.isEmpty() && QFileInfo::exists(youtubeCachePath)) {
+                cachePath = youtubeCachePath;
+            }
+        }
+        if (cachePath.isEmpty()) {
+            const QString urlCachePath = urlThumbnailCachePathForUrl(*url);
+            if (!urlCachePath.isEmpty() && QFileInfo::exists(urlCachePath)) {
+                cachePath = urlCachePath;
+            }
+        }
+
+        if (!cachePath.isEmpty()) {
+            QPixmap pixmap(cachePath);
+            if (!pixmap.isNull()) {
+                if (auto* imagePreview = dynamic_cast<AspectImagePreview*>(sidePreviewImage_)) {
+                    imagePreview->setPreviewPixmap(pixmap);
+                } else {
+                    sidePreviewImage_->setPixmap(pixmap);
+                }
+                sidePreviewStack_->setCurrentWidget(sidePreviewImage_);
+                setSidePaneMode(false, QStringLiteral("URL プレビュー"));
+                sideEditorStatusLabel_->setText(QStringLiteral("URL プレビュー"));
+                return true;
+            }
+        }
+
+        const bool started = fetchUrlThumbnailForPreview(info.absoluteFilePath(), *url, false);
+        showSidePreviewText(started ? QStringLiteral("サムネイルを取得中です。\n\n%1").arg(url->toString())
+                                    : QStringLiteral("URLプレビュー画像を取得できませんでした。\n\n%1").arg(url->toString()),
+                            QStringLiteral("URL プレビュー"));
+        return true;
+    }
+
     void loadSidePreviewFile(const QString& path)
     {
         if (!saveSideEditorNow()) {
@@ -6054,6 +6500,9 @@ public:
         const QFileInfo info(path);
         if (!info.exists() || !info.isFile()) {
             showSidePreviewText(QStringLiteral("ファイルを開けませんでした。"), QStringLiteral("読み込み失敗"));
+            return;
+        }
+        if (showUrlShortcutSidePreview(info)) {
             return;
         }
         if (isDocumentThumbnailFile(info)) {
@@ -7348,6 +7797,20 @@ public:
         }
     }
 
+    bool hasPasteableWebUrl(const QMimeData* mimeData) const
+    {
+        if (!mimeData || !mimeData->hasUrls()) {
+            return false;
+        }
+        for (const QUrl& url : mimeData->urls()) {
+            if (!url.isLocalFile() &&
+                (url.scheme() == QStringLiteral("http") || url.scheme() == QStringLiteral("https"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool canPasteClipboardToFolder(Node* targetDir) const
     {
         if (!targetDir || !targetDir->isDir) {
@@ -7360,8 +7823,9 @@ public:
             return false;
         }
 
-        return canImportExternalUrls(mimeData, targetDir) || mimeData->hasImage() ||
-               mimeData->hasHtml() || mimeData->hasText() || pasteableBinaryFormat(mimeData).has_value();
+        return canImportExternalUrls(mimeData, targetDir) || hasPasteableWebUrl(mimeData) ||
+               mimeData->hasImage() || mimeData->hasHtml() || mimeData->hasText() ||
+               pasteableBinaryFormat(mimeData).has_value();
     }
 
     bool canPasteClipboardToFolderPath(const QString& folderPath) const
@@ -7402,14 +7866,33 @@ public:
         const QStringList historySelection = selectedNodePaths();
         QString destinationPath;
         bool saved = false;
+        if (mimeData->hasUrls()) {
+            for (const QUrl& url : mimeData->urls()) {
+                if (!url.isLocalFile() &&
+                    (url.scheme() == QStringLiteral("http") || url.scheme() == QStringLiteral("https"))) {
+                    destinationPath = availableImportPath(targetDir->path, urlShortcutFileName(url), false);
+                    saved = writeBytes(destinationPath, urlShortcutBytes(url));
+                    break;
+                }
+            }
+        }
         if (mimeData->hasText()) {
-            if (const auto embedUrl = youtubeEmbedUrlFromText(mimeData->text())) {
-                const QString videoId = youtubeVideoIdFromUrl(QUrl(*embedUrl));
-                const QString preferredName = videoId.isEmpty()
-                                                  ? QStringLiteral("YouTube.url")
-                                                  : QStringLiteral("YouTube %1.url").arg(videoId);
-                destinationPath = availableImportPath(targetDir->path, preferredName, false);
-                saved = writeBytes(destinationPath, (*embedUrl + QLatin1Char('\n')).toUtf8());
+            if (!saved) {
+                if (const auto embedUrl = youtubeEmbedUrlFromText(mimeData->text())) {
+                    const QString videoId = youtubeVideoIdFromUrl(QUrl(*embedUrl));
+                    const QString preferredName = videoId.isEmpty()
+                                                      ? QStringLiteral("YouTube.url")
+                                                      : QStringLiteral("YouTube %1.url").arg(videoId);
+                    destinationPath = availableImportPath(targetDir->path, preferredName, false);
+                    saved = writeBytes(destinationPath, urlShortcutBytes(QUrl(*embedUrl)));
+                }
+            }
+            if (!saved) {
+                const auto url = firstUrlFromText(mimeData->text());
+                if (url && url->isValid()) {
+                    destinationPath = availableImportPath(targetDir->path, urlShortcutFileName(*url), false);
+                    saved = writeBytes(destinationPath, urlShortcutBytes(*url));
+                }
             }
         }
         if (!saved && mimeData->hasImage()) {
@@ -8042,16 +8525,27 @@ public:
     {
         const QFileInfo info(path);
         const auto embedUrl = youtubeEmbedUrlForFile(info);
-        if (!embedUrl) {
+        if (embedUrl) {
+            const QString cachePath = youtubeThumbnailCachePathForEmbedUrl(*embedUrl);
+            if (!cachePath.isEmpty() && QFileInfo::exists(cachePath)) {
+                return true;
+            }
+
+            fetchYouTubeThumbnailForInlinePreview(path, *embedUrl);
+            return false;
+        }
+
+        const auto shortcutUrl = urlForShortcutFile(info);
+        if (!shortcutUrl) {
             return true;
         }
 
-        const QString cachePath = youtubeThumbnailCachePathForEmbedUrl(*embedUrl);
-        if (!cachePath.isEmpty() && QFileInfo::exists(cachePath)) {
+        const QString urlCachePath = urlThumbnailCachePathForUrl(*shortcutUrl);
+        if (!urlCachePath.isEmpty() && QFileInfo::exists(urlCachePath)) {
             return true;
         }
 
-        fetchYouTubeThumbnailForInlinePreview(path, *embedUrl);
+        fetchUrlThumbnailForPreview(path, *shortcutUrl, true);
         return false;
     }
 
@@ -8067,6 +8561,22 @@ public:
             return {};
         }
         return QDir(youtubeThumbnailCacheDirectoryPath()).filePath(videoId + QStringLiteral(".jpg"));
+    }
+
+    QString urlThumbnailCacheDirectoryPath() const
+    {
+        return QDir(rootPath_).filePath(QStringLiteral(".mycel/url-thumbnails"));
+    }
+
+    QString urlThumbnailCachePathForUrl(const QUrl& url) const
+    {
+        if (!url.isValid() || url.scheme().isEmpty()) {
+            return {};
+        }
+        const QString key = url.toString();
+        const QString hash = QString::fromLatin1(
+            QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha256).toHex());
+        return QDir(urlThumbnailCacheDirectoryPath()).filePath(hash + QStringLiteral(".png"));
     }
 
     void fetchYouTubeThumbnailForInlinePreview(const QString& path, const QString& embedUrl)
@@ -8129,6 +8639,130 @@ public:
             selectNodePath(path);
             recordDebugEvent(QStringLiteral("youtube thumbnail cached: %1").arg(relativeKeyForPath(path)));
         });
+    }
+
+    bool fetchUrlThumbnailForPreview(const QString& path, const QUrl& pageUrl, bool openInlinePreview)
+    {
+        if (!mycelStorageEnabled_) {
+            recordDebugEvent(QStringLiteral("url thumbnail skipped: .mycel disabled"));
+            return false;
+        }
+
+        const QString cachePath = urlThumbnailCachePathForUrl(pageUrl);
+        if (cachePath.isEmpty()) {
+            recordDebugEvent(QStringLiteral("url thumbnail skipped: invalid url"));
+            return false;
+        }
+
+        if (openInlinePreview) {
+            pendingUrlThumbnailInlineOpenPaths_.insert(path);
+        }
+        if (pendingUrlThumbnailPaths_.contains(path)) {
+            return true;
+        }
+
+        QDir dir;
+        if (!dir.mkpath(urlThumbnailCacheDirectoryPath())) {
+            recordDebugEvent(QStringLiteral("url thumbnail cache mkdir failed"));
+            return false;
+        }
+
+        pendingUrlThumbnailPaths_.insert(path);
+        recordDebugEvent(QStringLiteral("url thumbnail page fetch: %1").arg(relativeKeyForPath(path)));
+
+        auto* pageManager = new QNetworkAccessManager(this);
+        QNetworkRequest pageRequest{pageUrl};
+        pageRequest.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        pageRequest.setHeader(QNetworkRequest::UserAgentHeader,
+                              QStringLiteral("Mozilla/5.0 Mycel/%1").arg(QString::fromLatin1(MYCEL_VERSION)));
+        QNetworkReply* pageReply = pageManager->get(pageRequest);
+        connect(pageReply, &QNetworkReply::finished, this, [this, pageManager, pageReply, path, pageUrl, cachePath] {
+            const QNetworkReply::NetworkError pageError = pageReply->error();
+            const QByteArray pageData = pageReply->readAll().left(512 * 1024);
+            pageReply->deleteLater();
+            pageManager->deleteLater();
+
+            if (pageError != QNetworkReply::NoError) {
+                pendingUrlThumbnailPaths_.remove(path);
+                pendingUrlThumbnailInlineOpenPaths_.remove(path);
+                recordDebugEvent(QStringLiteral("url thumbnail page fetch failed: %1").arg(relativeKeyForPath(path)));
+                if (sideEditorPath_ == path && !sideEditorEditing_) {
+                    showSidePreviewText(QStringLiteral("URLプレビュー画像を取得できませんでした。\n\n%1")
+                                            .arg(pageUrl.toString()),
+                                        QStringLiteral("URL プレビュー"));
+                }
+                return;
+            }
+
+            const auto imageUrl = firstImageUrlFromHtml(QString::fromUtf8(pageData), pageUrl);
+            if (!imageUrl) {
+                pendingUrlThumbnailPaths_.remove(path);
+                pendingUrlThumbnailInlineOpenPaths_.remove(path);
+                recordDebugEvent(QStringLiteral("url thumbnail image not found: %1").arg(relativeKeyForPath(path)));
+                if (sideEditorPath_ == path && !sideEditorEditing_) {
+                    showSidePreviewText(QStringLiteral("URLプレビュー画像が見つかりませんでした。\n\n%1")
+                                            .arg(pageUrl.toString()),
+                                        QStringLiteral("URL プレビュー"));
+                }
+                return;
+            }
+
+            auto* imageManager = new QNetworkAccessManager(this);
+            QNetworkRequest imageRequest{*imageUrl};
+            imageRequest.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+            imageRequest.setHeader(QNetworkRequest::UserAgentHeader,
+                                   QStringLiteral("Mozilla/5.0 Mycel/%1").arg(QString::fromLatin1(MYCEL_VERSION)));
+            QNetworkReply* imageReply = imageManager->get(imageRequest);
+            connect(imageReply, &QNetworkReply::finished, this,
+                    [this, imageManager, imageReply, path, pageUrl, cachePath] {
+                        const QNetworkReply::NetworkError imageError = imageReply->error();
+                        const QByteArray imageData = imageReply->readAll();
+                        imageReply->deleteLater();
+                        imageManager->deleteLater();
+                        pendingUrlThumbnailPaths_.remove(path);
+
+                        QPixmap pixmap;
+                        if (imageError != QNetworkReply::NoError || !pixmap.loadFromData(imageData)) {
+                            pendingUrlThumbnailInlineOpenPaths_.remove(path);
+                            recordDebugEvent(QStringLiteral("url thumbnail image fetch failed: %1")
+                                                 .arg(relativeKeyForPath(path)));
+                            if (sideEditorPath_ == path && !sideEditorEditing_) {
+                                showSidePreviewText(QStringLiteral("URLプレビュー画像を取得できませんでした。\n\n%1")
+                                                        .arg(pageUrl.toString()),
+                                                    QStringLiteral("URL プレビュー"));
+                            }
+                            return;
+                        }
+
+                        if (!pixmap.save(cachePath, "PNG")) {
+                            pendingUrlThumbnailInlineOpenPaths_.remove(path);
+                            recordDebugEvent(QStringLiteral("url thumbnail cache write failed"));
+                            return;
+                        }
+
+                        if (sideEditorPath_ == path && !sideEditorEditing_) {
+                            if (auto* imagePreview = dynamic_cast<AspectImagePreview*>(sidePreviewImage_)) {
+                                imagePreview->setPreviewPixmap(pixmap);
+                            } else {
+                                sidePreviewImage_->setPixmap(pixmap);
+                            }
+                            sidePreviewStack_->setCurrentWidget(sidePreviewImage_);
+                            setSidePaneMode(false, QStringLiteral("URL プレビュー"));
+                            sideEditorStatusLabel_->setText(QStringLiteral("URL プレビュー"));
+                        }
+
+                        const bool openInline = pendingUrlThumbnailInlineOpenPaths_.contains(path);
+                        pendingUrlThumbnailInlineOpenPaths_.remove(path);
+                        if (openInline && QFileInfo::exists(path)) {
+                            previewPaths_.insert(path);
+                            savePreviewFile();
+                            relayout();
+                            selectNodePath(path);
+                        }
+                        recordDebugEvent(QStringLiteral("url thumbnail cached: %1").arg(relativeKeyForPath(path)));
+                    });
+        });
+        return true;
     }
 
     void deleteSelectedItems()
@@ -9403,6 +10037,15 @@ public:
             return {};
         }
         return youtubeThumbnailCachePathForEmbedUrl(*embedUrl);
+    }
+
+    QString cachedUrlThumbnailPathForFile(const QString& path) const
+    {
+        const auto url = urlForShortcutFile(QFileInfo(path));
+        if (!url) {
+            return {};
+        }
+        return urlThumbnailCachePathForUrl(*url);
     }
 
 protected:
@@ -11166,6 +11809,8 @@ private:
     std::map<QString, QColor> userColors_;
     QSet<QString> previewPaths_;
     QSet<QString> pendingYouTubeThumbnailPaths_;
+    QSet<QString> pendingUrlThumbnailPaths_;
+    QSet<QString> pendingUrlThumbnailInlineOpenPaths_;
     QString queuedPreviewPath_;
     QString queuedCollapsePath_;
     QTimer previewClickTimer_;
@@ -11687,6 +12332,20 @@ void NodeItem::createPreviewWidget()
         youtubePreview->setProperty("mycelInlinePreviewPath", node_->path);
         previewProxy_ = new QGraphicsProxyWidget(this);
         previewProxy_->setWidget(youtubePreview);
+        previewProxy_->setZValue(1.0);
+        syncPreviewWidgetGeometry();
+        return;
+    }
+
+    if (const auto url = urlForShortcutFile(info)) {
+        const QString thumbnailPath = window_->cachedUrlThumbnailPathForFile(node_->path);
+        if (thumbnailPath.isEmpty() || !QFileInfo::exists(thumbnailPath)) {
+            return;
+        }
+        auto* urlPreview = new UrlThumbnailPreview(*url, thumbnailPath);
+        urlPreview->setProperty("mycelInlinePreviewPath", node_->path);
+        previewProxy_ = new QGraphicsProxyWidget(this);
+        previewProxy_->setWidget(urlPreview);
         previewProxy_->setZValue(1.0);
         syncPreviewWidgetGeometry();
         return;
