@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Mycel
+GenericName=Mind Map
+GenericName[ja]=マインドマップ
+Comment=Mind-map tool that uses folders and files as its data source
+Comment[ja]=フォルダーとファイルの構造をデータソースにするマインドマップツール
+Exec=mycel %f
+Icon=mycel
+Terminal=false
+Categories=Office;ProjectManagement;Qt;
+MimeType=inode/directory;
+StartupWMClass=mycel

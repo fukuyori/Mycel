@@ -301,6 +301,20 @@ If you use MinGW or a specific generator, pass `-Generator`:
 .\scripts\build-windows.ps1 -Generator "Ninja" -CMakePrefixPath "C:\Qt\6.x\mingw_64"
 ```
 
+### Linux Package (.deb)
+
+Build and create a `.deb` package in one step (requires `dpkg-dev`):
+
+```sh
+./scripts/package-linux.sh
+```
+
+The package is written to `dist/`. Installing it places `mycel` in `/usr/bin` and registers the desktop entry and icon for the application menu.
+
+```sh
+sudo apt install ./dist/mycel_<version>_amd64.deb
+```
+
 ### Windows Installer
 
 After building and deploying the Windows output, create an Inno Setup installer:

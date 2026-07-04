@@ -12757,6 +12757,9 @@ int main(int argc, char* argv[])
     QApplication app(argc, argv);
     app.setOrganizationName(QStringLiteral("Mycel"));
     app.setApplicationName(QStringLiteral("Mycel"));
+    // Match assets/mycel.desktop so Wayland/X11 shells associate the window
+    // with the installed desktop entry (taskbar icon, app grouping).
+    app.setDesktopFileName(QStringLiteral("mycel"));
     g_previousMessageHandler = qInstallMessageHandler(mycelMessageHandler);
     app.setWindowIcon(QIcon(":/icons/mycel.png"));
     if (!resolveStartupStorageMode(options)) {

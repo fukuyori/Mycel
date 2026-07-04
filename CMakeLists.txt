@@ -49,6 +49,15 @@ if(WIN32)
     set_target_properties(mycel PROPERTIES WIN32_EXECUTABLE ON)
 endif()
 
+if(UNIX AND NOT APPLE)
+    include(GNUInstallDirs)
+    install(TARGETS mycel RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(FILES assets/mycel.desktop
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+    install(FILES assets/mycel.png
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/256x256/apps)
+endif()
+
 target_link_libraries(mycel PRIVATE Qt6::Widgets Qt6::Network Qt6::Multimedia Qt6::MultimediaWidgets)
 # QZipReader (used to extract EPUB cover images) lives in Qt Core's private API.
 target_link_libraries(mycel PRIVATE Qt6::CorePrivate)
@@ -85,4 +94,22 @@ if(TARGET Qt6::Core)
     target_include_directories(mycel_fileops_test PRIVATE src)
     target_link_libraries(mycel_fileops_test PRIVATE Qt6::Core)
     add_test(NAME fileops COMMAND mycel_fileops_test)
+endif()
+
+# Packaging (Linux .deb). Run with: scripts/package-linux.sh
+if(UNIX AND NOT APPLE)
+    set(CPACK_PACKAGE_NAME "mycel")
+    set(CPACK_PACKAGE_VENDOR "Noriaki Fukuyori")
+    set(CPACK_PACKAGE_CONTACT "Noriaki Fukuyori <fukuyori.n@gmail.com>")
+    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Mind-map tool that uses folders and files as its data source")
+    set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/fukuyori/Mycel")
+    set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+    set(CPACK_STRIP_FILES ON)
+    set(CPACK_GENERATOR "DEB")
+    set(CPACK_DEBIAN_PACKAGE_NAME "mycel")
+    set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+    set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
+    # Derive Depends: from the linked shared libraries (needs dpkg-dev installed).
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+    include(CPack)
 endif()
