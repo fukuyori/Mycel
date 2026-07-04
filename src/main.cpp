@@ -3786,7 +3786,9 @@ public:
     explicit TextEditorDialog(const QString& filePath, QWidget* parent = nullptr)
         : QDialog(parent), filePath_(filePath)
     {
-        setWindowTitle(QStringLiteral("Mycel Editor - %1").arg(QFileInfo(filePath_).fileName()));
+        // The trailing [*] placeholder is required by setWindowModified() (called from
+        // updateStatus()); Qt substitutes it with the platform's unsaved-change marker.
+        setWindowTitle(QStringLiteral("Mycel Editor - %1[*]").arg(QFileInfo(filePath_).fileName()));
         resize(860, 620);
 
         auto* layout = new QVBoxLayout(this);
@@ -5864,7 +5866,10 @@ public:
         openCenteredTextEditor(path);
     }
 
-    bool openCenteredTextEditor(const QString& path)
+    // `path` is taken by value on purpose: callers pass a reference into a Node's
+    // `path` member (e.g. focusEditorForNode(node->path)), and rebuild() below frees
+    // the whole node tree. A copy keeps the string alive for the post-rebuild uses.
+    bool openCenteredTextEditor(QString path)
     {
         if (!canEditTextFilePath(path)) {
             return false;
