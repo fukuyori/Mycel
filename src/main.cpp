@@ -7664,8 +7664,13 @@ public:
             return;
         }
         if (result.moved.empty()) {
-            // source already lives in the target directory: nothing to do
+            // source already lives in the target directory. Dropping a linked node onto its
+            // real parent folder is how the user removes the link, so do that instead of nothing.
             clearDragPreview();
+            if (hasIncomingFileLinkPath(sourcePath)) {
+                removeIncomingFileLinks(source);
+                return;
+            }
             rebuild(false);
             return;
         }
@@ -7749,6 +7754,30 @@ public:
             applyMovedMetadata(entry, targetDirPath, mycelStorageEnabled_);
         }
 
+        // Items that already lived in the target directory are skipped by moveInto and never
+        // appear in result.moved. Dropping a linked item onto its own real parent folder is how
+        // the user removes the link, so treat that case the same as the single-item path.
+        QSet<QString> movedOldPaths;
+        for (const FileOperationService::MovedEntry& entry : result.moved) {
+            movedOldPaths.insert(entry.oldPath);
+        }
+        std::vector<Node*> unlinkTargets;
+        for (NodeItem* item : dragItems) {
+            Node* node = item ? item->node() : nullptr;
+            if (!node || node == root_.get() || movedOldPaths.contains(node->path)) {
+                continue;
+            }
+            if (QDir::cleanPath(QFileInfo(node->path).absolutePath()) == QDir::cleanPath(targetDirPath) &&
+                hasIncomingFileLinkPath(node->path)) {
+                unlinkTargets.push_back(node);
+            }
+        }
+        for (Node* node : unlinkTargets) {
+            fileLinks_.erase(std::remove_if(fileLinks_.begin(), fileLinks_.end(),
+                                            [node](const FileLink& link) { return link.to == node->path; }),
+                             fileLinks_.end());
+        }
+
         recordDebugEvent(QStringLiteral("move drag saving metadata"));
         saveColorFile();
         savePreviewFile();
@@ -7764,8 +7793,9 @@ public:
             redoMoves.push_back({entry.oldPath, entry.newPath});
             undoMoves.push_back({entry.newPath, entry.oldPath});
         }
-        if (!redoMoves.empty()) {
-            recordHistory(QStringLiteral("移動"), std::move(redoMoves), std::move(undoMoves),
+        if (!redoMoves.empty() || !unlinkTargets.empty()) {
+            const QString description = redoMoves.empty() ? QStringLiteral("関連付け解除") : QStringLiteral("移動");
+            recordHistory(description, std::move(redoMoves), std::move(undoMoves),
                           historyBefore, historySelection);
         }
 
