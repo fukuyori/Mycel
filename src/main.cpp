@@ -116,6 +116,7 @@
 #include <QtWidgets/QVBoxLayout>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <filesystem>
 #include <functional>
@@ -157,6 +158,11 @@ constexpr qint64 RenameHashMaxFileSize = 10 * 1024 * 1024;
 // reliable change notifications). This is a safety net, not the primary detection path, so a
 // low frequency is fine -- the per-file hash cache keeps each sweep cheap.
 constexpr int BackgroundReconcileIntervalMs = 120000;
+// Delay before the deferred startup scan begins. The initial scan used to run inside the
+// MainWindow constructor, so on network drives or large roots the window did not appear until
+// every directory had been walked; this small delay lets the shown window paint its loading
+// state before the (still GUI-thread) visible-tree scan starts.
+constexpr int DeferredStartupDelayMs = 50;
 
 QString appVersion()
 {
@@ -988,6 +994,90 @@ QString describeHashSkipReason(const QFileInfo& info)
         return QStringLiteral("cloud placeholder, not downloaded locally");
     }
     return QStringLiteral("could not open/read the file");
+}
+
+// Everything the startup scan thread produces from its single whole-tree walk: the directory
+// and file lists the QFileSystemWatcher registration and the rename reconcile need, plus the
+// hash-cache entries that were missing or stale (the seeding updateHashCacheForTree() used to
+// do synchronously in the constructor). Computed off the GUI thread because on network drives
+// the walk is many stat round-trips and the seeding reads file contents.
+struct StartupScanResult {
+    QStringList directories;
+    QStringList files;
+    std::map<QString, FileHashCacheEntry> refreshedHashes;
+};
+
+// Runs on the startup scan thread. Pure function of the filesystem: touches no MainWindow
+// state, works on a copy of the hash cache, and bails out (returning a partial result that the
+// caller discards) as soon as `cancelled` is set so window close never waits on a slow walk.
+// The walk must match collectWatchedDirectories()/collectWatchedFiles(): only the root's own
+// .mycel is excluded, and the root directory itself leads the directory list.
+StartupScanResult runStartupScan(const QString& rootPath, bool mycelStorageEnabled,
+                                 const std::map<QString, FileHashCacheEntry>& knownHashes,
+                                 const std::atomic_bool& cancelled)
+{
+    StartupScanResult result;
+    const QFileInfo rootInfo(rootPath);
+    if (!rootInfo.isDir()) {
+        return result;
+    }
+
+    const QString metadataRoot = QDir::cleanPath(QDir(rootPath).filePath(QStringLiteral(".mycel")));
+    const auto isMetadataPath = [&metadataRoot](const QString& path) {
+        return path == metadataRoot || path.startsWith(metadataRoot + QLatin1Char('/'));
+    };
+
+    result.directories.append(rootInfo.absoluteFilePath());
+    QList<QFileInfo> fileInfos;
+    QDirIterator iterator(rootPath,
+                          QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+                          QDirIterator::Subdirectories);
+    while (iterator.hasNext()) {
+        if (cancelled.load()) {
+            return result;
+        }
+        iterator.next();
+        const QFileInfo info = iterator.fileInfo();
+        const QString path = QDir::cleanPath(info.absoluteFilePath());
+        if (isMetadataPath(path)) {
+            continue;
+        }
+        if (info.isDir()) {
+            result.directories.append(path);
+        } else {
+            result.files.append(path);
+            fileInfos.append(info);
+        }
+    }
+    result.directories.removeDuplicates();
+    result.files.removeDuplicates();
+
+    if (!mycelStorageEnabled) {
+        return result;
+    }
+
+    // Seed/refresh content hashes for rename detection (same skip rules as
+    // updateHashCacheEntryForFile: size cap, cloud placeholders, unchanged size+mtime).
+    const QDir root(rootPath);
+    for (const QFileInfo& info : fileInfos) {
+        if (cancelled.load()) {
+            return result;
+        }
+        if (info.size() > RenameHashMaxFileSize || isCloudPlaceholderFile(info)) {
+            continue;
+        }
+        const QString key = root.relativeFilePath(info.absoluteFilePath());
+        const qint64 mtimeMs = info.lastModified().toMSecsSinceEpoch();
+        const auto existing = knownHashes.find(key);
+        if (existing != knownHashes.end() && existing->second.size == info.size() &&
+            existing->second.mtimeMs == mtimeMs) {
+            continue;
+        }
+        if (const std::optional<QByteArray> hash = computeFileContentHash(info)) {
+            result.refreshedHashes[key] = FileHashCacheEntry{info.size(), mtimeMs, *hash};
+        }
+    }
+    return result;
 }
 
 // The exact folder-with-Mycel-badge glyph used for sub-root nodes, rendered into a pixmap so the
@@ -5041,32 +5131,29 @@ public:
             }
         });
 
-        loadMetadataAndReconcileHashCache();
-        if (!loadCollapsedFile()) {
-            applyLargeTreeStartupCollapse();
-        }
         applyTheme(uiTheme_, false, false);
         restoreWindowStateFromSettingsFile();
-        if (mycelStorageEnabled_) {
-            cleanHistoryTrash();  // discard any trash left behind by a previous session
-        }
-        rebuild(true);
-        // Restore the last display mode (board/tree) and active pattern for this root.
-        if (mycelStorageEnabled_) {
-            if (const std::optional<QJsonObject> viewObject = loadViewStateObject()) {
-                const QJsonObject board = viewObject->value(QStringLiteral("board")).toObject();
-                boardPatternName_ = board.value(QStringLiteral("pattern")).toString();
-                if (board.value(QStringLiteral("active")).toBool(false)) {
-                    setBoardMode(true, false);
-                }
-            }
-        }
-        QTimer::singleShot(0, this, [this] { syncEditorPaneVisibility(); });
+        // The initial scan is deferred so the window appears immediately: on network drives or
+        // roots with many files, the metadata load + tree scan used to keep the constructor --
+        // and therefore the first paint -- blocked for seconds to minutes.
+        showStartupLoadingIndicator();
+        QTimer::singleShot(DeferredStartupDelayMs, this, [this] { completeDeferredStartup(); });
         qApp->installEventFilter(this);
     }
 
     ~MainWindow() override
     {
+        // Stop the startup scan thread before any member teardown: it may still be walking the
+        // tree or posting its finished result back to this object. The cancel flag makes it
+        // return promptly, so the wait does not stall window close on a slow network walk.
+        if (startupScanCancelled_) {
+            startupScanCancelled_->store(true);
+        }
+        if (startupScanThread_) {
+            startupScanThread_->wait();
+            delete startupScanThread_;
+            startupScanThread_ = nullptr;
+        }
         if (qApp) {
             qApp->removeEventFilter(this);
         }
@@ -9814,6 +9901,127 @@ public:
         }
     }
 
+    // Placeholder shown between the (now instant) first paint and the first tree render; the
+    // scene_.clear() in renderCurrentTree()/renderBoardScene() removes it.
+    void showStartupLoadingIndicator()
+    {
+        QGraphicsSimpleTextItem* text = scene_.addSimpleText(QStringLiteral("読み込み中…"));
+        QFont font = text->font();
+        font.setPointSize(15);
+        text->setFont(font);
+        text->setBrush(palette().color(QPalette::WindowText));
+        text->setPos(140.0, 120.0);
+    }
+
+    // Deferred startup, run shortly after the window is first shown. Splits what the
+    // constructor used to do synchronously into (a) the bounded work needed to render the
+    // visible tree, done here, and (b) the whole-tree walk + hash seeding, pushed to a
+    // background thread (startStartupScanThread). The rename reconcile that used to precede
+    // the first render now runs when that thread reports back (finishStartupScan), so a file
+    // renamed externally while Mycel was closed keeps its metadata a moment later than before
+    // instead of blocking the first paint on a full-tree content read.
+    void completeDeferredStartup()
+    {
+        loadOrderFile();
+        loadColorFile();
+        loadPreviewFile();
+        loadLinkFile();
+        loadHashCacheFile();
+        if (!loadCollapsedFile()) {
+            applyLargeTreeStartupCollapse();
+        }
+        if (mycelStorageEnabled_) {
+            cleanHistoryTrash();  // discard any trash left behind by a previous session
+        }
+        rebuild(true);
+        // Restore the last display mode (board/tree) and active pattern for this root.
+        if (mycelStorageEnabled_) {
+            if (const std::optional<QJsonObject> viewObject = loadViewStateObject()) {
+                const QJsonObject board = viewObject->value(QStringLiteral("board")).toObject();
+                boardPatternName_ = board.value(QStringLiteral("pattern")).toString();
+                if (board.value(QStringLiteral("active")).toBool(false)) {
+                    setBoardMode(true, false);
+                }
+            }
+        }
+        QTimer::singleShot(0, this, [this] { syncEditorPaneVisibility(); });
+        startStartupScanThread();
+    }
+
+    void startStartupScanThread()
+    {
+        auto cancelled = std::make_shared<std::atomic_bool>(false);
+        startupScanCancelled_ = cancelled;
+        startupScanThread_ = QThread::create(
+            [this, rootPath = rootPath_, storageEnabled = mycelStorageEnabled_,
+             knownHashes = fileHashCache_, cancelled] {
+                StartupScanResult result = runStartupScan(rootPath, storageEnabled, knownHashes, *cancelled);
+                if (cancelled->load()) {
+                    return;  // window is closing; the destructor waits for this thread
+                }
+                QMetaObject::invokeMethod(
+                    this, [this, result = std::move(result)] { finishStartupScan(result); },
+                    Qt::QueuedConnection);
+            });
+        startupScanThread_->start();
+    }
+
+    // GUI-thread continuation of the startup scan: reconcile external renames against the
+    // walked lists, merge the seeded hashes, and bring the filesystem watcher online with the
+    // walked paths -- all without re-walking the tree on this thread.
+    void finishStartupScan(const StartupScanResult& result)
+    {
+        bool renameReconciled = false;
+        if (mycelStorageEnabled_ && !result.directories.isEmpty()) {
+            // Must run before merging refreshedHashes: an "appeared" file is one on disk but
+            // absent from the hash cache, so merging first would hide every rename candidate.
+            QSet<QString> currentPaths;
+            for (const QString& path : result.files) {
+                currentPaths.insert(path);
+            }
+            renameReconciled = reconcileRenamedFiles(result.directories, currentPaths,
+                                                     /*pruneUnmatchedMetadata=*/true,
+                                                     &result.refreshedHashes);
+            if (renameReconciled) {
+                persistRenameReconciliationResults();
+            }
+        }
+
+        bool hashCacheChanged = false;
+        for (const auto& [key, entry] : result.refreshedHashes) {
+            const auto existing = fileHashCache_.find(key);
+            // Skip entries something else (refreshAll, a watcher refresh) already brought to
+            // the same or a newer state than the walk saw.
+            if (existing != fileHashCache_.end() &&
+                (existing->second.mtimeMs > entry.mtimeMs ||
+                 (existing->second.mtimeMs == entry.mtimeMs && existing->second.size == entry.size &&
+                  existing->second.hash == entry.hash))) {
+                continue;
+            }
+            fileHashCache_[key] = entry;
+            hashCacheChanged = true;
+        }
+        if (hashCacheChanged) {
+            saveHashCacheFile();
+        }
+        if (renameReconciled) {
+            // The display tree still holds the old name/path until rescanned. The watcher
+            // resets inside this rebuild are still suppressed by startupScanPending_.
+            rebuild(false);
+        }
+
+        startupScanPending_ = false;
+        recordDebugEvent(QStringLiteral("startup scan finished: dirs=%1 files=%2 hashed=%3 reconciled=%4")
+                             .arg(result.directories.size())
+                             .arg(result.files.size())
+                             .arg(result.refreshedHashes.size())
+                             .arg(renameReconciled ? QStringLiteral("true") : QStringLiteral("false")));
+        if (fileSystemWatcher_ && !inlineRenameActivitySuspended_) {
+            applyFileSystemWatcherPaths(result.directories, result.files);
+        }
+        // If a rename was in progress, the resume path calls resetFileSystemWatcher() itself.
+    }
+
     void refreshAll()
     {
         cancelQueuedInlinePreviewToggle();
@@ -9878,7 +10086,17 @@ public:
         if (!fileSystemWatcher_ || inlineRenameActivitySuspended_) {
             return;
         }
+        if (startupScanPending_) {
+            // The startup scan thread is already producing the directory/file lists; walking
+            // the tree again here (renders during startup call this) would block the GUI
+            // thread on the exact traversal the deferred startup moved off it.
+            return;
+        }
+        applyFileSystemWatcherPaths(collectWatchedDirectories(), collectWatchedFiles());
+    }
 
+    void applyFileSystemWatcherPaths(const QStringList& directories, const QStringList& files)
+    {
         const QStringList currentFiles = fileSystemWatcher_->files();
         if (!currentFiles.isEmpty()) {
             fileSystemWatcher_->removePaths(currentFiles);
@@ -9888,11 +10106,9 @@ public:
             fileSystemWatcher_->removePaths(currentDirectories);
         }
 
-        const QStringList directories = collectWatchedDirectories();
         if (!directories.isEmpty()) {
             fileSystemWatcher_->addPaths(directories);
         }
-        const QStringList files = collectWatchedFiles();
         if (!files.isEmpty()) {
             fileSystemWatcher_->addPaths(files);
         }
@@ -10021,16 +10237,34 @@ public:
             return false;
         }
 
-        QSet<QString> dirKeys;
         QSet<QString> currentPaths;
         for (const QString& directoryPath : directories) {
-            dirKeys.insert(orderKeyForDirectory(directoryPath));
             const QDir dir(directoryPath);
             const QFileInfoList entries =
                 dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System, QDir::Name);
             for (const QFileInfo& info : entries) {
                 currentPaths.insert(info.absoluteFilePath());
             }
+        }
+        return reconcileRenamedFiles(directories, currentPaths, pruneUnmatchedMetadata, nullptr);
+    }
+
+    // Core reconcile. `currentPaths` is the current file listing of `directories` -- either
+    // gathered by the wrapper above or reused from the startup scan thread's walk. When
+    // `precomputedHashes` is given (startup path), appeared files take their content hash from
+    // it instead of being read on this (GUI) thread; the scan hashes every uncached file, so
+    // an appeared file missing from it is exactly one computeFileContentHash() would also skip.
+    bool reconcileRenamedFiles(const QStringList& directories, const QSet<QString>& currentPaths,
+                               bool pruneUnmatchedMetadata,
+                               const std::map<QString, FileHashCacheEntry>* precomputedHashes)
+    {
+        if (!mycelStorageEnabled_ || directories.isEmpty()) {
+            return false;
+        }
+
+        QSet<QString> dirKeys;
+        for (const QString& directoryPath : directories) {
+            dirKeys.insert(orderKeyForDirectory(directoryPath));
         }
 
         // Files these directories were previously known to contain, per the hash cache
@@ -10077,10 +10311,19 @@ public:
         }
         std::map<QByteArray, QStringList> appearedByHash;
         for (const QString& path : appeared) {
-            const QFileInfo info(path);
-            if (const std::optional<QByteArray> hash = computeFileContentHash(info)) {
+            std::optional<QByteArray> hash;
+            if (precomputedHashes) {
+                const auto found = precomputedHashes->find(relativeKeyForPath(path));
+                if (found != precomputedHashes->end()) {
+                    hash = found->second.hash;
+                }
+            } else {
+                hash = computeFileContentHash(QFileInfo(path));
+            }
+            if (hash) {
                 appearedByHash[*hash].append(path);
             } else {
+                const QFileInfo info(path);
                 recordDebugEvent(QStringLiteral("reconcile: could not hash appeared %1 (%2)")
                                      .arg(relativeKeyForPath(path), describeHashSkipReason(info)));
             }
@@ -10144,6 +10387,9 @@ public:
     {
         if (!mycelStorageEnabled_ || rootPath_.isEmpty() || !QFileInfo(rootPath_).isDir()) {
             return;
+        }
+        if (startupScanPending_) {
+            return;  // the startup scan thread does this pass; don't walk the tree twice
         }
         if ((view_ && view_->isDraggingNode()) || sideEditorEditing_ || inlineRenameActivitySuspended_ ||
             renameEdit_) {
@@ -13220,6 +13466,12 @@ private:
     QFileSystemWatcher* fileSystemWatcher_ = nullptr;
     QTimer fileSystemRefreshTimer_;
     QTimer backgroundReconcileTimer_;
+    // True from construction until finishStartupScan() has applied the background walk's
+    // results; while set, watcher resets and the periodic reconcile skip their own full-tree
+    // walks (the startup scan thread delivers the same data without blocking the GUI thread).
+    bool startupScanPending_ = true;
+    QThread* startupScanThread_ = nullptr;
+    std::shared_ptr<std::atomic_bool> startupScanCancelled_;
     QSet<QString> pendingFileSystemPaths_;
     std::map<QString, QSizeF> previewSizes_;
     std::map<QString, qreal> previewImageScales_;

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(Mycel VERSION 0.7.0 LANGUAGES CXX)
+project(Mycel VERSION 0.7.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,14 +13,21 @@ set(CMAKE_AUTOUIC ON)
 set(QT_NO_PRIVATE_MODULE_WARNING ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network Multimedia MultimediaWidgets CorePrivate)
-find_package(Qt6Quick QUIET CONFIG)
-find_package(Qt6QuickWidgets QUIET CONFIG)
-find_package(Qt6PrintSupport QUIET CONFIG)
-find_package(Qt6WebChannel QUIET CONFIG)
-find_package(Qt6Positioning QUIET CONFIG)
-find_package(Qt6WebEngineCore QUIET CONFIG)
-find_package(Qt6WebEngineWidgets QUIET CONFIG)
-find_package(Qt6Pdf QUIET CONFIG)
+
+# Optional modules are searched only inside the Qt installation Qt6 itself came from
+# (Qt6_DIR/.. is the cmake/ directory holding every Qt6* module of that installation).
+# With more than one Qt on the machine (e.g. the official installer's plus Homebrew's),
+# the default search would fill a module missing from the primary installation with the
+# other Qt's build, and a binary linking two Qt runtimes aborts at launch.
+get_filename_component(MYCEL_QT_CMAKE_DIR "${Qt6_DIR}/.." ABSOLUTE)
+find_package(Qt6Quick QUIET CONFIG PATHS "${MYCEL_QT_CMAKE_DIR}" NO_DEFAULT_PATH)
+find_package(Qt6QuickWidgets QUIET CONFIG PATHS "${MYCEL_QT_CMAKE_DIR}" NO_DEFAULT_PATH)
+find_package(Qt6PrintSupport QUIET CONFIG PATHS "${MYCEL_QT_CMAKE_DIR}" NO_DEFAULT_PATH)
+find_package(Qt6WebChannel QUIET CONFIG PATHS "${MYCEL_QT_CMAKE_DIR}" NO_DEFAULT_PATH)
+find_package(Qt6Positioning QUIET CONFIG PATHS "${MYCEL_QT_CMAKE_DIR}" NO_DEFAULT_PATH)
+find_package(Qt6WebEngineCore QUIET CONFIG PATHS "${MYCEL_QT_CMAKE_DIR}" NO_DEFAULT_PATH)
+find_package(Qt6WebEngineWidgets QUIET CONFIG PATHS "${MYCEL_QT_CMAKE_DIR}" NO_DEFAULT_PATH)
+find_package(Qt6Pdf QUIET CONFIG PATHS "${MYCEL_QT_CMAKE_DIR}" NO_DEFAULT_PATH)
 
 add_executable(mycel
     src/main.cpp
