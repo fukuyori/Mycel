@@ -148,6 +148,15 @@ constexpr qreal XStep = 260.0;
 constexpr qreal ParentChildGap = 80.0;
 constexpr qreal YStep = 72.0;
 constexpr qreal FreeCanvasMargin = 12000.0;
+// Files larger than this are skipped for rename-detection hashing: cloud-synced roots can hold
+// large placeholder files whose content is not resident locally, and hashing them would force
+// a full download just to compute an identity we rarely need for big files.
+constexpr qint64 RenameHashMaxFileSize = 10 * 1024 * 1024;
+// How often the background sweep re-checks every directory for external renames the live
+// QFileSystemWatcher notifications missed (some cloud-sync clients/network drives do not fire
+// reliable change notifications). This is a safety net, not the primary detection path, so a
+// low frequency is fine -- the per-file hash cache keeps each sweep cheap.
+constexpr int BackgroundReconcileIntervalMs = 120000;
 
 QString appVersion()
 {
@@ -216,6 +225,15 @@ struct Node {
 struct FileLink {
     QString from;
     QString to;
+};
+
+// Cached content hash for one file, keyed by its root-relative path. Recomputed only when
+// size or mtime no longer match, so unchanged (typically large, rarely-edited) files are not
+// re-read on every scan.
+struct FileHashCacheEntry {
+    qint64 size = 0;
+    qint64 mtimeMs = 0;
+    QByteArray hash;
 };
 
 struct ArchiveOrderEntry {
@@ -918,6 +936,58 @@ bool writeJsonFileAtomic(const QString& path, const QJsonObject& object)
         return false;
     }
     return file.write(payload) == payload.size();
+}
+
+// True when a file's content is not resident on disk (cloud-sync placeholder, e.g. OneDrive
+// Files On-Demand or Dropbox Smart Sync). Reading such a file forces a full download, so
+// rename-detection hashing must skip it. Non-Windows platforms report false: their sync clients
+// typically keep full local copies.
+bool isCloudPlaceholderFile(const QFileInfo& info)
+{
+#ifdef Q_OS_WIN
+    const DWORD attributes = GetFileAttributesW(reinterpret_cast<const wchar_t*>(info.absoluteFilePath().utf16()));
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        return false;
+    }
+    constexpr DWORD kRecallOnDataAccess = 0x00400000; // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+    return (attributes & (kRecallOnDataAccess | FILE_ATTRIBUTE_OFFLINE)) != 0;
+#else
+    Q_UNUSED(info);
+    return false;
+#endif
+}
+
+// Content hash used to recognize a file that was renamed outside Mycel (e.g. by a cloud-sync
+// client or another program). Returns nullopt for files too large to hash cheaply, cloud
+// placeholders, or on read failure.
+std::optional<QByteArray> computeFileContentHash(const QFileInfo& info)
+{
+    if (!info.isFile() || info.size() > RenameHashMaxFileSize || isCloudPlaceholderFile(info)) {
+        return std::nullopt;
+    }
+    QFile file(info.absoluteFilePath());
+    if (!file.open(QIODevice::ReadOnly)) {
+        return std::nullopt;
+    }
+    QCryptographicHash hash(QCryptographicHash::Sha1);
+    if (!hash.addData(&file)) {
+        return std::nullopt;
+    }
+    return hash.result();
+}
+
+// Explains why computeFileContentHash() returned nullopt for `info`, for diagnostic logging
+// only (reconcileRenamedFiles calls this so a failed rename match leaves a traceable reason
+// in the debug pane instead of just silently not matching).
+QString describeHashSkipReason(const QFileInfo& info)
+{
+    if (info.size() > RenameHashMaxFileSize) {
+        return QStringLiteral("too large: %1 bytes").arg(info.size());
+    }
+    if (isCloudPlaceholderFile(info)) {
+        return QStringLiteral("cloud placeholder, not downloaded locally");
+    }
+    return QStringLiteral("could not open/read the file");
 }
 
 // The exact folder-with-Mycel-badge glyph used for sub-root nodes, rendered into a pixmap so the
@@ -4954,6 +5024,10 @@ public:
                 this, [this](const QString& path) { scheduleFileSystemRefresh(path); });
         connect(&fileSystemRefreshTimer_, &QTimer::timeout, this, [this] { refreshFromFileSystemChange(); });
 
+        backgroundReconcileTimer_.setInterval(BackgroundReconcileIntervalMs);
+        connect(&backgroundReconcileTimer_, &QTimer::timeout, this, [this] { runBackgroundReconcile(); });
+        backgroundReconcileTimer_.start();
+
         previewClickTimer_.setSingleShot(true);
         connect(&previewClickTimer_, &QTimer::timeout, this, [this] {
             if (!queuedPreviewPath_.isEmpty()) {
@@ -4967,10 +5041,7 @@ public:
             }
         });
 
-        loadOrderFile();
-        loadColorFile();
-        loadPreviewFile();
-        loadLinkFile();
+        loadMetadataAndReconcileHashCache();
         if (!loadCollapsedFile()) {
             applyLargeTreeStartupCollapse();
         }
@@ -5672,10 +5743,7 @@ public:
         previewPaths_.clear();
         previewSizes_.clear();
         previewImageScales_.clear();
-        loadOrderFile();
-        loadColorFile();
-        loadPreviewFile();
-        loadLinkFile();
+        loadMetadataAndReconcileHashCache();
         if (!loadCollapsedFile()) {
             applyLargeTreeStartupCollapse();
         }
@@ -7300,6 +7368,10 @@ public:
         const QStringList historySelection = selectedNodePaths();
         userColors_[node->path] = color;
         saveColorFile();
+        // Hash the file the moment the user marks it as worth tracking, rather than waiting for
+        // a scan to get to it: a file colored right after being created/copied in has otherwise
+        // not been observed yet, so an external rename before the next scan would be unrecoverable.
+        ensureHashCachedForRenameTracking(node->path);
         scene_.update();  // color only affects painting, not layout
         recordHistory(QStringLiteral("色変更"), {}, {}, historyBefore, historySelection);
     }
@@ -7317,6 +7389,7 @@ public:
         const QStringList historySelection = selectedNodePaths();
         userColors_[path] = color;
         saveColorFile();
+        ensureHashCachedForRenameTracking(path);
         scene_.update();  // color only affects painting, not layout
         selectNodePath(path, true);
         recordHistory(QStringLiteral("色変更"), {}, {}, historyBefore, historySelection);
@@ -7521,6 +7594,7 @@ public:
         savePreviewFile();
         saveLinkFile();
         saveCollapsedFile();
+        saveHashCacheFile();
         rebuild(false);
         recordHistory(QStringLiteral("名前変更"), {{path, destination}}, {{destination, path}},
                       historyBefore, historySelection);
@@ -7552,6 +7626,7 @@ public:
         savePreviewFile();
         saveLinkFile();
         saveCollapsedFile();
+        saveHashCacheFile();
         rebuild(false);
         recordHistory(QStringLiteral("削除"), {{filePath, trashPath}}, {{trashPath, filePath}},
                       historyBefore, historySelection);
@@ -7589,6 +7664,7 @@ public:
         savePreviewFile();
         saveLinkFile();
         saveCollapsedFile();
+        saveHashCacheFile();
         rebuild(false);
         recordHistory(QStringLiteral("削除"), {{folderPath, trashPath}}, {{trashPath, folderPath}},
                       historyBefore, historySelection);
@@ -7640,9 +7716,24 @@ public:
         const MetadataSnapshot historyBefore = captureMetadataSnapshot();
         const QStringList historySelection = selectedNodePaths();
 
+        // A link source moving to a different folder takes its whole chain of link targets
+        // along, so the linked group stays physically together. Skipped when the source already
+        // lives in the target directory: that drop is the unlink gesture, not a move.
+        std::vector<FileOperationService::MoveRequest> requests;
+        requests.push_back({sourcePath, sourceIsDir, sourceIsRoot});
+        if (QDir::cleanPath(QFileInfo(sourcePath).absolutePath()) != QDir::cleanPath(targetDirPath)) {
+            for (const QString& linkedPath : linkedDescendantPaths(sourcePath)) {
+                const QFileInfo linkedInfo(linkedPath);
+                if (linkedInfo.exists()) {
+                    requests.push_back({linkedPath, linkedInfo.isDir(), false});
+                    recordDebugEvent(QStringLiteral("move node linked target follows: %1")
+                                         .arg(relativeKeyForPath(linkedPath)));
+                }
+            }
+        }
+
         pauseFileSystemWatcher();
-        const FileOperationService::MoveResult result = FileOperationService::moveInto(
-            {{sourcePath, sourceIsDir, sourceIsRoot}}, targetDirPath);
+        const FileOperationService::MoveResult result = FileOperationService::moveInto(requests, targetDirPath);
         recordDebugEvent(QStringLiteral("move node fs result: moved=%1 failed=%2 blocked=%3 sameDir=%4")
                              .arg(static_cast<int>(result.moved.size()))
                              .arg(static_cast<int>(result.failed.size()))
@@ -7675,20 +7766,29 @@ public:
             return;
         }
 
-        const FileOperationService::MovedEntry& entry = result.moved.front();
-        recordDebugEvent(QStringLiteral("move node metadata: %1 -> %2")
-                             .arg(relativeKeyForPath(entry.oldPath), relativeKeyForPath(entry.newPath)));
-        applyMovedMetadata(entry, targetDirPath, mycelStorageEnabled_ && !entry.isDir);
+        const bool multiMove = result.moved.size() > 1;
+        for (const FileOperationService::MovedEntry& entry : result.moved) {
+            recordDebugEvent(QStringLiteral("move node metadata: %1 -> %2")
+                                 .arg(relativeKeyForPath(entry.oldPath), relativeKeyForPath(entry.newPath)));
+            applyMovedMetadata(entry, targetDirPath, mycelStorageEnabled_ && (multiMove || !entry.isDir));
+        }
         saveColorFile();
         savePreviewFile();
         saveLinkFile();
         saveCollapsedFile();
-        if (mycelStorageEnabled_ && !entry.isDir) {
+        saveHashCacheFile();
+        if (mycelStorageEnabled_) {
             saveOrderFile();
         }
         rebuild(false);
-        recordHistory(QStringLiteral("移動"), {{entry.oldPath, entry.newPath}},
-                      {{entry.newPath, entry.oldPath}}, historyBefore, historySelection);
+        std::vector<std::pair<QString, QString>> redoMoves;
+        std::vector<std::pair<QString, QString>> undoMoves;
+        for (const FileOperationService::MovedEntry& entry : result.moved) {
+            redoMoves.push_back({entry.oldPath, entry.newPath});
+            undoMoves.push_back({entry.newPath, entry.oldPath});
+        }
+        recordHistory(QStringLiteral("移動"), std::move(redoMoves), std::move(undoMoves),
+                      historyBefore, historySelection);
     }
 
     void moveDragItemsToFolder(NodeItem* sourceItem, Node* targetDir)
@@ -7712,15 +7812,32 @@ public:
         }
 
         std::vector<FileOperationService::MoveRequest> requests;
+        QSet<QString> requestedPaths;
         for (NodeItem* item : dragItems) {
             Node* node = item ? item->node() : nullptr;
-            if (!node || node == root_.get()) {
+            if (!node || node == root_.get() || requestedPaths.contains(node->path)) {
                 continue;
             }
+            requestedPaths.insert(node->path);
             requests.push_back({node->path, node->isDir, false});
             recordDebugEvent(QStringLiteral("move drag request: %1 isDir=%2")
                                  .arg(relativeKeyForPath(node->path),
                                       node->isDir ? QStringLiteral("true") : QStringLiteral("false")));
+            // A link source moving to a different folder takes its chain of link targets along
+            // (same rule as the single-item move). Same-dir drops keep their unlink semantics.
+            if (QDir::cleanPath(QFileInfo(node->path).absolutePath()) == QDir::cleanPath(targetDirPath)) {
+                continue;
+            }
+            for (const QString& linkedPath : linkedDescendantPaths(node->path)) {
+                const QFileInfo linkedInfo(linkedPath);
+                if (!linkedInfo.exists() || requestedPaths.contains(linkedPath)) {
+                    continue;
+                }
+                requestedPaths.insert(linkedPath);
+                requests.push_back({linkedPath, linkedInfo.isDir(), false});
+                recordDebugEvent(QStringLiteral("move drag linked target follows: %1")
+                                     .arg(relativeKeyForPath(linkedPath)));
+            }
         }
 
         if (requests.empty()) {
@@ -7784,6 +7901,7 @@ public:
         saveOrderFile();
         saveLinkFile();
         saveCollapsedFile();
+        saveHashCacheFile();
         recordDebugEvent(QStringLiteral("move drag rebuild"));
         rebuild(false);
 
@@ -8201,26 +8319,104 @@ public:
             return;
         }
 
-        for (const FileLink& link : fileLinks_) {
-            if (link.from == from->path && link.to == to->path) {
-                relayout();  // already linked: just restore the layout after the drag
-                return;
+        const QString fromPath = from->path;
+        QString toPath = to->path;
+        const QString sourceDir = QFileInfo(fromPath).absolutePath();
+        // A link target is displayed beside its source, which reads as same-folder membership.
+        // When the dragged item lives in another real folder, move it into the source's folder
+        // first so the physical location matches the visual placement. The root itself can
+        // never be moved.
+        const bool needsMove = to != root_.get() &&
+                               QDir::cleanPath(QFileInfo(toPath).absolutePath()) != QDir::cleanPath(sourceDir);
+
+        if (!needsMove) {
+            for (const FileLink& link : fileLinks_) {
+                if (link.from == fromPath && link.to == toPath) {
+                    relayout();  // already linked: just restore the layout after the drag
+                    return;
+                }
             }
         }
 
         const MetadataSnapshot historyBefore = captureMetadataSnapshot();
         const QStringList historySelection = selectedNodePaths();
 
+        FileOperationService::MovedEntry movedEntry;
+        if (needsMove) {
+            pauseFileSystemWatcher();
+            const FileOperationService::MoveResult result = FileOperationService::moveInto(
+                {{toPath, to->isDir, false}}, sourceDir);
+            recordDebugEvent(QStringLiteral("link move fs result: moved=%1 failed=%2 blocked=%3")
+                                 .arg(static_cast<int>(result.moved.size()))
+                                 .arg(static_cast<int>(result.failed.size()))
+                                 .arg(result.blocked ? QStringLiteral("true") : QStringLiteral("false")));
+            if (result.blocked) {
+                QMessageBox::warning(this, QStringLiteral("Mycel"),
+                                     QStringLiteral("自分自身または配下へは移動できません。"));
+                rebuild(false);
+                return;
+            }
+            if (!result.failed.empty() || result.moved.empty()) {
+                QMessageBox::warning(this, QStringLiteral("Mycel"),
+                                     QStringLiteral("リンク先への移動ができませんでした。\n%1")
+                                         .arg(result.failed.empty() ? toPath : result.failed.front().second));
+                rebuild(false);
+                return;
+            }
+            movedEntry = result.moved.front();
+            recordDebugEvent(QStringLiteral("link move metadata: %1 -> %2")
+                                 .arg(relativeKeyForPath(movedEntry.oldPath), relativeKeyForPath(movedEntry.newPath)));
+            // Rekeys color/preview/collapse/order metadata AND any existing links that pointed
+            // at the old path, so the replace-erase below sees them under the new path.
+            applyMovedMetadata(movedEntry, sourceDir, mycelStorageEnabled_ && !movedEntry.isDir);
+            toPath = movedEntry.newPath;
+        }
+
         // A link target is placed beside exactly one source, so re-linking the same file
         // replaces its previous connection instead of leaving a stale line behind.
         fileLinks_.erase(std::remove_if(fileLinks_.begin(), fileLinks_.end(),
-                                        [to](const FileLink& link) { return link.to == to->path; }),
+                                        [&toPath](const FileLink& link) { return link.to == toPath; }),
                          fileLinks_.end());
 
-        fileLinks_.push_back({from->path, to->path});
+        fileLinks_.push_back({fromPath, toPath});
         saveLinkFile();
+        if (needsMove) {
+            saveColorFile();
+            savePreviewFile();
+            saveCollapsedFile();
+            saveHashCacheFile();
+            if (mycelStorageEnabled_ && !movedEntry.isDir) {
+                saveOrderFile();
+            }
+            rebuild(false);  // the tree structure changed (a node moved between folders)
+            recordHistory(QStringLiteral("関連付け"), {{movedEntry.oldPath, movedEntry.newPath}},
+                          {{movedEntry.newPath, movedEntry.oldPath}}, historyBefore, historySelection);
+            return;
+        }
         relayout();
         recordHistory(QStringLiteral("関連付け"), {}, {}, historyBefore, historySelection);
+    }
+
+    // All link targets reachable from `sourcePath` by following from->to edges transitively.
+    // A link target is displayed beside its source, so when the source moves to another folder
+    // its whole chain of targets is moved with it — the visual grouping is kept physical.
+    // Cycle-safe via the visited set.
+    QStringList linkedDescendantPaths(const QString& sourcePath) const
+    {
+        QStringList result;
+        QSet<QString> visited{sourcePath};
+        QStringList frontier{sourcePath};
+        while (!frontier.isEmpty()) {
+            const QString current = frontier.takeFirst();
+            for (const FileLink& link : fileLinks_) {
+                if (link.from == current && !visited.contains(link.to)) {
+                    visited.insert(link.to);
+                    result.append(link.to);
+                    frontier.append(link.to);
+                }
+            }
+        }
+        return result;
     }
 
     bool hasIncomingFileLink(Node* node) const
@@ -8953,6 +9149,7 @@ public:
         savePreviewFile();
         saveLinkFile();
         saveCollapsedFile();
+        saveHashCacheFile();
         rebuild(false);
 
         if (!redoMoves.empty()) {
@@ -9055,6 +9252,7 @@ public:
         savePreviewFile();
         saveLinkFile();
         saveCollapsedFile();
+        saveHashCacheFile();
     }
 
     QString historyTrashDir() const
@@ -9587,13 +9785,39 @@ public:
         rebuild(false);
     }
 
-    void refreshAll()
+    // Loads order/color/preview/link metadata plus the hash cache for the current rootPath_, and
+    // reconciles any renames that happened while this root was not open/watched (app not
+    // running, or a different root was open) before refreshing the cache for the current state.
+    // Order matters: reconciling first lets a vanished old path match a newly appeared path;
+    // seeding the cache for the new path first would make it look already-known and hide it from
+    // the "appeared" set. Callers still need to call loadCollapsedFile()/applyLargeTreeStartupCollapse()
+    // and rebuild() themselves, since collapse handling interacts with each caller's own flow
+    // (e.g. openRootFolder() always clears collapsedPaths_ first).
+    void loadMetadataAndReconcileHashCache()
     {
-        cancelQueuedInlinePreviewToggle();
         loadOrderFile();
         loadColorFile();
         loadPreviewFile();
         loadLinkFile();
+        loadHashCacheFile();
+
+        // Whole-tree scope: safe to prune metadata for files with no match anywhere in the root.
+        if (reconcileRenamedFiles(collectWatchedDirectories(), /*pruneUnmatchedMetadata=*/true)) {
+            persistRenameReconciliationResults();
+        }
+
+        // Seed/refresh hashes for every real file under the root (not just what the collapsed,
+        // depth- and child-limited display tree happens to show), so files inside collapsed or
+        // deeply nested folders are still recognized if renamed externally later.
+        if (updateHashCacheForTree()) {
+            saveHashCacheFile();
+        }
+    }
+
+    void refreshAll()
+    {
+        cancelQueuedInlinePreviewToggle();
+        loadMetadataAndReconcileHashCache();
         if (!loadCollapsedFile()) {
             applyLargeTreeStartupCollapse();
         }
@@ -9752,7 +9976,200 @@ public:
         return topLevel;
     }
 
+    // Raw changed directories for hash-cache/rename-reconciliation purposes: unlike
+    // pendingRefreshDirectories(), this does not substitute collapsed directories with their
+    // nearest visible ancestor, since reconciliation reads the real filesystem directly and does
+    // not need a directory to be visible (or expanded) in the display tree.
+    QStringList pendingChangedDirectoriesForHashSync() const
+    {
+        QStringList directories;
+        for (const QString& path : pendingFileSystemPaths_) {
+            const QString directory = refreshDirectoryForChangedPath(path);
+            if (directory.isEmpty() || isMetadataPath(directory)) {
+                continue;
+            }
+            directories.append(QDir::cleanPath(directory));
+        }
+        directories.removeDuplicates();
+        return directories;
+    }
+
     enum class SubtreeRefresh { Changed, Unchanged, NotFound };
+
+    // Detects files that vanished from one of `directories` and reappeared under a new path in
+    // ANY of `directories` -- not necessarily the same one, which is what lets this track a file
+    // moved to a different folder outside Mycel, not just renamed in place -- by matching content
+    // hashes. This operates directly on the filesystem and the hash cache — never on the
+    // displayed Node tree — because collapsed folders, the depth limit, and the per-folder child
+    // cap all prune what the tree shows, which would make renames/moves inside them undetectable
+    // if this relied on Node children instead.
+    // The vanished file's hash comes from the persisted cache (the file itself is gone); the
+    // appeared file's hash is computed fresh. A match is only trusted when it is unique on both
+    // sides — duplicate content among candidates is left unresolved rather than guessed. On a
+    // match, rekeys sidecar metadata and the hash cache from the old path to the new path, the
+    // same treatment as an in-app rename/move, so external changes (e.g. by a cloud-sync client)
+    // do not orphan color/preview/link/collapsed/order metadata.
+    // When `pruneUnmatchedMetadata` is true, a vanished file whose hash matches no appeared file
+    // anywhere in `directories` is treated as confirmed deleted and its metadata is purged --
+    // only safe when `directories` covers the whole watched tree (background sweep/startup),
+    // since a narrower scope could mistake "moved to a folder outside this batch" for "deleted".
+    // Returns true if anything changed (rekeyed or removed), so the caller knows whether to
+    // persist the affected sidecar files.
+    bool reconcileRenamedFiles(const QStringList& directories, bool pruneUnmatchedMetadata)
+    {
+        if (!mycelStorageEnabled_ || directories.isEmpty()) {
+            return false;
+        }
+
+        QSet<QString> dirKeys;
+        QSet<QString> currentPaths;
+        for (const QString& directoryPath : directories) {
+            dirKeys.insert(orderKeyForDirectory(directoryPath));
+            const QDir dir(directoryPath);
+            const QFileInfoList entries =
+                dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System, QDir::Name);
+            for (const QFileInfo& info : entries) {
+                currentPaths.insert(info.absoluteFilePath());
+            }
+        }
+
+        // Files these directories were previously known to contain, per the hash cache
+        // (independent of whatever the display tree currently shows for them).
+        QStringList previousPaths;
+        for (const auto& [key, entry] : fileHashCache_) {
+            Q_UNUSED(entry);
+            const QString parentKey = QFileInfo(key).path();
+            if (dirKeys.contains(parentKey == QStringLiteral(".") ? QString() : parentKey)) {
+                previousPaths.append(absolutePathForKey(key));
+            }
+        }
+
+        QStringList vanished;
+        for (const QString& path : previousPaths) {
+            if (!currentPaths.contains(path)) {
+                vanished.append(path);
+            }
+        }
+        if (vanished.isEmpty()) {
+            return false;
+        }
+
+        const QSet<QString> previousPathSet(previousPaths.begin(), previousPaths.end());
+        QStringList appeared;
+        for (const QString& path : currentPaths) {
+            if (!previousPathSet.contains(path)) {
+                appeared.append(path);
+            }
+        }
+
+        recordDebugEvent(QStringLiteral("reconcile candidates across %1 directories: vanished=%2 appeared=%3 prune=%4")
+                             .arg(directories.size())
+                             .arg(vanished.size())
+                             .arg(appeared.size())
+                             .arg(pruneUnmatchedMetadata ? QStringLiteral("true") : QStringLiteral("false")));
+
+        std::map<QByteArray, QStringList> vanishedByHash;
+        for (const QString& path : vanished) {
+            const auto cached = fileHashCache_.find(relativeKeyForPath(path));
+            if (cached != fileHashCache_.end()) {
+                vanishedByHash[cached->second.hash].append(path);
+            }
+        }
+        std::map<QByteArray, QStringList> appearedByHash;
+        for (const QString& path : appeared) {
+            const QFileInfo info(path);
+            if (const std::optional<QByteArray> hash = computeFileContentHash(info)) {
+                appearedByHash[*hash].append(path);
+            } else {
+                recordDebugEvent(QStringLiteral("reconcile: could not hash appeared %1 (%2)")
+                                     .arg(relativeKeyForPath(path), describeHashSkipReason(info)));
+            }
+        }
+
+        bool changed = false;
+        for (const auto& [hash, oldCandidates] : vanishedByHash) {
+            if (oldCandidates.size() != 1) {
+                recordDebugEvent(QStringLiteral("reconcile: ambiguous vanished group (%1 files share a hash)")
+                                     .arg(oldCandidates.size()));
+                continue;  // ambiguous: duplicate content among vanished files -- leave alone
+            }
+            const QString& oldPath = oldCandidates.front();
+            const auto match = appearedByHash.find(hash);
+            if (match == appearedByHash.end()) {
+                if (pruneUnmatchedMetadata) {
+                    removeDeletedPathMetadata(oldPath, false);
+                    recordDebugEvent(QStringLiteral("reconcile: no match anywhere for vanished %1, removing its metadata")
+                                         .arg(relativeKeyForPath(oldPath)));
+                    changed = true;
+                }
+                continue;
+            }
+            if (match->second.size() != 1) {
+                recordDebugEvent(QStringLiteral("reconcile: ambiguous appeared group (%1 files share a hash)")
+                                     .arg(match->second.size()));
+                continue;  // ambiguous among appeared files -- leave alone
+            }
+            const QString& newPath = match->second.front();
+            rekeyPathMetadataAfterRename(oldPath, newPath, false);
+            recordDebugEvent(QStringLiteral("reconcile: matched rename/move %1 -> %2")
+                                 .arg(relativeKeyForPath(oldPath), relativeKeyForPath(newPath)));
+            changed = true;
+        }
+        return changed;
+    }
+
+    void persistRenameReconciliationResults()
+    {
+        saveColorFile();
+        saveOrderFile();
+        savePreviewFile();
+        saveLinkFile();
+        saveCollapsedFile();
+        // The reconcile rekeyed fileHashCache_ in memory too. Persist it now: the later
+        // updateHashCacheForTree()/ForDirectory() passes see every current file as already
+        // hashed (the rekeyed entries match size/mtime), report "no change", and skip their
+        // save — leaving hashcache.json holding the pre-rename names. A stale cache makes the
+        // NEXT session reconcile against one-generation-old paths, which misses the metadata
+        // keyed under the current names and orphans it.
+        saveHashCacheFile();
+    }
+
+    // Periodic safety net: sweeps every real directory for external renames, independent of
+    // QFileSystemWatcher notifications. Some cloud-sync clients and network drives do not fire
+    // reliable per-directory change events, so relying solely on the watcher can leave a rename
+    // unreconciled indefinitely; this catches those on the next tick instead. Skipped while an
+    // in-app drag, inline rename, or side-editor session is active, matching the same guards the
+    // live watcher-driven refresh uses, so the sweep never fights an in-progress user action.
+    void runBackgroundReconcile()
+    {
+        if (!mycelStorageEnabled_ || rootPath_.isEmpty() || !QFileInfo(rootPath_).isDir()) {
+            return;
+        }
+        if ((view_ && view_->isDraggingNode()) || sideEditorEditing_ || inlineRenameActivitySuspended_ ||
+            renameEdit_) {
+            return;
+        }
+
+        const QStringList directories = collectWatchedDirectories();
+        // Whole-tree scope: safe to prune metadata for files with no match anywhere in the root.
+        const bool renameReconciled = reconcileRenamedFiles(directories, /*pruneUnmatchedMetadata=*/true);
+        bool hashCacheChanged = false;
+        for (const QString& directory : directories) {
+            if (updateHashCacheForDirectory(directory)) {
+                hashCacheChanged = true;
+            }
+        }
+        if (renameReconciled) {
+            persistRenameReconciliationResults();
+        }
+        if (hashCacheChanged) {
+            saveHashCacheFile();
+        }
+        if (renameReconciled) {
+            // The display tree still holds the old name/path until rescanned.
+            rebuild(false);
+        }
+    }
 
     // Rescan one changed directory and replace its subtree only if the displayed structure
     // actually differs. Returns Unchanged (and keeps the existing Node objects, so live
@@ -9838,8 +10255,38 @@ public:
         }
 
         const QStringList refreshDirectories = pendingRefreshDirectories();
+        const QStringList hashSyncDirectories = pendingChangedDirectoriesForHashSync();
         pendingFileSystemPaths_.clear();
         cancelQueuedInlinePreviewToggle();
+
+        // Reconcile external renames/moves and refresh the hash cache against the real
+        // directories that changed, regardless of whether they are visible/expanded in the
+        // display tree (collapsed folders still need this to keep their metadata from going
+        // stale). Scope is limited to the directories that actually changed, so this can match a
+        // move only when both its source and destination are in that set; pruning is left to the
+        // whole-tree background sweep, since this narrower scope could otherwise mistake a file
+        // moved to a folder outside this batch for a deletion.
+        QStringList existingHashSyncDirectories;
+        for (const QString& directory : hashSyncDirectories) {
+            if (QFileInfo(directory).isDir()) {
+                existingHashSyncDirectories.append(directory);
+            }
+        }
+        const bool renameReconciled =
+            reconcileRenamedFiles(existingHashSyncDirectories, /*pruneUnmatchedMetadata=*/false);
+        bool hashCacheChanged = false;
+        for (const QString& directory : existingHashSyncDirectories) {
+            if (updateHashCacheForDirectory(directory)) {
+                hashCacheChanged = true;
+            }
+        }
+        if (renameReconciled) {
+            persistRenameReconciliationResults();
+        }
+        if (hashCacheChanged) {
+            saveHashCacheFile();
+        }
+
         if (refreshDirectories.isEmpty()) {
             resetFileSystemWatcher();
             return;
@@ -10921,6 +11368,17 @@ private:
             }
         }
 
+        // Drop the deleted file's cached hash so a later unrelated file that happens to share its
+        // content is never mistaken for "the deleted file, renamed" during reconciliation.
+        for (auto it = fileHashCache_.begin(); it != fileHashCache_.end();) {
+            const QString path = absolutePathForKey(it->first);
+            if (path == deletedPath || (wasDir && isDescendantPath(deletedPath, path))) {
+                it = fileHashCache_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
         if (!mycelStorageEnabled_) {
             return;
         }
@@ -10943,11 +11401,18 @@ private:
 
     // Register a freshly created item in the directory's custom order. When `afterName` names an
     // existing sibling, the new item is placed directly after it; otherwise it is appended.
-    void appendCreatedItemToOrder(const QString& directoryPath, const QString& newName, bool,
+    void appendCreatedItemToOrder(const QString& directoryPath, const QString& newName, bool isDir,
                                   const QString& afterName = QString())
     {
         if (!mycelStorageEnabled_) {
             return;
+        }
+
+        // Hash the new file right away rather than waiting for a scan to notice it: a file
+        // renamed externally before the next scan/sweep would otherwise have no "before" hash
+        // to reconcile against.
+        if (!isDir) {
+            ensureHashCachedForRenameTracking(QDir(directoryPath).filePath(newName));
         }
 
         const QString key = orderKeyForDirectory(directoryPath);
@@ -11129,6 +11594,14 @@ private:
             }
             fileOrders_ = std::move(updatedOrders);
         }
+
+        std::map<QString, FileHashCacheEntry> updatedHashCache;
+        for (const auto& [key, entry] : fileHashCache_) {
+            const QString updatedAbsolutePath =
+                rekeyPathAfterRename(absolutePathForKey(key), oldPath, newPath, wasDir);
+            updatedHashCache[relativeKeyForPath(updatedAbsolutePath)] = entry;
+        }
+        fileHashCache_ = std::move(updatedHashCache);
     }
 
     QString rekeyPathAfterRename(const QString& path, const QString& oldPath, const QString& newPath, bool wasDir) const
@@ -11176,6 +11649,11 @@ private:
     QString viewStateFilePath() const
     {
         return QDir(rootPath_).filePath(QStringLiteral(".mycel/view.json"));
+    }
+
+    QString hashCacheFilePath() const
+    {
+        return QDir(rootPath_).filePath(QStringLiteral(".mycel/hashcache.json"));
     }
 
     QString relativeKeyForPath(const QString& path) const
@@ -11287,6 +11765,62 @@ private:
 
         if (!writeJsonFileAtomic(colorFilePath(), rootObject)) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("色設定を保存できませんでした。"));
+        }
+    }
+
+    void loadHashCacheFile()
+    {
+        fileHashCache_.clear();
+        if (!mycelStorageEnabled_) {
+            return;
+        }
+
+        QFile file(hashCacheFilePath());
+        if (!file.open(QIODevice::ReadOnly)) {
+            return;
+        }
+
+        const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+        const QJsonObject files = doc.object().value(QStringLiteral("files")).toObject();
+        for (auto it = files.begin(); it != files.end(); ++it) {
+            const QJsonObject entry = it.value().toObject();
+            FileHashCacheEntry cacheEntry;
+            cacheEntry.size = static_cast<qint64>(entry.value(QStringLiteral("size")).toDouble());
+            cacheEntry.mtimeMs = static_cast<qint64>(entry.value(QStringLiteral("mtime")).toDouble());
+            cacheEntry.hash = QByteArray::fromHex(entry.value(QStringLiteral("hash")).toString().toLatin1());
+            if (!cacheEntry.hash.isEmpty()) {
+                fileHashCache_[it.key()] = cacheEntry;
+            }
+        }
+    }
+
+    void saveHashCacheFile()
+    {
+        if (!mycelStorageEnabled_) {
+            return;
+        }
+
+        QDir root(rootPath_);
+        if (!root.mkpath(QStringLiteral(".mycel"))) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral(".mycel フォルダを作成できませんでした。"));
+            return;
+        }
+
+        QJsonObject files;
+        for (const auto& [key, entry] : fileHashCache_) {
+            QJsonObject entryObject;
+            entryObject.insert(QStringLiteral("size"), static_cast<double>(entry.size));
+            entryObject.insert(QStringLiteral("mtime"), static_cast<double>(entry.mtimeMs));
+            entryObject.insert(QStringLiteral("hash"), QString::fromLatin1(entry.hash.toHex()));
+            files.insert(key, entryObject);
+        }
+
+        QJsonObject rootObject;
+        rootObject.insert(QStringLiteral("version"), 1);
+        rootObject.insert(QStringLiteral("files"), files);
+
+        if (!writeJsonFileAtomic(hashCacheFilePath(), rootObject)) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("ハッシュキャッシュを保存できませんでした。"));
         }
     }
 
@@ -12398,6 +12932,82 @@ public:
 
     // ==== end board mode ====================================================================
 private:
+    // Refreshes the cached content hash for one real file (used for external-rename detection),
+    // skipping large files and cloud placeholders. Reuses the cached hash when size and mtime
+    // are unchanged, so unchanged files are not re-read on every scan. Returns true if the entry
+    // was added or updated, so the caller knows whether to persist the cache.
+    bool updateHashCacheEntryForFile(const QFileInfo& info)
+    {
+        if (info.size() > RenameHashMaxFileSize || isCloudPlaceholderFile(info)) {
+            return false;
+        }
+
+        const QString key = relativeKeyForPath(info.absoluteFilePath());
+        const qint64 mtimeMs = info.lastModified().toMSecsSinceEpoch();
+        const auto existing = fileHashCache_.find(key);
+        if (existing != fileHashCache_.end() && existing->second.size == info.size() &&
+            existing->second.mtimeMs == mtimeMs) {
+            return false;
+        }
+
+        const std::optional<QByteArray> hash = computeFileContentHash(info);
+        if (!hash) {
+            return false;
+        }
+        fileHashCache_[key] = FileHashCacheEntry{info.size(), mtimeMs, *hash};
+        return true;
+    }
+
+    // Immediately hashes and persists a single file's cache entry if it is not already cached.
+    // Called when the user attaches metadata (color, etc.) to a file: that is a strong signal
+    // the file is worth tracking, and waiting for the next directory scan or the periodic
+    // background sweep to get to it would leave a window where an external rename right after
+    // tagging could not be reconciled (no "before" hash would exist to match against).
+    void ensureHashCachedForRenameTracking(const QString& path)
+    {
+        if (!mycelStorageEnabled_) {
+            return;
+        }
+        if (updateHashCacheEntryForFile(QFileInfo(path))) {
+            saveHashCacheFile();
+        }
+    }
+
+    // Refreshes hash-cache entries for the real, immediate files of one directory (not the
+    // display tree, so this works the same whether or not the directory is collapsed/visible).
+    bool updateHashCacheForDirectory(const QString& directoryPath)
+    {
+        if (!mycelStorageEnabled_) {
+            return false;
+        }
+        const QDir dir(directoryPath);
+        const QFileInfoList entries =
+            dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System, QDir::Name);
+        bool changed = false;
+        for (const QFileInfo& info : entries) {
+            if (isMetadataPath(info.absoluteFilePath())) {
+                continue;
+            }
+            changed = updateHashCacheEntryForFile(info) || changed;
+        }
+        return changed;
+    }
+
+    // Seeds/refreshes hash-cache entries for every real file under the root, via the same
+    // recursive real-filesystem listing the watcher uses (collectWatchedFiles), so collapsed and
+    // deeply nested folders are covered even though the display tree prunes them.
+    bool updateHashCacheForTree()
+    {
+        if (!mycelStorageEnabled_) {
+            return false;
+        }
+        bool changed = false;
+        for (const QString& path : collectWatchedFiles()) {
+            changed = updateHashCacheEntryForFile(QFileInfo(path)) || changed;
+        }
+        return changed;
+    }
+
     void rebuild(bool fitAfterRebuild)
     {
         saveSideEditorNow();
@@ -12609,10 +13219,12 @@ private:
     QTimer previewClickTimer_;
     QFileSystemWatcher* fileSystemWatcher_ = nullptr;
     QTimer fileSystemRefreshTimer_;
+    QTimer backgroundReconcileTimer_;
     QSet<QString> pendingFileSystemPaths_;
     std::map<QString, QSizeF> previewSizes_;
     std::map<QString, qreal> previewImageScales_;
     std::map<QString, QStringList> fileOrders_;
+    std::map<QString, FileHashCacheEntry> fileHashCache_;
     QGraphicsProxyWidget* renameProxy_ = nullptr;
     QLineEdit* renameEdit_ = nullptr;
     QString renamingPath_;
