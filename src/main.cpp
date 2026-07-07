@@ -996,27 +996,23 @@ QString describeHashSkipReason(const QFileInfo& info)
     return QStringLiteral("could not open/read the file");
 }
 
-// Everything the startup scan thread produces from its single whole-tree walk: the directory
-// and file lists the QFileSystemWatcher registration and the rename reconcile need, plus the
-// hash-cache entries that were missing or stale (the seeding updateHashCacheForTree() used to
-// do synchronously in the constructor). Computed off the GUI thread because on network drives
-// the walk is many stat round-trips and the seeding reads file contents.
-struct StartupScanResult {
+// One recursive listing of every real directory and file under the root. This is the single
+// walk shared by every whole-tree consumer -- QFileSystemWatcher registration, the rename
+// reconcile, and hash seeding -- which used to each walk the tree themselves (up to six
+// traversals per refresh; each stat is a network round-trip on remote drives). Only the
+// root's own .mycel subtree is excluded; hidden and system entries are included. The root
+// directory itself leads the directory list.
+struct TreeWalkResult {
     QStringList directories;
     QStringList files;
-    std::map<QString, FileHashCacheEntry> refreshedHashes;
+    QList<QFileInfo> fileInfos;  // one entry per element of `files`, same order (cached stats)
 };
 
-// Runs on the startup scan thread. Pure function of the filesystem: touches no MainWindow
-// state, works on a copy of the hash cache, and bails out (returning a partial result that the
-// caller discards) as soon as `cancelled` is set so window close never waits on a slow walk.
-// The walk must match collectWatchedDirectories()/collectWatchedFiles(): only the root's own
-// .mycel is excluded, and the root directory itself leads the directory list.
-StartupScanResult runStartupScan(const QString& rootPath, bool mycelStorageEnabled,
-                                 const std::map<QString, FileHashCacheEntry>& knownHashes,
-                                 const std::atomic_bool& cancelled)
+// `cancelled` (optional) aborts the walk early with a partial result; callers passing it must
+// discard that partial result themselves.
+TreeWalkResult walkRealTree(const QString& rootPath, const std::atomic_bool* cancelled = nullptr)
 {
-    StartupScanResult result;
+    TreeWalkResult result;
     const QFileInfo rootInfo(rootPath);
     if (!rootInfo.isDir()) {
         return result;
@@ -1028,12 +1024,11 @@ StartupScanResult runStartupScan(const QString& rootPath, bool mycelStorageEnabl
     };
 
     result.directories.append(rootInfo.absoluteFilePath());
-    QList<QFileInfo> fileInfos;
     QDirIterator iterator(rootPath,
                           QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
                           QDirIterator::Subdirectories);
     while (iterator.hasNext()) {
-        if (cancelled.load()) {
+        if (cancelled && cancelled->load()) {
             return result;
         }
         iterator.next();
@@ -1046,20 +1041,42 @@ StartupScanResult runStartupScan(const QString& rootPath, bool mycelStorageEnabl
             result.directories.append(path);
         } else {
             result.files.append(path);
-            fileInfos.append(info);
+            result.fileInfos.append(info);
         }
     }
-    result.directories.removeDuplicates();
-    result.files.removeDuplicates();
+    return result;
+}
 
-    if (!mycelStorageEnabled) {
+// Everything the startup scan thread produces from its single whole-tree walk: the directory
+// and file lists the QFileSystemWatcher registration and the rename reconcile need, plus the
+// hash-cache entries that were missing or stale (seeded off-thread because it reads file
+// contents, which on network drives means downloading them).
+struct StartupScanResult {
+    QStringList directories;
+    QStringList files;
+    std::map<QString, FileHashCacheEntry> refreshedHashes;
+};
+
+// Runs on the startup scan thread. Pure function of the filesystem: touches no MainWindow
+// state, works on a copy of the hash cache, and bails out (returning a partial result that the
+// caller discards) as soon as `cancelled` is set so window close never waits on a slow walk.
+StartupScanResult runStartupScan(const QString& rootPath, bool mycelStorageEnabled,
+                                 const std::map<QString, FileHashCacheEntry>& knownHashes,
+                                 const std::atomic_bool& cancelled)
+{
+    StartupScanResult result;
+    TreeWalkResult walk = walkRealTree(rootPath, &cancelled);
+    result.directories = std::move(walk.directories);
+    result.files = std::move(walk.files);
+
+    if (!mycelStorageEnabled || cancelled.load()) {
         return result;
     }
 
     // Seed/refresh content hashes for rename detection (same skip rules as
     // updateHashCacheEntryForFile: size cap, cloud placeholders, unchanged size+mtime).
     const QDir root(rootPath);
-    for (const QFileInfo& info : fileInfos) {
+    for (const QFileInfo& info : walk.fileInfos) {
         if (cancelled.load()) {
             return result;
         }
@@ -9887,16 +9904,31 @@ public:
         loadPreviewFile();
         loadLinkFile();
         loadHashCacheFile();
+        if (!mycelStorageEnabled_) {
+            return;  // no metadata to reconcile or hash; skip the whole-tree walk entirely
+        }
+
+        // One whole-tree walk feeds both passes below (they used to walk separately).
+        const TreeWalkResult walk = walkRealTree(rootPath_);
 
         // Whole-tree scope: safe to prune metadata for files with no match anywhere in the root.
-        if (reconcileRenamedFiles(collectWatchedDirectories(), /*pruneUnmatchedMetadata=*/true)) {
+        QSet<QString> currentPaths;
+        for (const QString& path : walk.files) {
+            currentPaths.insert(path);
+        }
+        if (reconcileRenamedFiles(walk.directories, currentPaths, /*pruneUnmatchedMetadata=*/true,
+                                  nullptr)) {
             persistRenameReconciliationResults();
         }
 
         // Seed/refresh hashes for every real file under the root (not just what the collapsed,
         // depth- and child-limited display tree happens to show), so files inside collapsed or
         // deeply nested folders are still recognized if renamed externally later.
-        if (updateHashCacheForTree()) {
+        bool hashCacheChanged = false;
+        for (const QFileInfo& info : walk.fileInfos) {
+            hashCacheChanged = updateHashCacheEntryForFile(info) || hashCacheChanged;
+        }
+        if (hashCacheChanged) {
             saveHashCacheFile();
         }
     }
@@ -10039,48 +10071,6 @@ public:
         return cleanPath == metadataRoot || cleanPath.startsWith(metadataRoot + QLatin1Char('/'));
     }
 
-    QStringList collectWatchedDirectories() const
-    {
-        QStringList directories;
-        const QFileInfo rootInfo(rootPath_);
-        if (!rootInfo.isDir()) {
-            return directories;
-        }
-
-        directories.append(rootInfo.absoluteFilePath());
-        QDirIterator iterator(rootPath_,
-                              QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
-                              QDirIterator::Subdirectories);
-        while (iterator.hasNext()) {
-            const QString path = QFileInfo(iterator.next()).absoluteFilePath();
-            if (!isMetadataPath(path)) {
-                directories.append(path);
-            }
-        }
-        directories.removeDuplicates();
-        return directories;
-    }
-
-    QStringList collectWatchedFiles() const
-    {
-        QStringList files;
-        if (!QFileInfo(rootPath_).isDir()) {
-            return files;
-        }
-
-        QDirIterator iterator(rootPath_,
-                              QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
-                              QDirIterator::Subdirectories);
-        while (iterator.hasNext()) {
-            const QString path = QFileInfo(iterator.next()).absoluteFilePath();
-            if (!isMetadataPath(path)) {
-                files.append(path);
-            }
-        }
-        files.removeDuplicates();
-        return files;
-    }
-
     void resetFileSystemWatcher()
     {
         if (!fileSystemWatcher_ || inlineRenameActivitySuspended_) {
@@ -10092,7 +10082,8 @@ public:
             // thread on the exact traversal the deferred startup moved off it.
             return;
         }
-        applyFileSystemWatcherPaths(collectWatchedDirectories(), collectWatchedFiles());
+        const TreeWalkResult walk = walkRealTree(rootPath_);
+        applyFileSystemWatcherPaths(walk.directories, walk.files);
     }
 
     void applyFileSystemWatcherPaths(const QStringList& directories, const QStringList& files)
@@ -10368,8 +10359,9 @@ public:
         savePreviewFile();
         saveLinkFile();
         saveCollapsedFile();
-        // The reconcile rekeyed fileHashCache_ in memory too. Persist it now: the later
-        // updateHashCacheForTree()/ForDirectory() passes see every current file as already
+        // The reconcile rekeyed fileHashCache_ in memory too. Persist it now: the hash refresh
+        // passes that follow (updateHashCacheEntryForFile over the walked files, or
+        // updateHashCacheForDirectory) see every current file as already
         // hashed (the rekeyed entries match size/mtime), report "no change", and skip their
         // save — leaving hashcache.json holding the pre-rename names. A stale cache makes the
         // NEXT session reconcile against one-generation-old paths, which misses the metadata
@@ -10396,14 +10388,19 @@ public:
             return;
         }
 
-        const QStringList directories = collectWatchedDirectories();
+        // One whole-tree walk feeds the reconcile and the hash refresh (they used to walk
+        // separately: a directory collection plus a per-directory relisting for each pass).
+        const TreeWalkResult walk = walkRealTree(rootPath_);
+        QSet<QString> currentPaths;
+        for (const QString& path : walk.files) {
+            currentPaths.insert(path);
+        }
         // Whole-tree scope: safe to prune metadata for files with no match anywhere in the root.
-        const bool renameReconciled = reconcileRenamedFiles(directories, /*pruneUnmatchedMetadata=*/true);
+        const bool renameReconciled = reconcileRenamedFiles(walk.directories, currentPaths,
+                                                            /*pruneUnmatchedMetadata=*/true, nullptr);
         bool hashCacheChanged = false;
-        for (const QString& directory : directories) {
-            if (updateHashCacheForDirectory(directory)) {
-                hashCacheChanged = true;
-            }
+        for (const QFileInfo& info : walk.fileInfos) {
+            hashCacheChanged = updateHashCacheEntryForFile(info) || hashCacheChanged;
         }
         if (renameReconciled) {
             persistRenameReconciliationResults();
@@ -13235,21 +13232,6 @@ private:
                 continue;
             }
             changed = updateHashCacheEntryForFile(info) || changed;
-        }
-        return changed;
-    }
-
-    // Seeds/refreshes hash-cache entries for every real file under the root, via the same
-    // recursive real-filesystem listing the watcher uses (collectWatchedFiles), so collapsed and
-    // deeply nested folders are covered even though the display tree prunes them.
-    bool updateHashCacheForTree()
-    {
-        if (!mycelStorageEnabled_) {
-            return false;
-        }
-        bool changed = false;
-        for (const QString& path : collectWatchedFiles()) {
-            changed = updateHashCacheEntryForFile(QFileInfo(path)) || changed;
         }
         return changed;
     }
