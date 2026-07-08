@@ -12,6 +12,8 @@
 
 ## スクリーンショット
 
+![Markdown プレビューペインを開いた Mycel ウィンドウ](images/screenshot0.png)
+
 ![Mycel のマインドマップ表示](images/screenshot1.png)
 
 ## 主な機能
