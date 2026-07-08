@@ -6,6 +6,7 @@
 #include <QtCore/QFileInfo>
 #include <QtCore/QFileSystemWatcher>
 #include <QtCore/QDirIterator>
+#include <QtCore/QStorageInfo>
 #include <QtCore/QHash>
 #include <QtCore/QIODevice>
 #include <QtCore/QJsonArray>
@@ -942,6 +943,32 @@ bool writeJsonFileAtomic(const QString& path, const QJsonObject& object)
         return false;
     }
     return file.write(payload) == payload.size();
+}
+
+// True when `path` lives on a network filesystem. Native file watching there is somewhere
+// between expensive and broken: macOS FSEvents does not deliver events for SMB/NFS mounts,
+// and Qt on Windows falls back to polling every watched path every second. For such roots the
+// watcher is disabled entirely and the periodic background sweep takes over change detection.
+bool isNetworkFileSystemPath(const QString& path)
+{
+#ifdef Q_OS_WIN
+    const QString native = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath());
+    if (native.startsWith(QStringLiteral("\\\\"))) {
+        return true;  // UNC path
+    }
+    const QString driveRoot = native.left(3);  // e.g. "Z:\\"
+    return GetDriveTypeW(reinterpret_cast<const wchar_t*>(driveRoot.utf16())) == DRIVE_REMOTE;
+#else
+    const QByteArray type = QStorageInfo(path).fileSystemType().toLower();
+    static constexpr const char* networkTypes[] = {"smb",  "cifs",  "nfs", "afpfs",
+                                                   "webdav", "davfs", "sshfs", "9p"};
+    for (const char* networkType : networkTypes) {
+        if (type.contains(networkType)) {
+            return true;
+        }
+    }
+    return false;
+#endif
 }
 
 // True when a file's content is not resident on disk (cloud-sync placeholder, e.g. OneDrive
@@ -5123,6 +5150,7 @@ public:
         connect(&viewStateSaveTimer_, &QTimer::timeout, this, [this] { saveViewState(); });
 
         fileSystemWatcher_ = new QFileSystemWatcher(this);
+        updateNativeWatcherModeForRoot();
         fileSystemRefreshTimer_.setSingleShot(true);
         fileSystemRefreshTimer_.setInterval(500);
         connect(fileSystemWatcher_, &QFileSystemWatcher::directoryChanged,
@@ -5843,6 +5871,7 @@ public:
         boardPatternView_ = QJsonObject();
         rootPath_ = normalized;
         rememberRootPath(rootPath_);
+        updateNativeWatcherModeForRoot();
         collapsedPaths_.clear();
         previewPaths_.clear();
         previewSizes_.clear();
@@ -10071,9 +10100,32 @@ public:
         return cleanPath == metadataRoot || cleanPath.startsWith(metadataRoot + QLatin1Char('/'));
     }
 
+    // Decides whether the current root gets native file watching, and drops any watches left
+    // over from a previous root when it does not. Called at construction and whenever
+    // rootPath_ changes (open-folder navigation, archive import).
+    void updateNativeWatcherModeForRoot()
+    {
+        // MYCEL_NO_WATCHER forces sweep-only mode: an escape hatch for filesystems whose
+        // change notifications misbehave but are not detected as network mounts.
+        nativeWatcherDisabled_ = qEnvironmentVariableIsSet("MYCEL_NO_WATCHER") ||
+                                 isNetworkFileSystemPath(rootPath_);
+        if (nativeWatcherDisabled_ && fileSystemWatcher_) {
+            const QStringList files = fileSystemWatcher_->files();
+            if (!files.isEmpty()) {
+                fileSystemWatcher_->removePaths(files);
+            }
+            const QStringList directories = fileSystemWatcher_->directories();
+            if (!directories.isEmpty()) {
+                fileSystemWatcher_->removePaths(directories);
+            }
+            recordDebugEvent(QStringLiteral(
+                "network filesystem root: native watching disabled, periodic sweep takes over"));
+        }
+    }
+
     void resetFileSystemWatcher()
     {
-        if (!fileSystemWatcher_ || inlineRenameActivitySuspended_) {
+        if (!fileSystemWatcher_ || inlineRenameActivitySuspended_ || nativeWatcherDisabled_) {
             return;
         }
         if (startupScanPending_) {
@@ -10086,23 +10138,54 @@ public:
         applyFileSystemWatcherPaths(walk.directories, walk.files);
     }
 
+    // Differential registration: only paths that actually changed are (un)watched. The full
+    // remove-all/add-all this replaces measured ~550 ms per call at 10k files on a local SSD
+    // -- and it ran on every rebuild.
     void applyFileSystemWatcherPaths(const QStringList& directories, const QStringList& files)
     {
-        const QStringList currentFiles = fileSystemWatcher_->files();
-        if (!currentFiles.isEmpty()) {
-            fileSystemWatcher_->removePaths(currentFiles);
+        if (nativeWatcherDisabled_) {
+            return;
         }
-        const QStringList currentDirectories = fileSystemWatcher_->directories();
-        if (!currentDirectories.isEmpty()) {
-            fileSystemWatcher_->removePaths(currentDirectories);
+        QSet<QString> toAdd(directories.begin(), directories.end());
+        for (const QString& path : files) {
+            toAdd.insert(path);
         }
+        QStringList toRemove;
+        const QStringList watched = fileSystemWatcher_->directories() + fileSystemWatcher_->files();
+        for (const QString& path : watched) {
+            if (!toAdd.remove(path)) {  // still wanted: nothing to do, keep the live watch
+                toRemove.append(path);
+            }
+        }
+        if (!toRemove.isEmpty()) {
+            fileSystemWatcher_->removePaths(toRemove);
+        }
+        if (!toAdd.isEmpty()) {
+            fileSystemWatcher_->addPaths(QStringList(toAdd.begin(), toAdd.end()));
+        }
+    }
 
-        if (!directories.isEmpty()) {
-            fileSystemWatcher_->addPaths(directories);
+    // A watch dies silently when its path is deleted or renamed: Qt stops monitoring but keeps
+    // the path listed, so the differential apply above sees it as "already watched" and never
+    // re-arms it. The old full re-register revived such watches as a side effect; this does it
+    // explicitly, for just the paths that fired in the current notification batch (covers
+    // delete-then-recreate of the same name).
+    void reviveWatchedPaths(const QSet<QString>& paths)
+    {
+        if (!fileSystemWatcher_ || inlineRenameActivitySuspended_ || nativeWatcherDisabled_) {
+            return;
         }
-        if (!files.isEmpty()) {
-            fileSystemWatcher_->addPaths(files);
+        QStringList revive;
+        for (const QString& path : paths) {
+            if (!isMetadataPath(path) && QFileInfo::exists(path)) {
+                revive.append(path);
+            }
         }
+        if (revive.isEmpty()) {
+            return;
+        }
+        fileSystemWatcher_->removePaths(revive);
+        fileSystemWatcher_->addPaths(revive);
     }
 
     void scheduleFileSystemRefresh(const QString& path)
@@ -10377,8 +10460,11 @@ public:
     // live watcher-driven refresh uses, so the sweep never fights an in-progress user action.
     void runBackgroundReconcile()
     {
-        if (!mycelStorageEnabled_ || rootPath_.isEmpty() || !QFileInfo(rootPath_).isDir()) {
+        if (rootPath_.isEmpty() || !QFileInfo(rootPath_).isDir()) {
             return;
+        }
+        if (!mycelStorageEnabled_ && !nativeWatcherDisabled_) {
+            return;  // nothing to reconcile, and the live watcher covers structural changes
         }
         if (startupScanPending_) {
             return;  // the startup scan thread does this pass; don't walk the tree twice
@@ -10388,29 +10474,54 @@ public:
             return;
         }
 
-        // One whole-tree walk feeds the reconcile and the hash refresh (they used to walk
-        // separately: a directory collection plus a per-directory relisting for each pass).
-        const TreeWalkResult walk = walkRealTree(rootPath_);
-        QSet<QString> currentPaths;
-        for (const QString& path : walk.files) {
-            currentPaths.insert(path);
+        bool renameReconciled = false;
+        if (mycelStorageEnabled_) {
+            // One whole-tree walk feeds the reconcile and the hash refresh (they used to walk
+            // separately: a directory collection plus a per-directory relisting for each pass).
+            const TreeWalkResult walk = walkRealTree(rootPath_);
+            QSet<QString> currentPaths;
+            for (const QString& path : walk.files) {
+                currentPaths.insert(path);
+            }
+            // Whole-tree scope: safe to prune metadata for files with no match anywhere in the root.
+            renameReconciled = reconcileRenamedFiles(walk.directories, currentPaths,
+                                                     /*pruneUnmatchedMetadata=*/true, nullptr);
+            bool hashCacheChanged = false;
+            for (const QFileInfo& info : walk.fileInfos) {
+                hashCacheChanged = updateHashCacheEntryForFile(info) || hashCacheChanged;
+            }
+            if (renameReconciled) {
+                persistRenameReconciliationResults();
+            }
+            if (hashCacheChanged) {
+                saveHashCacheFile();
+            }
+            if (renameReconciled) {
+                // The display tree still holds the old name/path until rescanned.
+                rebuild(false);
+            }
         }
-        // Whole-tree scope: safe to prune metadata for files with no match anywhere in the root.
-        const bool renameReconciled = reconcileRenamedFiles(walk.directories, currentPaths,
-                                                            /*pruneUnmatchedMetadata=*/true, nullptr);
-        bool hashCacheChanged = false;
-        for (const QFileInfo& info : walk.fileInfos) {
-            hashCacheChanged = updateHashCacheEntryForFile(info) || hashCacheChanged;
-        }
-        if (renameReconciled) {
-            persistRenameReconciliationResults();
-        }
-        if (hashCacheChanged) {
-            saveHashCacheFile();
-        }
-        if (renameReconciled) {
-            // The display tree still holds the old name/path until rescanned.
-            rebuild(false);
+
+        // Network roots get no native change notifications, so this sweep is also their
+        // structural refresh: external adds/removes surface here instead of via the watcher.
+        if (nativeWatcherDisabled_) {
+            if (boardMode_) {
+                // Same rule as the watcher-driven path: only a vanished card forces a render.
+                for (const auto& node : boardNodes_) {
+                    if (!QFileInfo::exists(node->path)) {
+                        renderBoardScene(false);
+                        break;
+                    }
+                }
+            } else if (!renameReconciled && root_) {  // a reconcile rebuild already rescanned
+                const QStringList selectedPaths = selectedNodePaths();
+                if (replaceScannedSubtree(rootPath_) == SubtreeRefresh::Changed) {
+                    renderCurrentTree(false);
+                    if (!selectedPaths.isEmpty()) {
+                        restoreSelection(selectedPaths);
+                    }
+                }
+            }
         }
     }
 
@@ -10477,6 +10588,9 @@ public:
             resetFileSystemWatcher();
             return;
         }
+        // Kept for the no-visible-change exits below: a fired watch may be dead (deleted or
+        // renamed path) and needs re-arming even when nothing is re-rendered or re-registered.
+        const QSet<QString> firedPaths = pendingFileSystemPaths_;
         if (boardMode_) {
             // Board mode: re-render only when a displayed card's file disappeared (spec: a card
             // whose real file is gone must leave the screen). New files never appear on their own.
@@ -10492,7 +10606,7 @@ public:
             if (missing) {
                 renderBoardScene(false);
             } else {
-                resetFileSystemWatcher();
+                reviveWatchedPaths(firedPaths);
             }
             return;
         }
@@ -10531,7 +10645,7 @@ public:
         }
 
         if (refreshDirectories.isEmpty()) {
-            resetFileSystemWatcher();
+            reviveWatchedPaths(firedPaths);
             return;
         }
 
@@ -10565,8 +10679,11 @@ public:
 
         if (!changed) {
             // The notification did not change the displayed tree (typically a cloud-sync
-            // mtime touch). Skip the re-render so selection and previews do not churn.
-            resetFileSystemWatcher();
+            // mtime touch). Skip the re-render so selection and previews do not churn, and
+            // only re-arm the fired watches instead of re-walking and re-registering the
+            // whole tree -- under a cloud-sync client that touches files continuously
+            // (Dropbox etc.) this branch runs every debounce tick.
+            reviveWatchedPaths(firedPaths);
             return;
         }
 
@@ -10715,6 +10832,7 @@ public:
 
         rootPath_ = destinationRoot;
         rememberRootPath(rootPath_);
+        updateNativeWatcherModeForRoot();
         collapsedPaths_ = std::move(importedCollapsedPaths);
         userColors_ = std::move(importedColors);
         previewPaths_ = std::move(importedPreviewPaths);
@@ -13454,6 +13572,9 @@ private:
     bool startupScanPending_ = true;
     QThread* startupScanThread_ = nullptr;
     std::shared_ptr<std::atomic_bool> startupScanCancelled_;
+    // True when the root is on a network filesystem: no native watches are registered (see
+    // isNetworkFileSystemPath) and the periodic sweep doubles as the structural refresh.
+    bool nativeWatcherDisabled_ = false;
     QSet<QString> pendingFileSystemPaths_;
     std::map<QString, QSizeF> previewSizes_;
     std::map<QString, qreal> previewImageScales_;
