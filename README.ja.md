@@ -10,6 +10,10 @@
 - 開発予定: [docs/development-plan.ja.md](docs/development-plan.ja.md)
 - 英語版: [README.md](README.md)
 
+## スクリーンショット
+
+![Mycel のマインドマップ表示](images/screenshot1.png)
+
 ## 主な機能
 
 ### マインドマップ表示

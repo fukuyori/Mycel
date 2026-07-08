@@ -10,6 +10,10 @@ Instead of treating files as a vertical file list, Mycel lays out folders and fi
 - Development plan: [docs/development-plan.ja.md](docs/development-plan.ja.md)
 - Japanese documentation: [README.ja.md](README.ja.md)
 
+## Screenshot
+
+![Mycel mind-map view](images/screenshot1.png)
+
 ## Features
 
 ### Mind-Map View
