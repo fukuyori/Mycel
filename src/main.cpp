@@ -1473,6 +1473,9 @@ struct TreeLayoutEngine {
         }
 
         const QSet<QString> linkedTargets = linkedTargetPaths(links);
+        // Targets already placed by an earlier source in this call, so later sources' columns
+        // steer clear of them too (map order is alphabetical by source path, not visual order).
+        QSet<QString> positionedTargets;
 
         for (auto& [sourcePath, targets] : targetsBySource) {
             Node* from = findNodeByPath(root, sourcePath);
@@ -1493,11 +1496,13 @@ struct TreeLayoutEngine {
 
             // Push the target column clear of any tree node whose frame (card or open
             // preview) overlaps the rows the stack will occupy, so targets don't land on the
-            // preview of the node above or below the source. Skip linked targets and their
-            // subtrees (they are positioned here, not yet laid out in the tree).
+            // preview of the node above or below the source. Skip this source's own targets
+            // (not yet positioned) and any other link target not yet placed by this call, but
+            // do check against targets already placed by an earlier source — otherwise two
+            // sources' fans can claim overlapping columns and one paints over the other.
             qreal columnLeft = anchor.x();
             std::function<void(const Node&)> clearOverlaps = [&](const Node& node) {
-                if (linkedTargets.contains(node.path)) {
+                if (linkedTargets.contains(node.path) && !positionedTargets.contains(node.path)) {
                     return;
                 }
                 if (&node != from) {
@@ -1536,6 +1541,7 @@ struct TreeLayoutEngine {
                     to->center = QPointF(linkedLeftX + to->size.width() / 2.0, centerY);
                 }
                 slotTop += span;
+                positionedTargets.insert(to->path);
             }
         }
     }
@@ -8608,6 +8614,79 @@ public:
         }
     }
 
+    struct FileLinkSiblingGroup {
+        int pos = -1;  // path's own position within indices, or -1 if path is not a link target
+        std::vector<std::size_t> indices;  // indices into fileLinks_, in link order
+    };
+
+    // Every target sharing `path`'s link source, in link order (the order layoutFileLinks fans
+    // them out in), plus `path`'s own position in that list.
+    FileLinkSiblingGroup fileLinkSiblingGroup(const QString& path) const
+    {
+        QString from;
+        bool found = false;
+        for (const FileLink& link : fileLinks_) {
+            if (link.to == path) {
+                from = link.from;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return {};
+        }
+        FileLinkSiblingGroup group;
+        for (std::size_t i = 0; i < fileLinks_.size(); ++i) {
+            if (fileLinks_[i].from == from) {
+                if (fileLinks_[i].to == path) {
+                    group.pos = static_cast<int>(group.indices.size());
+                }
+                group.indices.push_back(i);
+            }
+        }
+        return group;
+    }
+
+    // Whether `path` (a file-link target) has a sibling target in the given direction
+    // (-1 = earlier/up, +1 = later/down) within the same source's link fan.
+    bool canMoveFileLinkTargetPath(const QString& path, int direction) const
+    {
+        if (!mycelStorageEnabled_ || path.isEmpty()) {
+            return false;
+        }
+        const FileLinkSiblingGroup group = fileLinkSiblingGroup(path);
+        if (group.pos < 0) {
+            return false;
+        }
+        return direction < 0 ? group.pos > 0 : group.pos + 1 < static_cast<int>(group.indices.size());
+    }
+
+    // Swaps `path` with its neighbouring target within the same link source's fan, changing the
+    // stacking order that layoutFileLinks uses (link order), then re-lays out. This is the only
+    // way to reorder file-link targets: they live outside fileOrders_/reorderNodeByY entirely.
+    void moveFileLinkTargetPath(const QString& path, int direction)
+    {
+        if (!mycelStorageEnabled_ || path.isEmpty()) {
+            return;
+        }
+        const FileLinkSiblingGroup group = fileLinkSiblingGroup(path);
+        if (group.pos < 0) {
+            return;
+        }
+        const bool moveUp = direction < 0;
+        if (moveUp ? group.pos == 0 : group.pos + 1 >= static_cast<int>(group.indices.size())) {
+            return;
+        }
+
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+        const std::size_t swapWith = group.indices[static_cast<std::size_t>(moveUp ? group.pos - 1 : group.pos + 1)];
+        std::swap(fileLinks_[group.indices[static_cast<std::size_t>(group.pos)]], fileLinks_[swapWith]);
+        saveLinkFile();
+        relayout();
+        recordHistory(QStringLiteral("横リンク並び替え"), {}, {}, historyBefore, historySelection);
+    }
+
     bool reorderNodeByY(Node* source, const NodeItem* sourceItem, qreal dropCenterY)
     {
         if (!mycelStorageEnabled_) {
@@ -12577,6 +12656,37 @@ private:
         }
     }
 
+    // Restacks existing NodeItems (paint order) to match top-to-bottom visual position rather
+    // than tree/scan insertion order, so that when a file link's fan happens to overlap a
+    // neighbouring node — e.g. a tall open preview spilling past the row it was given — the
+    // lower node still paints on top instead of the stacking order being an accident of
+    // file-system scan order. Safe to call any time node centers have just been recomputed;
+    // does nothing to items sharing a center.y() (their relative order is left as-is).
+    void restackNodeItemsByVisualOrder()
+    {
+        if (!root_) {
+            return;
+        }
+        std::vector<Node*> nodesByVisualOrder;
+        visitNodes(*root_, [&nodesByVisualOrder](Node& node) {
+            nodesByVisualOrder.push_back(&node);
+        });
+        std::stable_sort(nodesByVisualOrder.begin(), nodesByVisualOrder.end(), [](const Node* a, const Node* b) {
+            return a->center.y() < b->center.y();
+        });
+        NodeItem* previous = nullptr;
+        for (Node* node : nodesByVisualOrder) {
+            NodeItem* item = nodeItemsByPath_.value(node->path, nullptr);
+            if (!item) {
+                continue;
+            }
+            if (previous) {
+                previous->stackBefore(item);
+            }
+            previous = item;
+        }
+    }
+
     void scheduleViewStateSave()
     {
         if (inlineRenameActivitySuspended_ || restoringViewState_ || pendingViewRestoreReapplies_ > 0 ||
@@ -12624,6 +12734,7 @@ private:
             scene_.addItem(item);
             nodeItemsByPath_.insert(node.path, item);
         });
+        restackNodeItemsByVisualOrder();
         suppressSideEditorSelectionUpdate_ = previousSuppressSelectionUpdate;
 
         QRectF bounds = root_->subtreeBounds;
@@ -13421,6 +13532,7 @@ private:
             renderCurrentTree(false);
             return;
         }
+        restackNodeItemsByVisualOrder();
         connectionLayer_->refreshGeometry();
 
         const QRectF bounds = root_->subtreeBounds.united(parentRootItemsBounds_);
@@ -13828,6 +13940,10 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         deleteAction->setEnabled(!isRootFolder);
         QAction* unlinkAction = menu.addAction(QStringLiteral("関連を解除"));
         unlinkAction->setEnabled(window->hasIncomingFileLinkPath(folderPath));
+        QAction* moveLinkUpAction = menu.addAction(QStringLiteral("横リンクを上へ移動"));
+        moveLinkUpAction->setEnabled(window->canMoveFileLinkTargetPath(folderPath, -1));
+        QAction* moveLinkDownAction = menu.addAction(QStringLiteral("横リンクを下へ移動"));
+        moveLinkDownAction->setEnabled(window->canMoveFileLinkTargetPath(folderPath, 1));
         menu.addSeparator();
         // Group 4: organize / appearance
         QMenu* sortMenu = menu.addMenu(QStringLiteral("並べ替え"));
@@ -13922,6 +14038,18 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
                     window->removeIncomingFileLinksPath(folderPath);
                 }
             });
+        } else if (selected == moveLinkUpAction) {
+            QTimer::singleShot(0, window, [window, folderPath] {
+                if (window) {
+                    window->moveFileLinkTargetPath(folderPath, -1);
+                }
+            });
+        } else if (selected == moveLinkDownAction) {
+            QTimer::singleShot(0, window, [window, folderPath] {
+                if (window) {
+                    window->moveFileLinkTargetPath(folderPath, 1);
+                }
+            });
         } else if (selected && selected->data().canConvert<QColor>()) {
             const QColor color = selected->data().value<QColor>();
             QTimer::singleShot(0, window, [window, folderPath, color] {
@@ -13974,6 +14102,10 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         QAction* deleteAction = menu.addAction(QStringLiteral("削除"));
         QAction* unlinkAction = menu.addAction(QStringLiteral("関連を解除"));
         unlinkAction->setEnabled(window->hasIncomingFileLinkPath(filePath));
+        QAction* moveLinkUpAction = menu.addAction(QStringLiteral("横リンクを上へ移動"));
+        moveLinkUpAction->setEnabled(window->canMoveFileLinkTargetPath(filePath, -1));
+        QAction* moveLinkDownAction = menu.addAction(QStringLiteral("横リンクを下へ移動"));
+        moveLinkDownAction->setEnabled(window->canMoveFileLinkTargetPath(filePath, 1));
         menu.addSeparator();
         // Group 5: appearance
         QAction* resetPreviewSizeAction = menu.addAction(QStringLiteral("プレビューサイズを初期化"));
@@ -14039,6 +14171,18 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
             QTimer::singleShot(0, window, [window, filePath] {
                 if (window) {
                     window->removeIncomingFileLinksPath(filePath);
+                }
+            });
+        } else if (selected == moveLinkUpAction) {
+            QTimer::singleShot(0, window, [window, filePath] {
+                if (window) {
+                    window->moveFileLinkTargetPath(filePath, -1);
+                }
+            });
+        } else if (selected == moveLinkDownAction) {
+            QTimer::singleShot(0, window, [window, filePath] {
+                if (window) {
+                    window->moveFileLinkTargetPath(filePath, 1);
                 }
             });
         } else if (selected == editAction) {
