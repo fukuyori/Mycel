@@ -101,17 +101,17 @@ constexpr int BackgroundReconcileIntervalMs = 120000;
 // state before the (still GUI-thread) visible-tree scan starts.
 constexpr int DeferredStartupDelayMs = 50;
 
-QString appVersion()
+inline QString appVersion()
 {
     return QStringLiteral(MYCEL_VERSION);
 }
 
-QString appDisplayName()
+inline QString appDisplayName()
 {
     return QStringLiteral("Mycel %1").arg(appVersion());
 }
 
-QString windowTitleForRoot(const QString& rootPath, bool mycelStorageEnabled)
+inline QString windowTitleForRoot(const QString& rootPath, bool mycelStorageEnabled)
 {
     if (mycelStorageEnabled) {
         return QStringLiteral("%1 - %2").arg(appDisplayName(), rootPath);
@@ -119,7 +119,7 @@ QString windowTitleForRoot(const QString& rootPath, bool mycelStorageEnabled)
     return QStringLiteral("%1 - %2 [--no-mycel]").arg(appDisplayName(), rootPath);
 }
 
-void printVersion()
+inline void printVersion()
 {
     const QString line = QStringLiteral("Mycel %1\n").arg(appVersion());
 #ifdef Q_OS_WIN
@@ -179,7 +179,7 @@ struct FileLink {
 // callers on those paths should run the result through this. Keeps, for each target, only the
 // last occurrence in `links`' order (matching the "re-linking replaces the old link" semantics
 // addFileLink already uses), preserving the relative order of the survivors.
-void dedupeFileLinksKeepingLastPerTarget(std::vector<FileLink>& links)
+inline void dedupeFileLinksKeepingLastPerTarget(std::vector<FileLink>& links)
 {
     QSet<QString> keptTargets;
     std::vector<FileLink> kept;
@@ -252,7 +252,7 @@ struct ThemeColors {
     QColor linkAccent;
 };
 
-ThemeColors themeColors(AppTheme theme)
+inline ThemeColors themeColors(AppTheme theme)
 {
     if (theme == AppTheme::Dark) {
         return {
@@ -333,17 +333,17 @@ ThemeColors themeColors(AppTheme theme)
     };
 }
 
-AppTheme appThemeFromString(const QString& value)
+inline AppTheme appThemeFromString(const QString& value)
 {
     return value.compare(QStringLiteral("dark"), Qt::CaseInsensitive) == 0 ? AppTheme::Dark : AppTheme::Light;
 }
 
-QString appThemeToString(AppTheme theme)
+inline QString appThemeToString(AppTheme theme)
 {
     return theme == AppTheme::Dark ? QStringLiteral("dark") : QStringLiteral("light");
 }
 
-AppTheme currentAppTheme()
+inline AppTheme currentAppTheme()
 {
     if (qApp && qApp->property("mycelTheme").toString() == QStringLiteral("dark")) {
         return AppTheme::Dark;
@@ -351,22 +351,22 @@ AppTheme currentAppTheme()
     return AppTheme::Light;
 }
 
-ThemeColors currentThemeColors()
+inline ThemeColors currentThemeColors()
 {
     return themeColors(currentAppTheme());
 }
 
-QString cssColor(const QColor& color)
+inline QString cssColor(const QColor& color)
 {
     return color.name(QColor::HexRgb);
 }
 
-QColor neutralStroke()
+inline QColor neutralStroke()
 {
     return currentAppTheme() == AppTheme::Dark ? QColor("#aeb9c6") : QColor("#5f6f79");
 }
 
-int connectorLineAlpha()
+inline int connectorLineAlpha()
 {
     return currentAppTheme() == AppTheme::Dark ? 220 : 205;
 }
@@ -376,25 +376,25 @@ constexpr qreal NodeLayerZ = 10.0;
 constexpr qreal DragLayerZ = 100.0;
 constexpr qreal RenameLayerZ = 300.0;
 
-bool g_fastCanvasRendering = false;
+inline bool g_fastCanvasRendering = false;
 
-bool fastCanvasRendering()
+inline bool fastCanvasRendering()
 {
     return g_fastCanvasRendering;
 }
 
-QColor neutralFill()
+inline QColor neutralFill()
 {
     return currentThemeColors().nodeFill;
 }
 
-QColor softFillFromColor(QColor color)
+inline QColor softFillFromColor(QColor color)
 {
     color.setAlpha(currentAppTheme() == AppTheme::Dark ? 72 : 42);
     return color;
 }
 
-std::vector<std::pair<QString, QColor>> colorPalette()
+inline std::vector<std::pair<QString, QColor>> colorPalette()
 {
     return {
         {QStringLiteral("青"), QColor(QStringLiteral("#2563eb"))},
@@ -408,7 +408,7 @@ std::vector<std::pair<QString, QColor>> colorPalette()
     };
 }
 
-QIcon colorDotIcon(const QColor& color)
+inline QIcon colorDotIcon(const QColor& color)
 {
     QPixmap pixmap(16, 16);
     pixmap.fill(Qt::transparent);
@@ -420,7 +420,7 @@ QIcon colorDotIcon(const QColor& color)
     return QIcon(pixmap);
 }
 
-QString shortLabel(const QString& text)
+inline QString shortLabel(const QString& text)
 {
     constexpr int limit = 26;
     if (text.size() <= limit) {
@@ -438,7 +438,7 @@ bool isVideoPreviewFile(const QFileInfo& info);
 std::optional<QString> youtubeEmbedUrlForFile(const QFileInfo& info);
 std::optional<QUrl> urlForShortcutFile(const QFileInfo& info);
 
-QSize imagePixelSizeForFile(const QFileInfo& info)
+inline QSize imagePixelSizeForFile(const QFileInfo& info)
 {
     QImageReader reader(info.absoluteFilePath());
     QSize imageSize = reader.size();
@@ -453,7 +453,7 @@ QSize imagePixelSizeForFile(const QFileInfo& info)
 // are rejected outright, and large images are decoded downscaled instead of at full resolution so a
 // big file never loads its full-size bitmap into memory. maxSide caps the longest decoded edge
 // (<= 0 means no downscale). Returns a null image when the file cannot be read or is too large.
-QImage boundedPreviewImage(const QFileInfo& info, int maxSide)
+inline QImage boundedPreviewImage(const QFileInfo& info, int maxSide)
 {
     QImageReader reader(info.absoluteFilePath());
     reader.setAutoTransform(true);
@@ -470,7 +470,7 @@ QImage boundedPreviewImage(const QFileInfo& info, int maxSide)
     return reader.read();
 }
 
-QPixmap cachedImagePixmapForFile(const QFileInfo& info)
+inline QPixmap cachedImagePixmapForFile(const QFileInfo& info)
 {
     const QString path = info.absoluteFilePath();
     const QString cacheKey = QStringLiteral("mycel:image:%1:%2:%3")
@@ -491,7 +491,7 @@ QPixmap cachedImagePixmapForFile(const QFileInfo& info)
     return pixmap;
 }
 
-QSizeF clampedImagePreviewSize(const QFileInfo& info, const QSizeF& size, bool preferHeight)
+inline QSizeF clampedImagePreviewSize(const QFileInfo& info, const QSizeF& size, bool preferHeight)
 {
     constexpr qreal minWidth = 72.0;
     constexpr qreal minHeight = 48.0;
@@ -521,7 +521,7 @@ QSizeF clampedImagePreviewSize(const QFileInfo& info, const QSizeF& size, bool p
     return QSizeF(imageWidth * clampedScale, imageHeight * clampedScale);
 }
 
-qreal imagePreviewScaleForSize(const QFileInfo& info, const QSizeF& size, bool preferHeight)
+inline qreal imagePreviewScaleForSize(const QFileInfo& info, const QSizeF& size, bool preferHeight)
 {
     const QSize imageSize = imagePixelSizeForFile(info);
     if (!imageSize.isValid() || imageSize.isEmpty()) {
@@ -538,7 +538,7 @@ qreal imagePreviewScaleForSize(const QFileInfo& info, const QSizeF& size, bool p
     return std::clamp(scale, minScale, maxScale);
 }
 
-QSizeF imagePreviewSizeForScale(const QFileInfo& info, qreal scale)
+inline QSizeF imagePreviewSizeForScale(const QFileInfo& info, qreal scale)
 {
     const QSize imageSize = imagePixelSizeForFile(info);
     if (!imageSize.isValid() || imageSize.isEmpty()) {
@@ -555,7 +555,7 @@ QSizeF imagePreviewSizeForScale(const QFileInfo& info, qreal scale)
 
 #if MYCEL_HAS_PDF
 // First-page size in points, cached so the PDF is not reloaded on every layout/paint.
-QSizeF pdfFirstPagePointSize(const QFileInfo& info)
+inline QSizeF pdfFirstPagePointSize(const QFileInfo& info)
 {
     static QHash<QString, QSizeF> cache;
     const QString key = info.absoluteFilePath() + QLatin1Char('|') +
@@ -574,12 +574,12 @@ QSizeF pdfFirstPagePointSize(const QFileInfo& info)
 }
 #endif
 
-bool isPdfThumbnailFile(const QFileInfo& info)
+inline bool isPdfThumbnailFile(const QFileInfo& info)
 {
     return info.suffix().compare(QStringLiteral("pdf"), Qt::CaseInsensitive) == 0;
 }
 
-bool isEpubThumbnailFile(const QFileInfo& info)
+inline bool isEpubThumbnailFile(const QFileInfo& info)
 {
     return info.suffix().compare(QStringLiteral("epub"), Qt::CaseInsensitive) == 0;
 }
@@ -587,7 +587,7 @@ bool isEpubThumbnailFile(const QFileInfo& info)
 // Extract the cover image from an EPUB (a ZIP): META-INF/container.xml -> OPF package document ->
 // the manifest's cover image (EPUB3 properties="cover-image", or EPUB2 <meta name="cover">), with
 // a fallback to the first image in the manifest. Returns a null image on failure.
-QImage epubCoverImage(const QFileInfo& info)
+inline QImage epubCoverImage(const QFileInfo& info)
 {
     QZipReader zip(info.absoluteFilePath());
     if (!zip.isReadable()) {
@@ -689,7 +689,7 @@ QImage epubCoverImage(const QFileInfo& info)
 }
 
 // Cover image pixel size, cached so the EPUB is not re-extracted for every layout pass.
-QSizeF epubCoverPixelSize(const QFileInfo& info)
+inline QSizeF epubCoverPixelSize(const QFileInfo& info)
 {
     static QHash<QString, QSizeF> cache;
     const QString key = info.absoluteFilePath() + QLatin1Char('|') +
@@ -704,7 +704,7 @@ QSizeF epubCoverPixelSize(const QFileInfo& info)
     return size;
 }
 
-QSizeF clampedPreviewSizeForFile(const QFileInfo& info, const QSizeF& size, bool preferHeight = false)
+inline QSizeF clampedPreviewSizeForFile(const QFileInfo& info, const QSizeF& size, bool preferHeight = false)
 {
     if (isImagePreviewFile(info)) {
         return clampedImagePreviewSize(info, size, preferHeight);
@@ -732,7 +732,7 @@ QSizeF clampedPreviewSizeForFile(const QFileInfo& info, const QSizeF& size, bool
 
 // Image and document (PDF/EPUB) previews keep their source aspect ratio, so resizing them drives a
 // single dragged dimension. Every other preview frame (text, etc.) resizes freely on both axes.
-bool isAspectLockedPreviewFile(const QFileInfo& info)
+inline bool isAspectLockedPreviewFile(const QFileInfo& info)
 {
     if (isImagePreviewFile(info)) {
         return true;
@@ -747,7 +747,7 @@ bool isAspectLockedPreviewFile(const QFileInfo& info)
 
 // Target frame size while dragging the resize grip. Aspect-locked previews move one axis (the
 // dominant drag direction); free previews follow the grip on both axes.
-QSizeF previewResizeTargetSize(const QFileInfo& info, const QSizeF& startSize, const QPointF& delta)
+inline QSizeF previewResizeTargetSize(const QFileInfo& info, const QSizeF& startSize, const QPointF& delta)
 {
     if (isAspectLockedPreviewFile(info)) {
         return std::abs(delta.x()) >= std::abs(delta.y())
@@ -757,7 +757,7 @@ QSizeF previewResizeTargetSize(const QFileInfo& info, const QSizeF& startSize, c
     return QSizeF(startSize.width() + delta.x(), startSize.height() + delta.y());
 }
 
-QSizeF automaticPreviewSize(const QFileInfo& info)
+inline QSizeF automaticPreviewSize(const QFileInfo& info)
 {
     constexpr qreal width = 460.0;
     constexpr qreal minHeight = 46.0;
@@ -870,7 +870,7 @@ QSizeF automaticPreviewSize(const QFileInfo& info)
     return QSizeF(width, std::clamp(doc.size().height() + 24.0, minHeight, 220.0));
 }
 
-bool directoryHasMycel(const QString& path)
+inline bool directoryHasMycel(const QString& path)
 {
     return QFileInfo(QDir(path).filePath(QStringLiteral(".mycel"))).isDir();
 }
@@ -880,7 +880,7 @@ bool directoryHasMycel(const QString& path)
 // On Windows the final rename fails while a sync client (Dropbox etc.) briefly holds the target
 // open, so retry a few times and, as a last resort, fall back to a direct write: that save loses
 // atomicity but the data is never dropped.
-bool writeJsonFileAtomic(const QString& path, const QJsonObject& object)
+inline bool writeJsonFileAtomic(const QString& path, const QJsonObject& object)
 {
     QDir().mkpath(QFileInfo(path).absolutePath());
     const QByteArray payload = QJsonDocument(object).toJson(QJsonDocument::Indented);
@@ -910,7 +910,7 @@ bool writeJsonFileAtomic(const QString& path, const QJsonObject& object)
 // between expensive and broken: macOS FSEvents does not deliver events for SMB/NFS mounts,
 // and Qt on Windows falls back to polling every watched path every second. For such roots the
 // watcher is disabled entirely and the periodic background sweep takes over change detection.
-bool isNetworkFileSystemPath(const QString& path)
+inline bool isNetworkFileSystemPath(const QString& path)
 {
 #ifdef Q_OS_WIN
     const QString native = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath());
@@ -936,7 +936,7 @@ bool isNetworkFileSystemPath(const QString& path)
 // Files On-Demand or Dropbox Smart Sync). Reading such a file forces a full download, so
 // rename-detection hashing must skip it. Non-Windows platforms report false: their sync clients
 // typically keep full local copies.
-bool isCloudPlaceholderFile(const QFileInfo& info)
+inline bool isCloudPlaceholderFile(const QFileInfo& info)
 {
 #ifdef Q_OS_WIN
     const DWORD attributes = GetFileAttributesW(reinterpret_cast<const wchar_t*>(info.absoluteFilePath().utf16()));
@@ -954,7 +954,7 @@ bool isCloudPlaceholderFile(const QFileInfo& info)
 // Content hash used to recognize a file that was renamed outside Mycel (e.g. by a cloud-sync
 // client or another program). Returns nullopt for files too large to hash cheaply, cloud
 // placeholders, or on read failure.
-std::optional<QByteArray> computeFileContentHash(const QFileInfo& info)
+inline std::optional<QByteArray> computeFileContentHash(const QFileInfo& info)
 {
     if (!info.isFile() || info.size() > RenameHashMaxFileSize || isCloudPlaceholderFile(info)) {
         return std::nullopt;
@@ -973,7 +973,7 @@ std::optional<QByteArray> computeFileContentHash(const QFileInfo& info)
 // Explains why computeFileContentHash() returned nullopt for `info`, for diagnostic logging
 // only (reconcileRenamedFiles calls this so a failed rename match leaves a traceable reason
 // in the debug pane instead of just silently not matching).
-QString describeHashSkipReason(const QFileInfo& info)
+inline QString describeHashSkipReason(const QFileInfo& info)
 {
     if (info.size() > RenameHashMaxFileSize) {
         return QStringLiteral("too large: %1 bytes").arg(info.size());
@@ -998,7 +998,7 @@ struct TreeWalkResult {
 
 // `cancelled` (optional) aborts the walk early with a partial result; callers passing it must
 // discard that partial result themselves.
-TreeWalkResult walkRealTree(const QString& rootPath, const std::atomic_bool* cancelled = nullptr)
+inline TreeWalkResult walkRealTree(const QString& rootPath, const std::atomic_bool* cancelled = nullptr)
 {
     TreeWalkResult result;
     const QFileInfo rootInfo(rootPath);
@@ -1048,7 +1048,7 @@ struct StartupScanResult {
 // Runs on the startup scan thread. Pure function of the filesystem: touches no MainWindow
 // state, works on a copy of the hash cache, and bails out (returning a partial result that the
 // caller discards) as soon as `cancelled` is set so window close never waits on a slow walk.
-StartupScanResult runStartupScan(const QString& rootPath, bool mycelStorageEnabled,
+inline StartupScanResult runStartupScan(const QString& rootPath, bool mycelStorageEnabled,
                                  const std::map<QString, FileHashCacheEntry>& knownHashes,
                                  const std::atomic_bool& cancelled)
 {
@@ -1088,7 +1088,7 @@ StartupScanResult runStartupScan(const QString& rootPath, bool mycelStorageEnabl
 // The exact folder-with-Mycel-badge glyph used for sub-root nodes, rendered into a pixmap so the
 // same mark can be reused wherever a Mycel sub-root/parent-root is shown (e.g. the parent overlay).
 // Keeps the parent (as shown by the child) identical in appearance to a sub-root (as shown by the parent).
-QPixmap subRootFolderPixmap()
+inline QPixmap subRootFolderPixmap()
 {
     static QPixmap cached;
     if (!cached.isNull()) {
@@ -1130,7 +1130,7 @@ QPixmap subRootFolderPixmap()
 // there; anything else falls back to directories-first, case-insensitive alphabetical. Used by
 // both scanTree (freshly stat'd QFileInfoList) and reorderChildrenInPlace (cached Node children)
 // so a drag-drop reorder and a fresh disk scan always agree on the resulting order.
-bool lessByFileOrder(const QString& aName, bool aIsDir, const QString& bName, bool bIsDir,
+inline bool lessByFileOrder(const QString& aName, bool aIsDir, const QString& bName, bool bIsDir,
                       const QStringList& order)
 {
     const int ai = order.indexOf(aName);
@@ -1150,7 +1150,7 @@ bool lessByFileOrder(const QString& aName, bool aIsDir, const QString& bName, bo
     return QString::compare(aName, bName, Qt::CaseInsensitive) < 0;
 }
 
-std::unique_ptr<Node> scanTree(const QString& path, int depth, int branch,
+inline std::unique_ptr<Node> scanTree(const QString& path, int depth, int branch,
                                const QSet<QString>& collapsedPaths, const QSet<QString>& previewPaths,
                                const std::map<QString, QSizeF>& previewSizes,
                                const std::map<QString, QStringList>& fileOrders,
@@ -1224,7 +1224,7 @@ std::unique_ptr<Node> scanTree(const QString& path, int depth, int branch,
 // uses on a fresh disk listing. A drag-drop reorder changes only fileOrders_ metadata -- no file
 // is added, removed, or renamed -- so the visible children can be resorted in place instead of
 // re-stat'ing the whole tree from disk (see relayout()'s handling of other metadata-only changes).
-void reorderChildrenInPlace(Node& parent, const QStringList& order)
+inline void reorderChildrenInPlace(Node& parent, const QStringList& order)
 {
     std::stable_sort(parent.children.begin(), parent.children.end(),
                       [&order](const std::unique_ptr<Node>& a, const std::unique_ptr<Node>& b) {
@@ -1232,7 +1232,7 @@ void reorderChildrenInPlace(Node& parent, const QStringList& order)
                       });
 }
 
-void assignTopLevelBranches(Node& root)
+inline void assignTopLevelBranches(Node& root)
 {
     root.branch = -1;
     for (int i = 0; i < static_cast<int>(root.children.size()); ++i) {
@@ -1247,7 +1247,7 @@ void assignTopLevelBranches(Node& root)
     }
 }
 
-Node* findNodeByPath(Node& node, const QString& path)
+inline Node* findNodeByPath(Node& node, const QString& path)
 {
     if (node.path == path) {
         return &node;
@@ -1263,7 +1263,7 @@ Node* findNodeByPath(Node& node, const QString& path)
 // True when two scans describe the same displayed tree: same paths, same file/dir kind,
 // and the same children in the same order, recursively. Used to skip re-rendering when a
 // filesystem notification (e.g. a cloud-sync mtime touch) did not change what is shown.
-bool sameVisibleStructure(const Node& a, const Node& b)
+inline bool sameVisibleStructure(const Node& a, const Node& b)
 {
     if (a.path != b.path || a.isDir != b.isDir || a.children.size() != b.children.size()) {
         return false;
@@ -1604,7 +1604,7 @@ struct TreeLayoutEngine {
     }
 };
 
-void visitNodes(Node& node, const std::function<void(Node&)>& fn)
+inline void visitNodes(Node& node, const std::function<void(Node&)>& fn)
 {
     fn(node);
     for (auto& child : node.children) {
@@ -1612,7 +1612,20 @@ void visitNodes(Node& node, const std::function<void(Node&)>& fn)
     }
 }
 
-QString youtubeVideoIdFromUrl(const QUrl& url)
+// A curved connector between two points, matching the parent-child edge style.
+inline QPainterPath edgePathBetweenPoints(const QPointF& start, const QPointF& end)
+{
+    const qreal distance = std::max<qreal>(96.0, end.x() - start.x());
+    const qreal splitX = start.x() + std::clamp(distance * 0.46, 58.0, 128.0);
+    QPainterPath path(start);
+    path.cubicTo(QPointF(start.x() + distance * 0.16, start.y()),
+                 QPointF(splitX - 34.0, end.y()), QPointF(splitX, end.y()));
+    path.cubicTo(QPointF(splitX + 30.0, end.y()),
+                 QPointF(end.x() - 38.0, end.y()), end);
+    return path;
+}
+
+inline QString youtubeVideoIdFromUrl(const QUrl& url)
 {
     if (!url.isValid()) {
         return {};
@@ -1653,7 +1666,7 @@ QString youtubeVideoIdFromUrl(const QUrl& url)
     return videoId;
 }
 
-std::optional<QString> youtubeEmbedUrlFromText(const QString& text)
+inline std::optional<QString> youtubeEmbedUrlFromText(const QString& text)
 {
     static const QRegularExpression urlPattern(
         QStringLiteral(R"((?:URL\s*=\s*)?(https?://[^\s<>"'\]\)]+))"),
@@ -1675,7 +1688,7 @@ std::optional<QString> youtubeEmbedUrlFromText(const QString& text)
     return std::nullopt;
 }
 
-std::optional<QUrl> firstUrlFromText(const QString& text)
+inline std::optional<QUrl> firstUrlFromText(const QString& text)
 {
     static const QRegularExpression urlPattern(
         QStringLiteral(R"((?:URL\s*=\s*)?(https?://[^\s<>"'\]\)]+))"),
@@ -1695,7 +1708,7 @@ std::optional<QUrl> firstUrlFromText(const QString& text)
     return url;
 }
 
-QString urlShortcutFileName(const QUrl& url)
+inline QString urlShortcutFileName(const QUrl& url)
 {
     QString stem = url.host().trimmed();
     const QStringList pathParts = url.path().split(QLatin1Char('/'), Qt::SkipEmptyParts);
@@ -1723,13 +1736,13 @@ QString urlShortcutFileName(const QUrl& url)
     return stem + QStringLiteral(".url");
 }
 
-QByteArray urlShortcutBytes(const QUrl& url)
+inline QByteArray urlShortcutBytes(const QUrl& url)
 {
     const QString text = QStringLiteral("[InternetShortcut]\nURL=%1\n").arg(url.toString());
     return text.toUtf8();
 }
 
-std::optional<QUrl> urlForShortcutFile(const QFileInfo& info)
+inline std::optional<QUrl> urlForShortcutFile(const QFileInfo& info)
 {
     if (!info.exists() || !info.isFile() ||
         info.suffix().compare(QStringLiteral("url"), Qt::CaseInsensitive) != 0 ||
@@ -1744,7 +1757,7 @@ std::optional<QUrl> urlForShortcutFile(const QFileInfo& info)
     return firstUrlFromText(QString::fromUtf8(file.read(64 * 1024)));
 }
 
-QString htmlAttributeDecoded(QString value)
+inline QString htmlAttributeDecoded(QString value)
 {
     value = value.trimmed();
     if (!value.contains(QLatin1Char('&'))) {
@@ -1756,7 +1769,7 @@ QString htmlAttributeDecoded(QString value)
     return doc.toPlainText().trimmed();
 }
 
-QString htmlTagAttributeValue(const QString& tag, const QString& attributeName)
+inline QString htmlTagAttributeValue(const QString& tag, const QString& attributeName)
 {
     static const QRegularExpression attributePattern(
         QStringLiteral("([A-Za-z_:][-A-Za-z0-9_:.]*)\\s*=\\s*(\"([^\"]*)\"|'([^']*)'|([^\\s\"'=<>`]+))"),
@@ -1781,7 +1794,7 @@ QString htmlTagAttributeValue(const QString& tag, const QString& attributeName)
     return {};
 }
 
-std::optional<QUrl> resolvedHttpImageUrl(const QString& value, const QUrl& baseUrl)
+inline std::optional<QUrl> resolvedHttpImageUrl(const QString& value, const QUrl& baseUrl)
 {
     QString candidate = value.trimmed();
     if (candidate.isEmpty() || candidate.startsWith(QStringLiteral("data:"), Qt::CaseInsensitive)) {
@@ -1796,7 +1809,7 @@ std::optional<QUrl> resolvedHttpImageUrl(const QString& value, const QUrl& baseU
     return resolved;
 }
 
-std::optional<QUrl> resolvedHttpImageUrlFromSrcset(const QString& srcset, const QUrl& baseUrl)
+inline std::optional<QUrl> resolvedHttpImageUrlFromSrcset(const QString& srcset, const QUrl& baseUrl)
 {
     const QStringList candidates = srcset.split(QLatin1Char(','), Qt::SkipEmptyParts);
     for (QString candidate : candidates) {
@@ -1812,7 +1825,7 @@ std::optional<QUrl> resolvedHttpImageUrlFromSrcset(const QString& srcset, const 
     return std::nullopt;
 }
 
-std::optional<QUrl> resolvedHttpImageUrlFromJsonishAttribute(QString value, const QUrl& baseUrl)
+inline std::optional<QUrl> resolvedHttpImageUrlFromJsonishAttribute(QString value, const QUrl& baseUrl)
 {
     value = value.trimmed();
     if (value.isEmpty()) {
@@ -1833,7 +1846,7 @@ std::optional<QUrl> resolvedHttpImageUrlFromJsonishAttribute(QString value, cons
     return std::nullopt;
 }
 
-std::optional<QUrl> imageUrlFromImgTag(const QString& tag, const QUrl& baseUrl)
+inline std::optional<QUrl> imageUrlFromImgTag(const QString& tag, const QUrl& baseUrl)
 {
     for (const QString& attribute : {QStringLiteral("data-old-hires"), QStringLiteral("src"),
                                      QStringLiteral("data-src"), QStringLiteral("data-original"),
@@ -1852,7 +1865,7 @@ std::optional<QUrl> imageUrlFromImgTag(const QString& tag, const QUrl& baseUrl)
     return std::nullopt;
 }
 
-int htmlDimensionAttribute(const QString& tag, const QString& attributeName)
+inline int htmlDimensionAttribute(const QString& tag, const QString& attributeName)
 {
     const QString value = htmlTagAttributeValue(tag, attributeName);
     if (value.contains(QLatin1Char('%'))) {
@@ -1863,7 +1876,7 @@ int htmlDimensionAttribute(const QString& tag, const QString& attributeName)
     return match.hasMatch() ? match.captured(1).toInt() : 0;
 }
 
-bool imageRankTextContainsAny(const QString& text, const QStringList& words)
+inline bool imageRankTextContainsAny(const QString& text, const QStringList& words)
 {
     for (const QString& word : words) {
         if (text.contains(word)) {
@@ -1873,7 +1886,7 @@ bool imageRankTextContainsAny(const QString& text, const QStringList& words)
     return false;
 }
 
-int scoreImageCandidate(const QString& tag, const QUrl& imageUrl, const QUrl& baseUrl, int index)
+inline int scoreImageCandidate(const QString& tag, const QUrl& imageUrl, const QUrl& baseUrl, int index)
 {
     const QString id = htmlTagAttributeValue(tag, QStringLiteral("id"));
     const QString classes = htmlTagAttributeValue(tag, QStringLiteral("class"));
@@ -1944,7 +1957,7 @@ int scoreImageCandidate(const QString& tag, const QUrl& imageUrl, const QUrl& ba
     return score;
 }
 
-std::optional<QUrl> rankedImageUrlFromHtml(const QString& html, const QUrl& baseUrl,
+inline std::optional<QUrl> rankedImageUrlFromHtml(const QString& html, const QUrl& baseUrl,
                                            const QRegularExpression& imgPattern)
 {
     std::optional<QUrl> bestUrl;
@@ -1971,7 +1984,7 @@ std::optional<QUrl> rankedImageUrlFromHtml(const QString& html, const QUrl& base
     return bestScore > -20 ? bestUrl : std::nullopt;
 }
 
-std::optional<QUrl> firstImageUrlFromHtml(const QString& html, const QUrl& baseUrl)
+inline std::optional<QUrl> firstImageUrlFromHtml(const QString& html, const QUrl& baseUrl)
 {
     static const QRegularExpression metaPattern(QStringLiteral("<meta\\b[^>]*>"),
                                                 QRegularExpression::CaseInsensitiveOption);
@@ -2015,24 +2028,24 @@ std::optional<QUrl> firstImageUrlFromHtml(const QString& html, const QUrl& baseU
     return rankedImageUrlFromHtml(html, baseUrl, imgPattern);
 }
 
-QString youtubeWatchUrlFromEmbedUrl(const QString& embedUrl)
+inline QString youtubeWatchUrlFromEmbedUrl(const QString& embedUrl)
 {
     const QString videoId = youtubeVideoIdFromUrl(QUrl(embedUrl));
     return videoId.isEmpty() ? embedUrl : QStringLiteral("https://www.youtube.com/watch?v=%1").arg(videoId);
 }
 
-QString youtubeThumbnailUrlFromEmbedUrl(const QString& embedUrl)
+inline QString youtubeThumbnailUrlFromEmbedUrl(const QString& embedUrl)
 {
     const QString videoId = youtubeVideoIdFromUrl(QUrl(embedUrl));
     return videoId.isEmpty() ? QString() : QStringLiteral("https://img.youtube.com/vi/%1/hqdefault.jpg").arg(videoId);
 }
 
-QString youtubeVideoIdFromEmbedUrl(const QString& embedUrl)
+inline QString youtubeVideoIdFromEmbedUrl(const QString& embedUrl)
 {
     return youtubeVideoIdFromUrl(QUrl(embedUrl));
 }
 
-std::optional<QString> youtubeEmbedUrlForFile(const QFileInfo& info)
+inline std::optional<QString> youtubeEmbedUrlForFile(const QFileInfo& info)
 {
     if (!info.exists() || !info.isFile() || info.size() > 64 * 1024) {
         return std::nullopt;
@@ -2044,7 +2057,7 @@ std::optional<QString> youtubeEmbedUrlForFile(const QFileInfo& info)
     return youtubeEmbedUrlFromText(QString::fromUtf8(file.read(64 * 1024)));
 }
 
-bool isTextPreviewFile(const QFileInfo& info)
+inline bool isTextPreviewFile(const QFileInfo& info)
 {
     static const QSet<QString> extensions = {
         QStringLiteral("txt"), QStringLiteral("md"), QStringLiteral("rst"),
@@ -2059,29 +2072,29 @@ bool isTextPreviewFile(const QFileInfo& info)
     return extensions.contains(info.suffix().toLower()) || info.fileName() == QStringLiteral("CMakeLists.txt");
 }
 
-bool isMarkdownPreviewFile(const QFileInfo& info)
+inline bool isMarkdownPreviewFile(const QFileInfo& info)
 {
     const QString suffix = info.suffix().toLower();
     return suffix == QStringLiteral("md") || suffix == QStringLiteral("markdown");
 }
 
-bool isHtmlPreviewFile(const QFileInfo& info)
+inline bool isHtmlPreviewFile(const QFileInfo& info)
 {
     const QString suffix = info.suffix().toLower();
     return suffix == QStringLiteral("html") || suffix == QStringLiteral("htm");
 }
 
-bool isCsvPreviewFile(const QFileInfo& info)
+inline bool isCsvPreviewFile(const QFileInfo& info)
 {
     return info.suffix().compare(QStringLiteral("csv"), Qt::CaseInsensitive) == 0;
 }
 
-bool isPreviewMetadataLine(const QString& line)
+inline bool isPreviewMetadataLine(const QString& line)
 {
     return line.startsWith(QStringLiteral("Subject:")) || line.startsWith(QStringLiteral("Key:"));
 }
 
-QString filterPreviewMetadataLines(const QString& text)
+inline QString filterPreviewMetadataLines(const QString& text)
 {
     QStringList filtered;
     const QStringList lines = text.split(QLatin1Char('\n'));
@@ -2093,7 +2106,7 @@ QString filterPreviewMetadataLines(const QString& text)
     return filtered.join(QLatin1Char('\n'));
 }
 
-QStringList parseCsvLine(const QString& line)
+inline QStringList parseCsvLine(const QString& line)
 {
     QStringList cells;
     QString cell;
@@ -2120,7 +2133,7 @@ QStringList parseCsvLine(const QString& line)
     return cells;
 }
 
-QString csvToHtmlTable(const QString& text)
+inline QString csvToHtmlTable(const QString& text)
 {
     const ThemeColors colors = currentThemeColors();
     QString html = QStringLiteral(
@@ -2151,13 +2164,13 @@ QString csvToHtmlTable(const QString& text)
     return html;
 }
 
-QString archiveComment(const QString& kind, const QJsonObject& object)
+inline QString archiveComment(const QString& kind, const QJsonObject& object)
 {
     return QStringLiteral("<!-- mycel:%1 %2 -->\n")
         .arg(kind, QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact)));
 }
 
-std::optional<QJsonObject> archiveCommentObject(const QString& line, const QString& kind)
+inline std::optional<QJsonObject> archiveCommentObject(const QString& line, const QString& kind)
 {
     const QString trimmed = line.trimmed();
     const QString prefix = QStringLiteral("<!-- mycel:%1 ").arg(kind);
@@ -2173,7 +2186,7 @@ std::optional<QJsonObject> archiveCommentObject(const QString& line, const QStri
     return doc.object();
 }
 
-QString escapedArchiveText(const QString& text)
+inline QString escapedArchiveText(const QString& text)
 {
     QStringList lines = text.split(QLatin1Char('\n'), Qt::KeepEmptyParts);
     for (QString& line : lines) {
@@ -2184,7 +2197,7 @@ QString escapedArchiveText(const QString& text)
     return lines.join(QLatin1Char('\n'));
 }
 
-QString unescapedArchiveText(const QStringList& lines)
+inline QString unescapedArchiveText(const QStringList& lines)
 {
     QStringList restored = lines;
     for (QString& line : restored) {
@@ -2195,7 +2208,7 @@ QString unescapedArchiveText(const QStringList& lines)
     return restored.join(QLatin1Char('\n'));
 }
 
-QString markdownHeading(int level, QString title)
+inline QString markdownHeading(int level, QString title)
 {
     level = std::clamp(level, 1, 6);
     title.replace(QLatin1Char('\n'), QLatin1Char(' '));
@@ -2205,13 +2218,13 @@ QString markdownHeading(int level, QString title)
     return QString(level, QLatin1Char('#')) + QLatin1Char(' ') + title + QStringLiteral("\n\n");
 }
 
-QString archiveRelativePath(QString path)
+inline QString archiveRelativePath(QString path)
 {
     path.replace(QLatin1Char('\\'), QLatin1Char('/'));
     return QDir::cleanPath(path);
 }
 
-bool isSafeArchiveRelativePath(const QString& path)
+inline bool isSafeArchiveRelativePath(const QString& path)
 {
     const QString clean = archiveRelativePath(path);
     if (clean.isEmpty() || clean == QStringLiteral(".") || QDir::isAbsolutePath(clean)) {
@@ -2231,7 +2244,7 @@ bool isSafeArchiveRelativePath(const QString& path)
     return true;
 }
 
-bool isImagePreviewFile(const QFileInfo& info)
+inline bool isImagePreviewFile(const QFileInfo& info)
 {
     static const QSet<QString> extensions = {
         QStringLiteral("png"), QStringLiteral("jpg"), QStringLiteral("jpeg"),
@@ -2240,7 +2253,7 @@ bool isImagePreviewFile(const QFileInfo& info)
     return extensions.contains(info.suffix().toLower());
 }
 
-bool isVideoPreviewFile(const QFileInfo& info)
+inline bool isVideoPreviewFile(const QFileInfo& info)
 {
     static const QSet<QString> extensions = {
         QStringLiteral("mp4"), QStringLiteral("mov"), QStringLiteral("m4v"),
@@ -2257,7 +2270,7 @@ struct FileKindStyle {
     QColor accent;
 };
 
-FileKindStyle fileKindStyleFor(const QFileInfo& info)
+inline FileKindStyle fileKindStyleFor(const QFileInfo& info)
 {
     const QString s = info.suffix().toLower();
     const QString name = info.fileName();
@@ -2310,7 +2323,7 @@ FileKindStyle fileKindStyleFor(const QFileInfo& info)
     return {QString(), QColor()};
 }
 
-QString normalizedDirectoryPath(const QString& path)
+inline QString normalizedDirectoryPath(const QString& path)
 {
     QFileInfo info(path);
     const QString absolutePath = info.isDir() ? info.absoluteFilePath() : info.absolutePath();
@@ -2318,7 +2331,7 @@ QString normalizedDirectoryPath(const QString& path)
     return canonicalPath.isEmpty() ? QDir(absolutePath).absolutePath() : canonicalPath;
 }
 
-bool textInputWidgetHasFocus()
+inline bool textInputWidgetHasFocus()
 {
     for (QWidget* widget = QApplication::focusWidget(); widget; widget = widget->parentWidget()) {
         if (qobject_cast<QLineEdit*>(widget) || qobject_cast<QPlainTextEdit*>(widget)) {
@@ -2337,7 +2350,7 @@ struct StartupOptions {
     bool showVersion = false;
 };
 
-StartupOptions startupOptions(const QStringList& arguments)
+inline StartupOptions startupOptions(const QStringList& arguments)
 {
     StartupOptions options;
     QString rootArgument;
@@ -2371,17 +2384,17 @@ StartupOptions startupOptions(const QStringList& arguments)
     return options;
 }
 
-bool hasMycelFolder(const QString& rootPath)
+inline bool hasMycelFolder(const QString& rootPath)
 {
     return QFileInfo(QDir(rootPath).filePath(QStringLiteral(".mycel"))).isDir();
 }
 
-bool createMycelFolder(const QString& rootPath)
+inline bool createMycelFolder(const QString& rootPath)
 {
     return QDir(rootPath).mkpath(QStringLiteral(".mycel"));
 }
 
-QString historyPathKey(const QString& path)
+inline QString historyPathKey(const QString& path)
 {
     QString key = QDir::cleanPath(path);
 #ifdef Q_OS_WIN
@@ -2390,7 +2403,7 @@ QString historyPathKey(const QString& path)
     return key;
 }
 
-QStringList recentRootPaths()
+inline QStringList recentRootPaths()
 {
     constexpr int MaxRecentRoots = 20;
     QSettings settings;
@@ -2423,7 +2436,7 @@ QStringList recentRootPaths()
     return paths;
 }
 
-void rememberRootPath(const QString& rootPath)
+inline void rememberRootPath(const QString& rootPath)
 {
     constexpr int MaxRecentRoots = 20;
     const QString path = normalizedDirectoryPath(rootPath);
@@ -2449,7 +2462,7 @@ void rememberRootPath(const QString& rootPath)
     settings.setValue(QStringLiteral("startup/recentRoots"), paths);
 }
 
-QString chooseRecentRootPath(QWidget* parent)
+inline QString chooseRecentRootPath(QWidget* parent)
 {
     const QStringList paths = recentRootPaths();
     if (paths.isEmpty()) {
@@ -2493,7 +2506,7 @@ QString chooseRecentRootPath(QWidget* parent)
     return normalizedDirectoryPath(list->currentItem()->text());
 }
 
-bool resolveStartupStorageMode(StartupOptions& options)
+inline bool resolveStartupStorageMode(StartupOptions& options)
 {
     if (!options.mycelStorageEnabled) {
         rememberRootPath(options.rootPath);

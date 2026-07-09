@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(Mycel VERSION 0.7.6 LANGUAGES CXX)
+project(Mycel VERSION 0.7.7 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,6 +31,16 @@ find_package(Qt6Pdf QUIET CONFIG PATHS "${MYCEL_QT_CMAKE_DIR}" NO_DEFAULT_PATH)
 
 add_executable(mycel
     src/main.cpp
+    src/main_window_core.cpp
+    src/main_window_persistence.cpp
+    src/main_window_filesystem.cpp
+    src/main_window_layout.cpp
+    src/main_window_history.cpp
+    src/main_window_links.cpp
+    src/main_window_dragdrop.cpp
+    src/main_window_actions.cpp
+    src/main_window_preview.cpp
+    src/main_window_board.cpp
     assets/mycel.qrc
 )
 

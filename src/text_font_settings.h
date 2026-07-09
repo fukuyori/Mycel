@@ -136,7 +136,7 @@ private:
     }
 };
 
-bool handleTextZoomKey(QKeyEvent* event, TextFontSettings::Surface surface)
+inline bool handleTextZoomKey(QKeyEvent* event, TextFontSettings::Surface surface)
 {
     if (!event || !(event->modifiers() & Qt::ControlModifier)) {
         return false;
@@ -162,7 +162,7 @@ bool handleTextZoomKey(QKeyEvent* event, TextFontSettings::Surface surface)
     }
 }
 
-bool handleTextZoomGesture(QEvent* event, qreal& accumulatedZoom, TextFontSettings::Surface surface)
+inline bool handleTextZoomGesture(QEvent* event, qreal& accumulatedZoom, TextFontSettings::Surface surface)
 {
     if (!event || event->type() != QEvent::NativeGesture) {
         return false;
