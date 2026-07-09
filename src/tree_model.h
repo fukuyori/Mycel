@@ -7,8 +7,6 @@
 // the same internal linkage they always had.
 #include <QtCore/QDir>
 #include <QtCore/QByteArray>
-#include <QtCore/QDateTime>
-#include <QtCore/QEvent>
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
 #include <QtCore/QFileSystemWatcher>
@@ -16,21 +14,15 @@
 #include <QtCore/QStorageInfo>
 #include <QtCore/QHash>
 #include <QtCore/QIODevice>
-#include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QCryptographicHash>
-#include <QtCore/QMimeData>
-#include <QtCore/QProcess>
-#include <QtCore/QStandardPaths>
 #include <QtCore/QXmlStreamReader>
 #include <QtCore/private/qzipreader_p.h>
 #include <QtCore/QPointF>
-#include <QtCore/QPointer>
 #include <QtCore/QRectF>
 #include <QtCore/QRegularExpression>
 #include <QtCore/QBuffer>
-#include <QtCore/QMutex>
 #include <QtCore/QSaveFile>
 #include <QtCore/QSettings>
 #include <QtCore/QThread>
@@ -39,94 +31,39 @@
 #include <QtCore/QString>
 #include <QtCore/QStringList>
 #include <QtCore/QTextStream>
-#include <QtCore/QTime>
-#include <QtCore/QTimer>
 #include <QtCore/QUrl>
 #include <QtCore/QUrlQuery>
-#include <QtCore/QVariant>
-#include <QtCore/QVector>
-#include <QtCore/qtenvironmentvariables.h>
-#include <QtGui/QTransform>
-#include <QtGui/QBrush>
-#include <QtGui/QActionGroup>
 #include <QtGui/QColor>
-#include <QtGui/QContextMenuEvent>
-#include <QtGui/QDesktopServices>
 #include <QtGui/QFont>
 #include <QtGui/QFontMetricsF>
 #include <QtGui/QIcon>
-#include <QtGui/QClipboard>
 #include <QtGui/QImage>
 #include <QtGui/QImageReader>
-#include <QtGui/QKeyEvent>
-#include <QtGui/QKeySequence>
-#include <QtGui/QMouseEvent>
-#include <QtGui/QNativeGestureEvent>
-#include <QtGui/QPaintEvent>
 #include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
-#include <QtGui/QPalette>
 #include <QtGui/QPen>
 #include <QtGui/QPixmap>
 #include <QtGui/QPixmapCache>
-#include <QtGui/QShortcut>
-#include <QtGui/QTextCursor>
 #include <QtGui/QTextDocument>
 #include <QtGui/QTextOption>
-#include <QtGui/QWheelEvent>
-#include <QtGui/QAction>
-#include <QtGui/QCloseEvent>
-#include <QtGui/QScreen>
-#include <QtMultimedia/QAudioOutput>
-#include <QtMultimedia/QMediaPlayer>
-#include <QtMultimediaWidgets/QVideoWidget>
-#include <QtNetwork/QNetworkAccessManager>
-#include <QtNetwork/QNetworkReply>
-#include <QtNetwork/QNetworkRequest>
-#if MYCEL_HAS_WEBENGINE
-#include <QtWebEngineCore/QWebEngineSettings>
-#include <QtWebEngineWidgets/QWebEngineView>
-#endif
 #if MYCEL_HAS_PDF
 #include <QtPdf/QPdfDocument>
-#include <QtPdf/QPdfDocumentRenderOptions>
 #endif
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QDialog>
-#include <QtWidgets/QDockWidget>
 #include <QtWidgets/QFileDialog>
-#include <QtWidgets/QGraphicsItem>
-#include <QtWidgets/QGraphicsPathItem>
-#include <QtWidgets/QGraphicsProxyWidget>
-#include <QtWidgets/QGraphicsScene>
-#include <QtWidgets/QGraphicsSceneContextMenuEvent>
-#include <QtWidgets/QGraphicsSceneDragDropEvent>
-#include <QtWidgets/QGraphicsSceneMouseEvent>
-#include <QtWidgets/QGraphicsView>
 #include <QtWidgets/QHBoxLayout>
-#include <QtWidgets/QInputDialog>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QListWidget>
-#include <QtWidgets/QMainWindow>
-#include <QtWidgets/QMenu>
-#include <QtWidgets/QMenuBar>
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QPushButton>
-#include <QtWidgets/QScrollBar>
-#include <QtWidgets/QSlider>
-#include <QtWidgets/QSplitter>
-#include <QtWidgets/QStackedWidget>
 #include <QtWidgets/QTextEdit>
-#include <QtWidgets/QToolBar>
-#include <QtWidgets/QToolButton>
 #include <QtWidgets/QVBoxLayout>
 
 #include <algorithm>
 #include <atomic>
-#include <cmath>
-#include <filesystem>
 #include <functional>
 #include <limits>
 #include <map>
@@ -1478,12 +1415,15 @@ struct TreeLayoutEngine {
     }
 
     // Vertical room a link target needs. A folder target expands its own subtree to the right, so it
-    // needs the whole subtree height (mirrors layoutTree's yCursor advance); a file needs one row.
+    // needs the whole subtree height (mirrors layoutTree's yCursor advance); a file needs one row --
+    // plus, via nodeRowSpan, whatever its OWN outgoing links need (a target can itself be a link
+    // source, chaining further targets off it; without this a chained file target's slot in its
+    // parent stack was sized for just its own row, so its chain spilled into the next sibling).
     static qreal linkedTargetSpan(const Node& node, const QSet<QString>& linkedTargets,
                                   Node& root, const std::vector<FileLink>& links)
     {
         if (!node.isDir) {
-            return nodeVerticalSpan(node);
+            return nodeRowSpan(node, root, links);
         }
         const auto isTreeChild = [&linkedTargets](const std::unique_ptr<Node>& child) {
             return !linkedTargets.contains(child->path);
@@ -1520,14 +1460,31 @@ struct TreeLayoutEngine {
 
         const QSet<QString> linkedTargets = linkedTargetPaths(links);
         // Targets already placed by an earlier source in this call, so later sources' columns
-        // steer clear of them too (map order is alphabetical by source path, not visual order).
+        // steer clear of them too.
         QSet<QString> positionedTargets;
+        // A source that is itself another link's target (a chain, e.g. A -> B -> C) must not be
+        // positioned until B's own center has been finalized by A's pass -- linkSourceAnchor(*from)
+        // below would otherwise read B's default-constructed (0,0) center. positionSource recurses
+        // into a target immediately after placing it, so a chain is always walked root-first
+        // regardless of map order (plain path order would otherwise sort e.g. "NewFile 4.txt"
+        // before "NewFile.txt" and process the chain backwards).
+        QSet<QString> processedSources;
 
-        for (auto& [sourcePath, targets] : targetsBySource) {
+        std::function<void(const QString&)> positionSource = [&](const QString& sourcePath) {
+            if (processedSources.contains(sourcePath)) {
+                return;  // already positioned, or a link cycle looping back here
+            }
+            processedSources.insert(sourcePath);
+            const auto found = targetsBySource.find(sourcePath);
+            if (found == targetsBySource.end()) {
+                return;
+            }
             Node* from = findNodeByPath(root, sourcePath);
             if (!from) {
-                continue;
+                return;
             }
+            const std::vector<Node*>& targets = found->second;
+
             std::vector<qreal> spans;
             spans.reserve(targets.size());
             qreal totalSpan = 0.0;
@@ -1588,7 +1545,27 @@ struct TreeLayoutEngine {
                 }
                 slotTop += span;
                 positionedTargets.insert(to->path);
+                positionSource(to->path);  // `to` may itself be a chained source; its center is
+                                            // final now, so lay out its own fan (a no-op if it
+                                            // has no outgoing links).
             }
+        };
+
+        // Start from chain roots (sources that are not themselves another link's target); a
+        // source that IS a target only gets positioned via positionSource's recursion, once its
+        // own center has been finalized by its positioning source.
+        for (auto& [sourcePath, targets] : targetsBySource) {
+            Q_UNUSED(targets);
+            if (!linkedTargets.contains(sourcePath)) {
+                positionSource(sourcePath);
+            }
+        }
+        // Safety net: anything left over is a source whose own incoming link didn't resolve to a
+        // valid target above (e.g. a dangling/self link) -- position it directly so its fan still
+        // lays out instead of silently vanishing, just anchored at whatever center it already has.
+        for (auto& [sourcePath, targets] : targetsBySource) {
+            Q_UNUSED(targets);
+            positionSource(sourcePath);
         }
     }
 
