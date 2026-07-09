@@ -1305,8 +1305,15 @@ struct TreeLayoutEngine {
         if (!hasTreeChildren) {
             node.center.setY(yCursor);
             // Reserve room for the whole link fan (e.g. a tall .pdf linked to this short .txt),
-            // not just this node's own preview, so the next row clears it.
-            yCursor += nodeRowSpan(node, root, links);
+            // not just this node's own preview, so the next row clears it. nodeRowSpan returns the
+            // fan's FULL total span, but layoutFileLinks centers that fan on this row -- half above,
+            // half below -- rather than stacking it entirely downward. Reserving the full span here
+            // (as if it were all below this row) left a dead gap before the next sibling exactly
+            // (fanSpan - ownSpan) / 2 tall: the unused top half of a reservation sized for the
+            // whole fan. Only the half that actually extends downward needs reserving.
+            const qreal ownSpan = nodeVerticalSpan(node);
+            const qreal fanSpan = nodeRowSpan(node, root, links);
+            yCursor += fanSpan > ownSpan ? (ownSpan + fanSpan) / 2.0 : ownSpan;
             return;
         }
 

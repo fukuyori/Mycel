@@ -978,7 +978,7 @@ public:
     // GUI-thread continuation of the startup scan: reconcile external renames against the
     // walked lists, merge the seeded hashes, and bring the filesystem watcher online with the
     // walked paths -- all without re-walking the tree on this thread.
-    void finishStartupScan(const StartupScanResult& result);
+    void finishStartupScan(const QString& scannedRootPath, const StartupScanResult& result);
 
 
     void refreshAll();
@@ -994,6 +994,7 @@ public:
 
 
     void resetFileSystemWatcher();
+    void finishFileSystemWatcherReset(const QString& scannedRootPath, const TreeWalkResult& walk);
 
 
     // Differential registration: only paths that actually changed are (un)watched. The full
@@ -1082,7 +1083,7 @@ public:
 
     // GUI-thread continuation of the periodic reconcile sweep -- mirrors finishStartupScan(),
     // just triggered by the timer instead of the initial load.
-    void finishBackgroundReconcile(const StartupScanResult& result);
+    void finishBackgroundReconcile(const QString& scannedRootPath, const StartupScanResult& result);
 
 
     // Rescan one changed directory and replace its subtree only if the displayed structure
@@ -1531,6 +1532,11 @@ private:
     bool reconcileScanPending_ = false;
     QThread* reconcileScanThread_ = nullptr;
     std::shared_ptr<std::atomic_bool> reconcileScanCancelled_;
+    // Mirrors the same pattern for resetFileSystemWatcher(): that used to walk the tree
+    // synchronously on the GUI thread on every rebuild/board-mode toggle/rename resume.
+    bool fileWatcherResetPending_ = false;
+    QThread* fileWatcherResetThread_ = nullptr;
+    std::shared_ptr<std::atomic_bool> fileWatcherResetCancelled_;
     // True when the root is on a network filesystem: no native watches are registered (see
     // isNetworkFileSystemPath) and the periodic sweep doubles as the structural refresh.
     bool nativeWatcherDisabled_ = false;

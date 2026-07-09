@@ -417,6 +417,14 @@ MainWindow::~MainWindow()
             delete reconcileScanThread_;
             reconcileScanThread_ = nullptr;
         }
+        if (fileWatcherResetCancelled_) {
+            fileWatcherResetCancelled_->store(true);
+        }
+        if (fileWatcherResetThread_) {
+            fileWatcherResetThread_->wait();
+            delete fileWatcherResetThread_;
+            fileWatcherResetThread_ = nullptr;
+        }
         if (qApp) {
             qApp->removeEventFilter(this);
         }
@@ -794,14 +802,28 @@ void MainWindow::startStartupScanThread()
                     return;  // window is closing; the destructor waits for this thread
                 }
                 QMetaObject::invokeMethod(
-                    this, [this, result = std::move(result)] { finishStartupScan(result); },
+                    this, [this, rootPath, result = std::move(result)] { finishStartupScan(rootPath, result); },
                     Qt::QueuedConnection);
             });
         startupScanThread_->start();
     }
 
-void MainWindow::finishStartupScan(const StartupScanResult& result)
+void MainWindow::finishStartupScan(const QString& scannedRootPath, const StartupScanResult& result)
 {
+        startupScanPending_ = false;
+        if (QDir::cleanPath(scannedRootPath) != QDir::cleanPath(rootPath_)) {
+            // openRootFolder() does not cancel an in-flight scan before switching roots. Applying
+            // this result -- rename reconcile, hash-cache entries, watcher paths -- to the now-
+            // different root would mix one root's file identities into another's metadata, so
+            // discard it. rebuild(true) inside openRootFolder() already ran resetFileSystemWatcher()
+            // for the new root, but that call saw startupScanPending_ still true and skipped
+            // registering watches -- do it now that this (discarded) scan is no longer blocking it.
+            recordDebugEvent(QStringLiteral("startup scan discarded: root changed mid-scan (%1 -> %2)")
+                                 .arg(scannedRootPath, rootPath_));
+            resetFileSystemWatcher();
+            return;
+        }
+
         bool renameReconciled = false;
         if (mycelStorageEnabled_ && !result.directories.isEmpty()) {
             // Must run before merging refreshedHashes: an "appeared" file is one on disk but
@@ -841,7 +863,6 @@ void MainWindow::finishStartupScan(const StartupScanResult& result)
             rebuild(false);
         }
 
-        startupScanPending_ = false;
         recordDebugEvent(QStringLiteral("startup scan finished: dirs=%1 files=%2 hashed=%3 reconciled=%4")
                              .arg(result.directories.size())
                              .arg(result.files.size())

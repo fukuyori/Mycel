@@ -83,13 +83,44 @@ void MainWindow::resetFileSystemWatcher()
         if (!fileSystemWatcher_ || inlineRenameActivitySuspended_ || nativeWatcherDisabled_) {
             return;
         }
-        if (startupScanPending_) {
-            // The startup scan thread is already producing the directory/file lists; walking
-            // the tree again here (renders during startup call this) would block the GUI
-            // thread on the exact traversal the deferred startup moved off it.
+        if (startupScanPending_ || fileWatcherResetPending_) {
+            // The startup scan thread, or an already in-flight reset, is already producing (or
+            // will produce) an up-to-date directory/file list; no need to walk again. Called from
+            // every rebuild/board-mode toggle/rename resume, this used to walk the whole tree
+            // synchronously on the GUI thread every time -- the walk (no content hashing, but
+            // still a full recursive readdir) now runs on a worker thread, same pattern as
+            // runBackgroundReconcile().
             return;
         }
-        const TreeWalkResult walk = walkRealTree(rootPath_);
+
+        fileWatcherResetPending_ = true;
+        auto cancelled = std::make_shared<std::atomic_bool>(false);
+        fileWatcherResetCancelled_ = cancelled;
+        const QString scannedRootPath = rootPath_;
+        fileWatcherResetThread_ = QThread::create(
+            [this, scannedRootPath, cancelled] {
+                TreeWalkResult walk = walkRealTree(scannedRootPath, cancelled.get());
+                if (cancelled->load()) {
+                    return;  // window is closing; the destructor waits for this thread
+                }
+                QMetaObject::invokeMethod(
+                    this, [this, scannedRootPath, walk = std::move(walk)] {
+                        finishFileSystemWatcherReset(scannedRootPath, walk);
+                    },
+                    Qt::QueuedConnection);
+            });
+        fileWatcherResetThread_->start();
+    }
+
+void MainWindow::finishFileSystemWatcherReset(const QString& scannedRootPath, const TreeWalkResult& walk)
+{
+        fileWatcherResetPending_ = false;
+        if (QDir::cleanPath(scannedRootPath) != QDir::cleanPath(rootPath_)) {
+            return;  // root changed mid-walk; the new root's own rebuild already re-requested this
+        }
+        if (!fileSystemWatcher_ || inlineRenameActivitySuspended_ || nativeWatcherDisabled_) {
+            return;
+        }
         applyFileSystemWatcherPaths(walk.directories, walk.files);
     }
 
@@ -396,15 +427,23 @@ void MainWindow::runBackgroundReconcile()
                     return;  // window is closing; the destructor waits for this thread
                 }
                 QMetaObject::invokeMethod(
-                    this, [this, result = std::move(result)] { finishBackgroundReconcile(result); },
+                    this, [this, rootPath, result = std::move(result)] { finishBackgroundReconcile(rootPath, result); },
                     Qt::QueuedConnection);
             });
         reconcileScanThread_->start();
     }
 
-void MainWindow::finishBackgroundReconcile(const StartupScanResult& result)
+void MainWindow::finishBackgroundReconcile(const QString& scannedRootPath, const StartupScanResult& result)
 {
         reconcileScanPending_ = false;
+        if (QDir::cleanPath(scannedRootPath) != QDir::cleanPath(rootPath_)) {
+            // The root changed while this sweep was in flight; see finishStartupScan() for why
+            // applying it to the new root would be wrong. No extra recovery needed here: the new
+            // root's own periodic sweep (or resetFileSystemWatcher() from its own rebuild) covers it.
+            recordDebugEvent(QStringLiteral("background reconcile discarded: root changed mid-scan (%1 -> %2)")
+                                 .arg(scannedRootPath, rootPath_));
+            return;
+        }
 
         bool renameReconciled = false;
         if (mycelStorageEnabled_ && !result.directories.isEmpty()) {
