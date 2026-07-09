@@ -1,28 +1,36 @@
 {
+    "board": {
+        "active": false,
+        "pattern": ""
+    },
+    "center": {
+        "x": 1337.7789879542522,
+        "y": -45.19523607953555
+    },
     "scroll": {
-        "horizontal": -1285,
-        "vertical": -305
+        "horizontal": -82,
+        "vertical": -258
     },
     "transform": {
-        "m11": 0.7478573017777784,
+        "m11": 0.11063112915708401,
         "m12": 0,
         "m13": 0,
         "m21": 0,
-        "m22": 0.7478573017777784,
+        "m22": 0.11063112915708401,
         "m23": 0,
-        "m31": -670.8274912451776,
-        "m32": 1619.0736145706578,
+        "m31": 0,
+        "m32": 0,
         "m33": 1
     },
     "version": 1,
     "window": {
         "fullScreen": false,
         "geometry": {
-            "height": 820,
-            "width": 1280,
+            "height": 585,
+            "width": 843,
             "x": 245,
-            "y": 448
+            "y": 608
         },
-        "maximized": true
+        "maximized": false
     }
 }
