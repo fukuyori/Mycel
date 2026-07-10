@@ -606,6 +606,15 @@ void MainWindow::applyTheme(AppTheme theme, bool persist, bool refreshTree)
             palette.setColor(QPalette::ToolTipBase, colors.base);
             palette.setColor(QPalette::ToolTipText, colors.text);
             qApp->setPalette(palette);
+            // QMenu's explicit "color: %1" below overrides Qt's automatic disabled-palette
+            // dimming, so a disabled QAction (e.g. an unavailable context-menu entry) would
+            // otherwise render in the same full-strength color as an enabled one. Style
+            // QMenu::item:disabled explicitly with a faded version of the same text color.
+            const QString disabledMenuItemColor = QStringLiteral("rgba(%1, %2, %3, %4)")
+                                                       .arg(colors.text.red())
+                                                       .arg(colors.text.green())
+                                                       .arg(colors.text.blue())
+                                                       .arg(110);
             qApp->setStyleSheet(QStringLiteral(
                                     "QMainWindow, QDialog, QWidget { color: %1; }"
                                     "QToolBar { background: %2; border-bottom: 1px solid %3; spacing: 3px; }"
@@ -614,13 +623,15 @@ void MainWindow::applyTheme(AppTheme theme, bool persist, bool refreshTree)
                                     "QToolButton:hover, QPushButton:hover { border-color: %5; }"
                                     "QMenu { background: %2; color: %1; border: 1px solid %3; }"
                                     "QMenu::item:selected { background: %5; color: %6; }"
+                                    "QMenu::item:disabled { color: %7; }"
                                     "QScrollBar { background: %2; }")
                                     .arg(cssColor(colors.text),
                                          cssColor(colors.window),
                                          cssColor(colors.inlinePreviewBorder),
                                          cssColor(colors.button),
                                          cssColor(colors.highlight),
-                                         cssColor(colors.highlightedText)));
+                                         cssColor(colors.highlightedText),
+                                         disabledMenuItemColor));
         }
 
         if (persist) {
@@ -876,6 +887,30 @@ void MainWindow::resetPreviewSizePath(const QString& path)
         relayout();
         selectNodePath(path, true);
         recordHistory(QStringLiteral("プレビューサイズ初期化"), {}, {}, historyBefore, historySelection);
+    }
+
+bool MainWindow::resetPreviewSizesForPaths(const QStringList& paths)
+{
+        QStringList targets;
+        for (const QString& path : paths) {
+            if (hasSavedPreviewSizePath(path)) {
+                targets.append(path);
+            }
+        }
+        if (targets.isEmpty()) {
+            return false;
+        }
+
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+        for (const QString& path : targets) {
+            previewSizes_.erase(path);
+            previewImageScales_.erase(path);
+        }
+        savePreviewFile();
+        relayout();
+        recordHistory(QStringLiteral("プレビューサイズ初期化"), {}, {}, historyBefore, historySelection);
+        return true;
     }
 
 QString MainWindow::inlineMarkdownPreviewText(Node* node) const

@@ -796,6 +796,139 @@ bool MainWindow::reorderNodeByY(Node* source, const NodeItem* sourceItem, qreal 
         return true;
     }
 
+bool MainWindow::reorderSelectedNode(int direction)
+{
+        Node* node = singleSelectedNode();
+        if (!node || node == root_.get() || direction == 0) {
+            return false;
+        }
+
+        // A link target is ordered by its link fan, not by fileOrders_.
+        if (hasIncomingFileLinkPath(node->path)) {
+            if (canMoveFileLinkTargetPath(node->path, direction)) {
+                moveFileLinkTargetPath(node->path, direction);
+            }
+            return true;  // consume the key even at the fan's edge
+        }
+
+        if (!mycelStorageEnabled_) {
+            return false;
+        }
+        Node* parent = findVisibleNodeByPath(root_.get(), node->parentPath);
+        if (!parent) {
+            return false;
+        }
+
+        // Neighbours are the visually adjacent siblings: link targets live in this directory
+        // too but are displayed beside their link source, so skip them.
+        QStringList visibleNames;
+        int position = -1;
+        for (const auto& child : parent->children) {
+            if (hasIncomingFileLinkPath(child->path)) {
+                continue;
+            }
+            if (child.get() == node) {
+                position = visibleNames.size();
+            }
+            visibleNames.append(child->name);
+        }
+        if (position < 0) {
+            return false;
+        }
+        const int target = position + (direction < 0 ? -1 : 1);
+        if (target < 0 || target >= visibleNames.size()) {
+            return true;  // already first/last: consume the key without changes
+        }
+        const QString swapName = visibleNames[target];
+
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+        const QString path = node->path;
+        const QString key = orderKeyForDirectory(node->parentPath);
+        QStringList order = fileOrders_[key];
+        QDir parentDir(node->parentPath);
+        const QFileInfoList entries = parentDir.entryInfoList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot,
+                                                              QDir::DirsFirst | QDir::Name | QDir::IgnoreCase);
+        for (const QFileInfo& entry : entries) {
+            if (entry.fileName() == QStringLiteral(".mycel")) {
+                continue;
+            }
+            if (!order.contains(entry.fileName())) {
+                order.append(entry.fileName());
+            }
+        }
+
+        order.removeAll(node->name);
+        int insertIndex = order.indexOf(swapName);
+        if (insertIndex < 0) {
+            return false;
+        }
+        if (direction > 0) {
+            ++insertIndex;  // moving down: place after the sibling it steps over
+        }
+        order.insert(insertIndex, node->name);
+        fileOrders_[key] = order;
+        saveOrderFile();
+        reorderChildrenInPlace(*parent, order);
+        relayout();
+        recordHistory(QStringLiteral("並び替え"), {}, {}, historyBefore, historySelection);
+        selectNodePath(path, true);
+        return true;
+    }
+
+bool MainWindow::promoteSelectedNode()
+{
+        Node* node = singleSelectedNode();
+        if (!node || node == root_.get()) {
+            return false;
+        }
+
+        // A link target sits one level below its source. Promoting reconnects it one level up
+        // the link chain; at the chain's top it is unlinked instead, becoming a plain sibling
+        // of its former source (it already lives in that folder physically).
+        if (hasIncomingFileLinkPath(node->path)) {
+            QString fromPath;
+            for (const FileLink& link : fileLinks_) {
+                if (link.to == node->path) {
+                    fromPath = link.from;
+                    break;
+                }
+            }
+            QString upperFromPath;
+            for (const FileLink& link : fileLinks_) {
+                if (link.to == fromPath) {
+                    upperFromPath = link.from;
+                    break;
+                }
+            }
+            const QString path = node->path;
+            if (upperFromPath.isEmpty()) {
+                removeIncomingFileLinks(node);
+            } else {
+                Node* upperFrom = nodeForPath(upperFromPath);
+                if (!upperFrom) {
+                    return false;
+                }
+                addFileLink(upperFrom, node);
+            }
+            selectNodePath(path, true);
+            return true;
+        }
+
+        Node* parent = findVisibleNodeByPath(root_.get(), node->parentPath);
+        if (!parent || parent == root_.get()) {
+            return false;  // already at the top level
+        }
+        Node* grandparent = findVisibleNodeByPath(root_.get(), parent->parentPath);
+        if (!grandparent || !grandparent->isDir) {
+            return false;
+        }
+        const QString newPath = QDir(grandparent->path).filePath(node->name);
+        moveNode(node, grandparent);  // handles linked descendants, metadata, history and rebuild
+        selectNodePath(newPath, true);
+        return true;
+    }
+
 void MainWindow::previewReorder(Node* source, const NodeItem* sourceItem, qreal dragCenterY)
 {
         if (!mycelStorageEnabled_) {

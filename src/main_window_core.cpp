@@ -690,17 +690,27 @@ void MainWindow::showCheatSheet()
                 "Ctrl + E : プレビューペインの表示/非表示\n"
                 "E : 選択ファイルをプレーンテキストで編集\n"
                 "O : 選択項目を OS の既定アプリで開く\n"
+                "Shift + O : 選択ファイルを別のアプリで開く…\n"
                 "テキスト編集画面内 Ctrl + S : 保存\n"
+                "テキスト編集画面内 Ctrl + Enter : 保存して閉じる\n"
+                "テキスト編集画面内 Ctrl + W : 閉じる\n"
                 "テキスト編集画面内 Esc : 未保存時に確認して閉じる\n"
                 "Tab : 同じ階層の次の表示項目へ移動\n"
                 "Shift + Tab : 同じ階層の前の表示項目へ移動\n"
                 "↑ / ↓ : 同じフォルダ内の前/次の項目へ移動\n"
                 "← : 上位フォルダへ移動\n"
                 "→ : フォルダ内の最初の項目へ移動\n"
-                "Enter : 選択ファイルのプレビュー表示/非表示、選択フォルダの折りたたみ/展開\n"
-                "N : 選択フォルダに NewFile を作成\n"
-                "Shift + N : 選択フォルダに NewFolder を作成\n"
+                "Shift + ↑ / ↓ : 表示順で選択範囲を拡大/縮小\n"
+                "Ctrl + ↑ / ↓ : 兄弟内で並び順を変更（横リンクはリンク内で移動）\n"
+                "Ctrl + ← : 上位フォルダへ移動（横リンクは上位レベルへ接続変更）\n"
+                "Enter : 選択したファイル/フォルダの名前を変更\n"
+                "Space : 選択ファイルのプレビュー表示/非表示、選択フォルダの折りたたみ/展開\n"
+                "N : 選択フォルダ内/選択ファイルと同階層に NewFile を作成\n"
+                "Shift + N : 選択フォルダ内/選択ファイルと同階層に NewFolder を作成\n"
                 "D : 選択したファイル/フォルダの削除確認を表示\n"
+                "Shift + D : 選択項目の関連（横リンク）を解除\n"
+                "1 〜 6 : 選択項目に色を割り当て\n"
+                "0 : 選択項目の色をクリア\n"
                 "Ctrl + C / Ctrl + V : 選択項目を同じ親フォルダへコピー\n"
                 "Ctrl + Q : アプリを終了\n"
                 "範囲選択後 Enter : 選択範囲へズーム\n\n"
@@ -960,12 +970,17 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
                   keyEvent->key() == Qt::Key_Left || keyEvent->key() == Qt::Key_Right ||
                   keyEvent->key() == Qt::Key_N || keyEvent->key() == Qt::Key_O ||
                   keyEvent->key() == Qt::Key_D || keyEvent->key() == Qt::Key_Return ||
-                  keyEvent->key() == Qt::Key_Enter ||
+                  keyEvent->key() == Qt::Key_Enter || keyEvent->key() == Qt::Key_Space ||
+                  (keyEvent->key() >= Qt::Key_0 && keyEvent->key() <= Qt::Key_6) ||
                   isDeleteShortcut(keyEvent->key(), modifiers))) ||
                 (modifiers == Qt::ShiftModifier &&
-                 (keyEvent->key() == Qt::Key_N || keyEvent->key() == Qt::Key_Tab)) ||
+                 (keyEvent->key() == Qt::Key_N || keyEvent->key() == Qt::Key_Tab ||
+                  keyEvent->key() == Qt::Key_D || keyEvent->key() == Qt::Key_O ||
+                  keyEvent->key() == Qt::Key_Up || keyEvent->key() == Qt::Key_Down)) ||
                 (modifiers == Qt::ControlModifier &&
-                 (keyEvent->key() == Qt::Key_C || keyEvent->key() == Qt::Key_V)) ||
+                 (keyEvent->key() == Qt::Key_C || keyEvent->key() == Qt::Key_V ||
+                  keyEvent->key() == Qt::Key_Up || keyEvent->key() == Qt::Key_Down ||
+                  keyEvent->key() == Qt::Key_Left)) ||
                 isDeleteShortcut(keyEvent->key(), modifiers) ||
                 isSelectAllShortcut(keyEvent->key(), modifiers);
             if (!textInputWidgetHasFocus() && boardShortcut) {

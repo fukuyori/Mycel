@@ -4,7 +4,7 @@ Mycel is a C++/Qt mind-map tool that uses the system's folder and file structure
 
 Instead of treating files as a vertical file list, Mycel lays out folders and files as connected nodes on a whiteboard-style canvas. It is designed for exploring project structure, understanding document sets, and organizing information as a map while keeping the underlying data in normal system folders and files.
 
-- Current version: 0.7.8
+- Current version: 0.8.0
 - Release history: [CHANGELOG.md](CHANGELOG.md)
 - Documentation index: [docs/README.ja.md](docs/README.ja.md)
 - Development plan: [docs/development-plan.ja.md](docs/development-plan.ja.md)
@@ -50,7 +50,7 @@ Instead of treating files as a vertical file list, Mycel lays out folders and fi
 - Copy selected items with `Ctrl + C` / `Ctrl + V`
 - Watch external file and folder changes under the root and refresh changed folders automatically
 - Export/import a Mycel Archive Markdown file
-- Inline rename with F2 and Enter confirmation
+- Inline rename with Enter / F2 (confirm with Enter)
 - Context menus for refresh, delete, color, creation, and open actions
 - Undo and redo with `Ctrl + Z` / `Ctrl + Y`, also available from the Edit menu and toolbar. Covers moves, reorders, renames, creation, deletion, paste, import, links, colors, collapse, and preview state
 - Deleted items are moved to `.mycel/trash` so a delete can be reverted with undo (the trash is cleared on startup and shutdown)
@@ -174,10 +174,12 @@ On macOS, two-finger trackpad slide pans the canvas while trackpad pinch remains
 | Tab | Move to the next visible item at the same level |
 | Shift + Tab | Move to the previous visible item at the same level |
 | Up / Down | Move to the previous or next item in the same folder |
+| Shift + Up / Down | Grow or shrink the selection range in visible order (keyboard multi-select) |
 | Left | Move to the parent folder |
 | Right | Move to the first linked target file, or the first item inside the selected folder |
-| F2 with one file or folder selected | Rename it inline |
+| Enter or F2 with one file or folder selected | Rename it inline |
 | O | Open the selected item with the OS default application |
+| Shift + O | Open the selected file with another application… |
 
 ### File And Folder Operations
 
@@ -185,9 +187,13 @@ On macOS, two-finger trackpad slide pans the canvas while trackpad pinch remains
 | --- | --- |
 | Double-click a folder | Collapse or expand that folder |
 | N | Create `NewFile.txt` in the selected folder or selected file's folder |
-| Shift + N | Create `NewFolder` in the selected folder |
+| Shift + N | Create `NewFolder` in the selected folder or selected file's folder |
 | Double-click a file | Show or hide its preview |
 | Drag a file or folder node | Reorder it inside the same folder |
+| Ctrl + Up / Down | Reorder the selected node among its siblings (link targets move within their link fan) |
+| Ctrl + Left | Move the selected item to its parent's folder (link targets reconnect one level up) |
+| 1 – 6 | Assign a palette color to the selected items |
+| 0 | Clear the selected items' color |
 | Drag a file or folder node onto a folder | Move it into that folder |
 | Drop OS files or folders onto a folder node | Copy them into that folder |
 | Ctrl + C / Ctrl + V | Copy selected items into their parent folders |
@@ -197,7 +203,7 @@ On macOS, two-finger trackpad slide pans the canvas while trackpad pinch remains
 
 | Operation | Action |
 | --- | --- |
-| Enter | Toggle selected file previews or selected folder collapse |
+| Space | Toggle selected file previews or selected folder collapse |
 | Drag the lower-right corner of a preview | Resize the preview (text frames resize freely on both axes; image/PDF/EPUB keep their aspect ratio) |
 | Select preview text and press Ctrl + C | Copy text |
 | Click the preview pane for an editable selected file | Enter plain-text edit mode |
@@ -206,6 +212,11 @@ On macOS, two-finger trackpad slide pans the canvas while trackpad pinch remains
 | Toolbar Preview Place | Move the preview pane to the left, right, or bottom |
 | Ctrl + S in edit mode | Save and apply `Subject:` file-name changes |
 | Esc in edit mode | Save and return to preview mode |
+| Ctrl + Enter in the text editor dialog | Save and close |
+| Ctrl + W in the text editor dialog | Close |
+| Enter while editing | Auto-indent and continue list markers (`-` `*` `+`, numbered, checkbox, `>`); Enter on an empty item ends the list |
+| Shift + Enter while editing | Plain newline without list continuation |
+| Tab / Shift + Tab while editing | Indent or outdent the selected lines |
 | Ctrl + mouse wheel in preview/edit mode | Change text font size |
 | Ctrl + + / Ctrl + - in preview/edit mode | Increase or decrease text font size |
 | Ctrl + 0 in preview/edit mode | Reset text font size |
@@ -218,6 +229,7 @@ On macOS, two-finger trackpad slide pans the canvas while trackpad pinch remains
 | Drop a file on or near the right edge of another file | Link the files |
 | Right-click a linked target file and choose `関連を解除` | Restore its original folder connection |
 | Drag a linked target file/folder onto its real original folder | Unlink and restore its original folder connection |
+| Shift + D | Unlink the selected items |
 
 ## Context Menus
 

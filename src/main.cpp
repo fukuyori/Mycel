@@ -173,7 +173,8 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
     QMenu menu;
     const bool multiItemSelection = isSelected() && window->selectedDeletableItemCount() > 1;
     const QString itemPath = node_->path;
-    auto addColorMenu = [window, itemPath](QMenu& parentMenu, std::vector<QAction*>& colorActions, QAction*& clearColorAction) {
+    auto addColorMenu = [window](QMenu& parentMenu, std::vector<QAction*>& colorActions, QAction*& clearColorAction,
+                                 bool clearEnabled) {
         if (!window || !window->mycelStorageEnabled()) {
             return;
         }
@@ -186,7 +187,7 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         }
         colorMenu->addSeparator();
         clearColorAction = colorMenu->addAction(QStringLiteral("色をクリア"));
-        clearColorAction->setEnabled(window->hasUserColorPath(itemPath));
+        clearColorAction->setEnabled(clearEnabled);
     };
 
     if (window->boardModeActive()) {
@@ -198,7 +199,7 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         menu.addSeparator();
         std::vector<QAction*> colorActions;
         QAction* clearColorAction = nullptr;
-        addColorMenu(menu, colorActions, clearColorAction);
+        addColorMenu(menu, colorActions, clearColorAction, window->hasUserColorPath(itemPath));
         menu.addSeparator();
         QAction* hideAction = menu.addAction(QStringLiteral("非表示（パターンから隠す）"));
         QAction* selected = menu.exec(screenPos);
@@ -245,10 +246,30 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
 
     if (multiItemSelection) {
         const QStringList selectedFilePaths = window->selectedFilePaths();
+        const QStringList selectedPaths = window->selectedNodePaths();
+        bool anyLinked = false;
+        bool anyColored = false;
+        for (const QString& path : selectedPaths) {
+            anyLinked = anyLinked || window->hasIncomingFileLinkPath(path);
+            anyColored = anyColored || window->hasUserColorPath(path);
+        }
+        bool anySavedPreviewSize = false;
+        for (const QString& path : selectedFilePaths) {
+            anySavedPreviewSize = anySavedPreviewSize || window->hasSavedPreviewSizePath(path);
+        }
+
         QAction* previewSelectionAction = menu.addAction(QStringLiteral("プレビューを開く/閉じる"));
         previewSelectionAction->setEnabled(!selectedFilePaths.isEmpty());
         QAction* copySelectionAction = menu.addAction(QStringLiteral("コピー"));
         QAction* deleteSelectionAction = menu.addAction(QStringLiteral("削除"));
+        menu.addSeparator();
+        QAction* unlinkSelectionAction = menu.addAction(QStringLiteral("関連を解除"));
+        unlinkSelectionAction->setEnabled(anyLinked);
+        QAction* resetPreviewSizeSelectionAction = menu.addAction(QStringLiteral("プレビューサイズを初期化"));
+        resetPreviewSizeSelectionAction->setEnabled(anySavedPreviewSize);
+        std::vector<QAction*> colorActions;
+        QAction* clearColorAction = nullptr;
+        addColorMenu(menu, colorActions, clearColorAction, anyColored);
 
         QAction* selected = menu.exec(screenPos);
         if (selected == previewSelectionAction) {
@@ -267,6 +288,31 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
             QTimer::singleShot(0, window, [window] {
                 if (window) {
                     window->deleteSelectedItems();
+                }
+            });
+        } else if (selected == unlinkSelectionAction) {
+            QTimer::singleShot(0, window, [window, selectedPaths] {
+                if (window) {
+                    window->removeIncomingFileLinksForPaths(selectedPaths);
+                }
+            });
+        } else if (selected == resetPreviewSizeSelectionAction) {
+            QTimer::singleShot(0, window, [window, selectedFilePaths] {
+                if (window) {
+                    window->resetPreviewSizesForPaths(selectedFilePaths);
+                }
+            });
+        } else if (selected && selected->data().canConvert<QColor>()) {
+            const QColor color = selected->data().value<QColor>();
+            QTimer::singleShot(0, window, [window, selectedPaths, color] {
+                if (window) {
+                    window->setNodeColorForPaths(selectedPaths, color);
+                }
+            });
+        } else if (selected && selected == clearColorAction) {
+            QTimer::singleShot(0, window, [window, selectedPaths] {
+                if (window) {
+                    window->clearNodeColorForPaths(selectedPaths);
                 }
             });
         }
@@ -335,7 +381,7 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         QAction* sortDateDescAction = sortMenu->addAction(QStringLiteral("日時順（降順）"));
         std::vector<QAction*> colorActions;
         QAction* clearColorAction = nullptr;
-        addColorMenu(menu, colorActions, clearColorAction);
+        addColorMenu(menu, colorActions, clearColorAction, window->hasUserColorPath(itemPath));
         menu.addSeparator();
         // Group 5: root management
         QAction* makeChildRootAction = menu.addAction(QStringLiteral("子ルートにする（.mycel を作成）"));
@@ -493,7 +539,7 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         resetPreviewSizeAction->setEnabled(window->hasSavedPreviewSizePath(filePath));
         std::vector<QAction*> colorActions;
         QAction* clearColorAction = nullptr;
-        addColorMenu(menu, colorActions, clearColorAction);
+        addColorMenu(menu, colorActions, clearColorAction, window->hasUserColorPath(itemPath));
         QAction* selected = menu.exec(screenPos);
         const QString parentDir = QFileInfo(filePath).absolutePath();
         if (selected == newFolderSameAction) {

@@ -188,6 +188,32 @@ void MainWindow::removeIncomingFileLinksPath(const QString& path)
         }
     }
 
+bool MainWindow::removeIncomingFileLinksForPaths(const QStringList& paths)
+{
+        if (!mycelStorageEnabled_) {
+            return false;
+        }
+        QSet<QString> targets;
+        for (const QString& path : paths) {
+            if (hasIncomingFileLinkPath(path)) {
+                targets.insert(path);
+            }
+        }
+        if (targets.isEmpty()) {
+            return false;
+        }
+
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+        fileLinks_.erase(std::remove_if(fileLinks_.begin(), fileLinks_.end(),
+                                        [&targets](const FileLink& link) { return targets.contains(link.to); }),
+                         fileLinks_.end());
+        saveLinkFile();
+        relayout();
+        recordHistory(QStringLiteral("関連付け解除"), {}, {}, historyBefore, historySelection);
+        return true;
+    }
+
 MainWindow::FileLinkSiblingGroup MainWindow::fileLinkSiblingGroup(const QString& path) const
 {
         QString from;

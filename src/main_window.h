@@ -337,6 +337,10 @@ public:
     void openWithApplication(const QString& path);
 
 
+    // Shift+O: "open with" picker for the single selected file.
+    bool openSelectedWithApplication();
+
+
     // Order a folder's direct children by name or by modified date. Folders are kept before files
     // (matching the default scan order); descending reverses within each group. Recorded as one
     // undoable step (it only changes the persisted custom order).
@@ -499,6 +503,10 @@ public:
     void resetPreviewSizePath(const QString& path);
 
 
+    // Batch variant for multi-selection: one history entry; returns false when nothing to reset.
+    bool resetPreviewSizesForPaths(const QStringList& paths);
+
+
     QString inlineMarkdownPreviewText(Node* node) const;
 
 
@@ -563,6 +571,17 @@ public:
 
 
     void clearNodeColorPath(const QString& path);
+
+
+    // Batch variants for multi-selection: one history entry for the whole selection.
+    void setNodeColorForPaths(const QStringList& paths, const QColor& color);
+
+
+    bool clearNodeColorForPaths(const QStringList& paths);
+
+
+    // Applies colorPalette()[paletteIndex] to the current selection (number-key shortcut).
+    bool assignPaletteColorToSelection(int paletteIndex);
 
 
     void beginInlineRename(Node* node);
@@ -694,6 +713,10 @@ public:
     void removeIncomingFileLinksPath(const QString& path);
 
 
+    // Unlinks every listed path that is a link target, as a single history entry.
+    bool removeIncomingFileLinksForPaths(const QStringList& paths);
+
+
     struct FileLinkSiblingGroup {
         int pos = -1;  // path's own position within indices, or -1 if path is not a link target
         std::vector<std::size_t> indices;  // indices into fileLinks_, in link order
@@ -716,6 +739,16 @@ public:
 
 
     bool reorderNodeByY(Node* source, const NodeItem* sourceItem, qreal dropCenterY);
+
+
+    // Ctrl+Up/Down: moves the selected node one step among its siblings (link targets move
+    // within their link fan instead).
+    bool reorderSelectedNode(int direction);
+
+
+    // Ctrl+Left: moves the selected node into its grandparent folder. A link target is instead
+    // reconnected one level up its link chain (or unlinked when already at the chain's top).
+    bool promoteSelectedNode();
 
 
     void previewReorder(Node* source, const NodeItem* sourceItem, qreal dragCenterY);
@@ -920,6 +953,10 @@ public:
 
 
     bool moveSelectionVertically(bool upward);
+
+
+    // Shift+Up/Down: grows/shrinks the contiguous selection range in visible node order.
+    bool extendSelectionVertically(bool upward);
 
 
     bool moveSelectionToParent();
@@ -1555,6 +1592,7 @@ private:
     MindMapScene scene_;
     SelectionController selection_{scene_};
     QString selectionRangeAnchorPath_;
+    QString selectionRangeCursorPath_;  // moving end of the keyboard range selection
     QSplitter* editorSplitter_ = nullptr;
     BoardView* view_ = nullptr;
     QDockWidget* debugDock_ = nullptr;

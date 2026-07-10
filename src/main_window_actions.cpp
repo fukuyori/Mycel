@@ -117,12 +117,25 @@ void MainWindow::createFileInSelectedFolder()
 void MainWindow::createFolderInSelectedFolder()
 {
         Node* node = singleSelectedNode();
-        if (!node || !node->isDir) {
-            recordDebugEvent(QStringLiteral("create folder: selected node is not a folder"));
+        if (!node) {
+            recordDebugEvent(QStringLiteral("create folder: no selected node"));
             return;
         }
-        recordDebugEvent(QStringLiteral("create folder in selected folder: %1").arg(relativeKeyForPath(node->path)));
-        createFolder(node);
+        // Shift+N follows the same rule as N: a selected folder gets the new folder inside it,
+        // a selected file gets it beside itself (same directory).
+        if (node->isDir) {
+            recordDebugEvent(QStringLiteral("create folder in selected folder: %1").arg(relativeKeyForPath(node->path)));
+            createFolder(node);
+            return;
+        }
+
+        Node* parent = findVisibleNodeByPath(root_.get(), node->parentPath);
+        if (!parent || !parent->isDir) {
+            recordDebugEvent(QStringLiteral("create folder: selection has no visible parent"));
+            return;
+        }
+        recordDebugEvent(QStringLiteral("create folder beside selection: %1").arg(relativeKeyForPath(parent->path)));
+        createFolderInDirectory(parent->path, node->path);  // place directly below the selection
     }
 
 bool MainWindow::handleBoardShortcut(QKeyEvent* event)
@@ -138,15 +151,25 @@ bool MainWindow::handleBoardShortcut(QKeyEvent* event)
         modifiers &= ~Qt::KeypadModifier;
         if (boardMode_) {
             // Board mode: no file-structure operations (create/delete/rename/paste/move). Keep
-            // preview, open and edit; everything else falls through to the view's own keys.
+            // preview, open, edit and colour; everything else falls through to the view's own keys.
             if (event->key() == Qt::Key_E && modifiers == Qt::NoModifier) {
                 return focusEditorForSelectedFile();
             }
-            if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) && modifiers == Qt::NoModifier) {
+            if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter || event->key() == Qt::Key_Space) &&
+                modifiers == Qt::NoModifier) {
                 return toggleSelectedFilePreviews();
             }
             if (event->key() == Qt::Key_O && modifiers == Qt::NoModifier) {
                 return openSelectedNode();
+            }
+            if (event->key() == Qt::Key_O && modifiers == Qt::ShiftModifier) {
+                return openSelectedWithApplication();
+            }
+            if (event->key() == Qt::Key_0 && modifiers == Qt::NoModifier) {
+                return clearNodeColorForPaths(selectedNodePaths());
+            }
+            if (event->key() >= Qt::Key_1 && event->key() <= Qt::Key_6 && modifiers == Qt::NoModifier) {
+                return assignPaletteColorToSelection(event->key() - Qt::Key_1);
             }
             return false;
         }
@@ -154,10 +177,40 @@ bool MainWindow::handleBoardShortcut(QKeyEvent* event)
             return focusEditorForSelectedFile();
         }
         if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) && modifiers == Qt::NoModifier) {
+            // Enter renames (Finder-style); the old preview/collapse/sub-root role moved to Space.
+            Node* node = singleSelectedNode();
+            if (!node || node == root_.get()) {
+                return false;
+            }
+            beginInlineRename(node);
+            return true;
+        }
+        if (event->key() == Qt::Key_Space && modifiers == Qt::NoModifier) {
             return toggleSelectedPreviewOrCollapse();
         }
         if (event->key() == Qt::Key_O && modifiers == Qt::NoModifier) {
             return openSelectedNode();
+        }
+        if (event->key() == Qt::Key_O && modifiers == Qt::ShiftModifier) {
+            return openSelectedWithApplication();
+        }
+        if (event->key() == Qt::Key_D && modifiers == Qt::ShiftModifier) {
+            return removeIncomingFileLinksForPaths(selectedNodePaths());
+        }
+        if (event->key() == Qt::Key_0 && modifiers == Qt::NoModifier) {
+            return clearNodeColorForPaths(selectedNodePaths());
+        }
+        if (event->key() >= Qt::Key_1 && event->key() <= Qt::Key_6 && modifiers == Qt::NoModifier) {
+            return assignPaletteColorToSelection(event->key() - Qt::Key_1);
+        }
+        if ((event->key() == Qt::Key_Up || event->key() == Qt::Key_Down) && modifiers == Qt::ShiftModifier) {
+            return extendSelectionVertically(event->key() == Qt::Key_Up);
+        }
+        if ((event->key() == Qt::Key_Up || event->key() == Qt::Key_Down) && modifiers == Qt::ControlModifier) {
+            return reorderSelectedNode(event->key() == Qt::Key_Up ? -1 : 1);
+        }
+        if (event->key() == Qt::Key_Left && modifiers == Qt::ControlModifier) {
+            return promoteSelectedNode();
         }
         if (event->key() == Qt::Key_Tab && modifiers == Qt::NoModifier) {
             return moveSelectionWithTab(false);
@@ -305,6 +358,16 @@ void MainWindow::openWithApplication(const QString& path)
             QProcess::startDetached(app, {target});
         }
 #endif
+    }
+
+bool MainWindow::openSelectedWithApplication()
+{
+        Node* node = singleSelectedNode();
+        if (!node || node->isDir) {  // the "open with" picker is a file-only operation
+            return false;
+        }
+        openWithApplication(node->path);
+        return true;
     }
 
 void MainWindow::sortFolderChildren(const QString& folderPath, bool byDate, bool descending)
@@ -791,6 +854,78 @@ void MainWindow::clearNodeColorPath(const QString& path)
         recordHistory(QStringLiteral("色クリア"), {}, {}, historyBefore, historySelection);
     }
 
+void MainWindow::setNodeColorForPaths(const QStringList& paths, const QColor& color)
+{
+        if (!mycelStorageEnabled_ || !color.isValid()) {
+            return;
+        }
+        QStringList targets;
+        for (const QString& path : paths) {
+            if (path.isEmpty()) {
+                continue;
+            }
+            const auto it = userColors_.find(path);
+            if (it != userColors_.end() && it->second == color) {
+                continue;
+            }
+            targets.append(path);
+        }
+        if (targets.isEmpty()) {
+            return;
+        }
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+        for (const QString& path : targets) {
+            userColors_[path] = color;
+            ensureHashCachedForRenameTracking(path);
+        }
+        saveColorFile();
+        scene_.update();  // color only affects painting, not layout
+        recordHistory(QStringLiteral("色変更"), {}, {}, historyBefore, historySelection);
+    }
+
+bool MainWindow::clearNodeColorForPaths(const QStringList& paths)
+{
+        if (!mycelStorageEnabled_) {
+            return false;
+        }
+        QStringList targets;
+        for (const QString& path : paths) {
+            if (!path.isEmpty() && userColors_.find(path) != userColors_.end()) {
+                targets.append(path);
+            }
+        }
+        if (targets.isEmpty()) {
+            return false;
+        }
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+        for (const QString& path : targets) {
+            userColors_.erase(path);
+        }
+        saveColorFile();
+        scene_.update();  // color only affects painting, not layout
+        recordHistory(QStringLiteral("色クリア"), {}, {}, historyBefore, historySelection);
+        return true;
+    }
+
+bool MainWindow::assignPaletteColorToSelection(int paletteIndex)
+{
+        if (!mycelStorageEnabled_) {
+            return false;
+        }
+        const auto palette = colorPalette();
+        if (paletteIndex < 0 || paletteIndex >= static_cast<int>(palette.size())) {
+            return false;
+        }
+        const QStringList paths = selectedNodePaths();
+        if (paths.isEmpty()) {
+            return false;
+        }
+        setNodeColorForPaths(paths, palette[static_cast<std::size_t>(paletteIndex)].second);
+        return true;
+    }
+
 void MainWindow::beginInlineRename(Node* node)
 {
         if (!node || node == root_.get()) {
@@ -1174,6 +1309,7 @@ void MainWindow::selectNodeItem(NodeItem* item, bool additive)
         } else if (!additive) {
             selectionRangeAnchorPath_.clear();
         }
+        selectionRangeCursorPath_ = selectionRangeAnchorPath_;
     }
 
 void MainWindow::selectNodeItem(NodeItem* item, Qt::KeyboardModifiers modifiers)
@@ -1195,6 +1331,7 @@ bool MainWindow::selectNodePath(const QString& path, bool ensureVisible)
 {
         NodeItem* selectedItem = selection_.selectByPath(path);
         selectionRangeAnchorPath_ = selectedItem && selectedItem->node() ? selectedItem->node()->path : QString();
+        selectionRangeCursorPath_ = selectionRangeAnchorPath_;
         view_->setFocus(Qt::ShortcutFocusReason);
         if (ensureVisible) {
             ensureNodeItemVisible(selectedItem);
@@ -1211,6 +1348,7 @@ bool MainWindow::restoreSelection(const QStringList& paths, bool ensureVisible)
         selectionRangeAnchorPath_ = firstSelectedItem && firstSelectedItem->node()
                                         ? firstSelectedItem->node()->path
                                         : QString();
+        selectionRangeCursorPath_ = selectionRangeAnchorPath_;
         view_->setFocus(Qt::ShortcutFocusReason);
         if (ensureVisible) {
             ensureNodeItemVisible(firstSelectedItem);
@@ -1390,9 +1528,52 @@ bool MainWindow::selectNodeRangeToItem(NodeItem* item, bool additive)
         }
         selection_.selectByPaths(rangePaths, additive);
         selectionRangeAnchorPath_ = anchorPath;
+        selectionRangeCursorPath_ = targetPath;
         recordDebugEvent(QStringLiteral("selected range: %1 -> %2 (%3)")
                              .arg(relativeKeyForPath(anchorPath),
                                   relativeKeyForPath(targetPath))
+                             .arg(rangePaths.size()));
+        return true;
+    }
+
+bool MainWindow::extendSelectionVertically(bool upward)
+{
+        const QStringList paths = visibleNodePathsInOrder();
+        if (paths.isEmpty()) {
+            return false;
+        }
+
+        QString anchorPath = selectionRangeAnchorPath_;
+        QString cursorPath = selectionRangeCursorPath_;
+        if (anchorPath.isEmpty() || !paths.contains(anchorPath)) {
+            Node* selected = singleSelectedNode();
+            if (!selected) {
+                return false;
+            }
+            anchorPath = selected->path;
+            cursorPath = anchorPath;
+        }
+        if (cursorPath.isEmpty() || !paths.contains(cursorPath)) {
+            cursorPath = anchorPath;
+        }
+
+        const int anchorIndex = paths.indexOf(anchorPath);
+        const int cursorIndex = paths.indexOf(cursorPath) + (upward ? -1 : 1);
+        if (cursorIndex < 0 || cursorIndex >= paths.size()) {
+            return true;  // already at the edge: consume the key without changing the selection
+        }
+
+        QStringList rangePaths;
+        for (int index = std::min(anchorIndex, cursorIndex); index <= std::max(anchorIndex, cursorIndex); ++index) {
+            rangePaths.append(paths[index]);
+        }
+        selection_.selectByPaths(rangePaths, false);
+        selectionRangeAnchorPath_ = anchorPath;
+        selectionRangeCursorPath_ = paths[cursorIndex];
+        ensureNodePathVisible(selectionRangeCursorPath_);
+        recordDebugEvent(QStringLiteral("extended range selection: %1 -> %2 (%3)")
+                             .arg(relativeKeyForPath(anchorPath),
+                                  relativeKeyForPath(selectionRangeCursorPath_))
                              .arg(rangePaths.size()));
         return true;
     }
