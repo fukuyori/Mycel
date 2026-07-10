@@ -322,6 +322,29 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
     if (node_->isDir) {
         const QString folderPath = itemPath;
         const bool isRootFolder = node_ == window->rootNode();
+        if (node_->isExternalRoot) {
+            // A linked external root: only navigation and unlinking. The real folder is
+            // never renamed/moved/deleted from this side.
+            const QString doorParentPath = node_->parentPath;
+            QAction* openRootAction = menu.addAction(QStringLiteral("このルートを開く"));
+            menu.addSeparator();
+            QAction* unlinkAction = menu.addAction(QStringLiteral("外部ルートのリンクを解除"));
+            QAction* doorSelected = menu.exec(screenPos);
+            if (doorSelected == openRootAction) {
+                QTimer::singleShot(0, window, [window, folderPath] {
+                    if (window) {
+                        window->switchIntoSubRoot(folderPath);
+                    }
+                });
+            } else if (doorSelected == unlinkAction) {
+                QTimer::singleShot(0, window, [window, doorParentPath, folderPath] {
+                    if (window) {
+                        window->removeExternalRootLinkAt(doorParentPath, folderPath);
+                    }
+                });
+            }
+            return;
+        }
         if (node_->isSubRoot) {
             QAction* openRootAction = menu.addAction(QStringLiteral("このルートを開く"));
             menu.addSeparator();
@@ -386,12 +409,22 @@ void NodeItem::showContextMenuAt(const QPoint& screenPos)
         // Group 5: root management
         QAction* makeChildRootAction = menu.addAction(QStringLiteral("子ルートにする（.mycel を作成）"));
         makeChildRootAction->setEnabled(!isRootFolder && window->mycelStorageEnabled());
+        QAction* linkExternalRootAction = menu.addAction(QStringLiteral("外部ルートをリンク…"));
+        linkExternalRootAction->setEnabled(window->mycelStorageEnabled());
         QAction* selected = menu.exec(screenPos);
         const QString parentDir = QFileInfo(folderPath).absolutePath();
         if (selected == makeChildRootAction) {
             QTimer::singleShot(0, window, [window, folderPath] {
                 if (window) {
                     window->makeFolderChildRoot(folderPath);
+                }
+            });
+            return;
+        }
+        if (selected == linkExternalRootAction) {
+            QTimer::singleShot(0, window, [window, folderPath] {
+                if (window) {
+                    window->linkExternalRootIntoFolder(folderPath);
                 }
             });
             return;

@@ -80,7 +80,7 @@ void MainWindow::mergeChildLinks(const QString& parentPath, const QString& child
 MainWindow::MetadataSnapshot MainWindow::captureMetadataSnapshot() const
 {
         return MetadataSnapshot{collapsedPaths_, userColors_,  previewPaths_, previewSizes_,
-                                previewImageScales_, fileOrders_, fileLinks_,
+                                previewImageScales_, fileOrders_, fileLinks_, externalRootLinks_,
                                 boardPatternName_, boardCards_};
     }
 
@@ -93,6 +93,7 @@ void MainWindow::restoreMetadataSnapshot(const MetadataSnapshot& s)
         previewImageScales_ = s.previewImageScales;
         fileOrders_ = s.fileOrders;
         fileLinks_ = s.fileLinks;
+        externalRootLinks_ = s.externalRootLinks;
         if (!s.boardPatternName.isEmpty()) {
             if (s.boardPatternName == boardPatternName_) {
                 boardCards_ = s.boardCards;
@@ -129,6 +130,7 @@ void MainWindow::saveAllMetadata()
         saveOrderFile();
         savePreviewFile();
         saveLinkFile();
+        saveExternalRootsFile();
         saveCollapsedFile();
         saveHashCacheFile();
     }
@@ -157,6 +159,11 @@ QString MainWindow::previewFilePath() const
 QString MainWindow::linkFilePath() const
 {
         return QDir(rootPath_).filePath(QStringLiteral(".mycel/links.json"));
+    }
+
+QString MainWindow::externalRootsFilePath() const
+{
+        return QDir(rootPath_).filePath(QStringLiteral(".mycel/external-roots.json"));
     }
 
 QString MainWindow::collapsedFilePath() const
@@ -565,6 +572,74 @@ void MainWindow::saveLinkFile()
 
         if (!writeJsonFileAtomic(linkFilePath(), rootObject)) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("関連設定を保存できませんでした。"));
+        }
+    }
+
+void MainWindow::loadExternalRootsFile()
+{
+        externalRootLinks_.clear();
+        if (!mycelStorageEnabled_) {
+            return;
+        }
+
+        QFile file(externalRootsFilePath());
+        if (!file.open(QIODevice::ReadOnly)) {
+            return;
+        }
+
+        const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+        const QJsonArray links = doc.object().value(QStringLiteral("links")).toArray();
+        QSet<QString> seen;
+        for (const QJsonValue& value : links) {
+            const QJsonObject link = value.toObject();
+            const QString dirKey = link.value(QStringLiteral("dir")).toString();
+            const QString target = link.value(QStringLiteral("target")).toString();
+            if (target.isEmpty()) {
+                continue;
+            }
+            const QString key = dirKey + QLatin1Char('\n') + target;
+            if (seen.contains(key)) {
+                continue;
+            }
+            seen.insert(key);
+            externalRootLinks_.push_back({dirKey, target});
+        }
+    }
+
+void MainWindow::saveExternalRootsFile()
+{
+        if (!mycelStorageEnabled_) {
+            return;
+        }
+        // Unlike the always-written metadata files, this one only exists once a link is made.
+        if (externalRootLinks_.empty() && !QFileInfo::exists(externalRootsFilePath())) {
+            return;
+        }
+
+        QDir root(rootPath_);
+        if (!root.mkpath(QStringLiteral(".mycel"))) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral(".mycel フォルダを作成できませんでした。"));
+            return;
+        }
+
+        QJsonArray links;
+        for (const ExternalRootLink& link : externalRootLinks_) {
+            if (link.target.isEmpty()) {
+                continue;
+            }
+            QJsonObject object;
+            object.insert(QStringLiteral("dir"), link.dirKey);
+            object.insert(QStringLiteral("target"), link.target);
+            links.append(object);
+        }
+
+        QJsonObject rootObject;
+        rootObject.insert(QStringLiteral("version"), 1);
+        rootObject.insert(QStringLiteral("links"), links);
+
+        if (!writeJsonFileAtomic(externalRootsFilePath(), rootObject)) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"),
+                                 QStringLiteral("外部ルートのリンク設定を保存できませんでした。"));
         }
     }
 

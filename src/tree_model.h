@@ -154,6 +154,7 @@ struct Node {
     bool isDir = false;
     bool collapsed = false;
     bool isSubRoot = false;  // a child directory that has its own .mycel: shown as a boundary node
+    bool isExternalRoot = false;  // a linked root living outside this tree (synthetic door node)
     int depth = 0;
     int branch = -1;
     int hiddenChildren = 0;
@@ -168,6 +169,15 @@ struct Node {
 struct FileLink {
     QString from;
     QString to;
+};
+
+// A root linked into this tree from outside it (子ルートが親フォルダの外にあるケース). The
+// door node it produces is synthetic: it exists only in the scanned tree, never on disk under
+// the open root. `target` is stored relative to the root when expressible (so the parent tree
+// stays portable) and absolute across drives.
+struct ExternalRootLink {
+    QString dirKey;  // relative key of the folder the door node appears in ("" = the root itself)
+    QString target;  // stored path of the linked root
 };
 
 // A link target is laid out beside exactly one source (layoutFileLinks positions each target
@@ -998,7 +1008,12 @@ struct TreeWalkResult {
 
 // `cancelled` (optional) aborts the walk early with a partial result; callers passing it must
 // discard that partial result themselves.
-inline TreeWalkResult walkRealTree(const QString& rootPath, const std::atomic_bool* cancelled = nullptr)
+// `stopAtSubRoots`: with mycel storage enabled, a child directory carrying its own .mycel is an
+// independent root -- rescans, watcher registration and hash seeding must not reach inside it
+// (the active root's checks stay within the active root). The sub-root directory itself is also
+// left unlisted: watching the door's parent directory already detects its deletion/rename.
+inline TreeWalkResult walkRealTree(const QString& rootPath, const std::atomic_bool* cancelled = nullptr,
+                                   bool stopAtSubRoots = false)
 {
     TreeWalkResult result;
     const QFileInfo rootInfo(rootPath);
@@ -1007,29 +1022,36 @@ inline TreeWalkResult walkRealTree(const QString& rootPath, const std::atomic_bo
     }
 
     const QString metadataRoot = QDir::cleanPath(QDir(rootPath).filePath(QStringLiteral(".mycel")));
-    const auto isMetadataPath = [&metadataRoot](const QString& path) {
-        return path == metadataRoot || path.startsWith(metadataRoot + QLatin1Char('/'));
-    };
 
     result.directories.append(rootInfo.absoluteFilePath());
-    QDirIterator iterator(rootPath,
-                          QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
-                          QDirIterator::Subdirectories);
-    while (iterator.hasNext()) {
+    QStringList pending{rootInfo.absoluteFilePath()};
+    while (!pending.isEmpty()) {
         if (cancelled && cancelled->load()) {
             return result;
         }
-        iterator.next();
-        const QFileInfo info = iterator.fileInfo();
-        const QString path = QDir::cleanPath(info.absoluteFilePath());
-        if (isMetadataPath(path)) {
-            continue;
-        }
-        if (info.isDir()) {
-            result.directories.append(path);
-        } else {
-            result.files.append(path);
-            result.fileInfos.append(info);
+        const QString currentDir = pending.takeLast();
+        QDirIterator iterator(currentDir,
+                              QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System);
+        while (iterator.hasNext()) {
+            if (cancelled && cancelled->load()) {
+                return result;
+            }
+            iterator.next();
+            const QFileInfo info = iterator.fileInfo();
+            const QString path = QDir::cleanPath(info.absoluteFilePath());
+            if (info.isDir()) {
+                if (path == metadataRoot) {
+                    continue;  // the root's own metadata subtree is never scanned
+                }
+                if (stopAtSubRoots && directoryHasMycel(path)) {
+                    continue;  // an independent child root: do not list or descend
+                }
+                result.directories.append(path);
+                pending.append(path);
+            } else if (!path.startsWith(metadataRoot + QLatin1Char('/'))) {
+                result.files.append(path);
+                result.fileInfos.append(info);
+            }
         }
     }
     return result;
@@ -1053,7 +1075,7 @@ inline StartupScanResult runStartupScan(const QString& rootPath, bool mycelStora
                                  const std::atomic_bool& cancelled)
 {
     StartupScanResult result;
-    TreeWalkResult walk = walkRealTree(rootPath, &cancelled);
+    TreeWalkResult walk = walkRealTree(rootPath, &cancelled, mycelStorageEnabled);
     result.directories = std::move(walk.directories);
     result.files = std::move(walk.files);
 
@@ -1217,6 +1239,29 @@ inline std::unique_ptr<Node> scanTree(const QString& path, int depth, int branch
                                           detectSubRoots));
     }
     node->hiddenChildren = entries.size() - visible;
+    return node;
+}
+
+// Builds the synthetic door node for an external root link: a boundary node identical to a
+// physical sub-root (badge, no children) except that its path lives outside the open root.
+// Sizing mirrors scanTree's depth>=1 directory formula so the layout treats it like any folder.
+inline std::unique_ptr<Node> makeExternalRootDoorNode(const QString& targetPath, const Node& parent)
+{
+    const QFileInfo info(targetPath);
+    auto node = std::make_unique<Node>();
+    node->path = info.absoluteFilePath();
+    node->parentPath = parent.path;  // the folder the door is shown in, not the physical parent
+    node->name = info.fileName().isEmpty() ? info.absoluteFilePath() : info.fileName();
+    node->isDir = true;
+    node->isSubRoot = true;
+    node->isExternalRoot = true;
+    node->depth = parent.depth + 1;
+    node->branch = parent.branch;
+    QFont font;
+    font.setPointSize(12);
+    QFontMetricsF metrics(font);
+    node->size = QSizeF(std::max(128.0, metrics.horizontalAdvance(shortLabel(node->name)) + 46.0 + 34.0),
+                        46.0);
     return node;
 }
 

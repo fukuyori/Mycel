@@ -99,6 +99,10 @@ void MainWindow::createFileInSelectedFolder()
             recordDebugEvent(QStringLiteral("create file: no selected node"));
             return;
         }
+        if (node->isExternalRoot) {
+            recordDebugEvent(QStringLiteral("create file: external root door is a boundary"));
+            return;  // the linked root owns its own contents; switch into it to edit them
+        }
         if (node->isDir) {
             recordDebugEvent(QStringLiteral("create file in selected folder: %1").arg(relativeKeyForPath(node->path)));
             createFile(node);
@@ -120,6 +124,10 @@ void MainWindow::createFolderInSelectedFolder()
         if (!node) {
             recordDebugEvent(QStringLiteral("create folder: no selected node"));
             return;
+        }
+        if (node->isExternalRoot) {
+            recordDebugEvent(QStringLiteral("create folder: external root door is a boundary"));
+            return;  // the linked root owns its own contents; switch into it to edit them
         }
         // Shift+N follows the same rule as N: a selected folder gets the new folder inside it,
         // a selected file gets it beside itself (same directory).
@@ -179,7 +187,7 @@ bool MainWindow::handleBoardShortcut(QKeyEvent* event)
         if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) && modifiers == Qt::NoModifier) {
             // Enter renames (Finder-style); the old preview/collapse/sub-root role moved to Space.
             Node* node = singleSelectedNode();
-            if (!node || node == root_.get()) {
+            if (!node || node == root_.get() || node->isExternalRoot) {
                 return false;
             }
             beginInlineRename(node);
@@ -928,8 +936,8 @@ bool MainWindow::assignPaletteColorToSelection(int paletteIndex)
 
 void MainWindow::beginInlineRename(Node* node)
 {
-        if (!node || node == root_.get()) {
-            return;
+        if (!node || node == root_.get() || node->isExternalRoot) {
+            return;  // renaming an external door would rename the linked root on disk
         }
 
         finishInlineRename(false);
@@ -1170,7 +1178,7 @@ int MainWindow::selectedDeletableItemCount() const
                 continue;
             }
             Node* node = nodeItem->node();
-            if (node && (!node->isDir || canDeleteFolder(node))) {
+            if (node && !node->isExternalRoot && (!node->isDir || canDeleteFolder(node))) {
                 ++count;
             }
         }
@@ -1187,7 +1195,7 @@ void MainWindow::deleteSelectedItems()
                 continue;
             }
             Node* node = nodeItem->node();
-            if (!node) {
+            if (!node || node->isExternalRoot) {  // never delete a linked external root from here
                 continue;
             }
             if (node->isDir) {

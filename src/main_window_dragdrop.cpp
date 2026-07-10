@@ -5,7 +5,8 @@ bool MainWindow::copySelectedItems()
         QStringList paths;
         for (QGraphicsItem* item : scene_.selectedItems()) {
             auto* nodeItem = dynamic_cast<NodeItem*>(item);
-            if (nodeItem && nodeItem->node() && nodeItem->node() != root_.get()) {
+            if (nodeItem && nodeItem->node() && nodeItem->node() != root_.get() &&
+                !nodeItem->node()->isExternalRoot) {  // copying a door would copy the whole external tree
                 paths.append(nodeItem->node()->path);
             }
         }
@@ -37,7 +38,7 @@ bool MainWindow::copySelectedItems()
 
 bool MainWindow::copyNode(Node* node)
 {
-        if (!node || node == root_.get()) {
+        if (!node || node == root_.get() || node->isExternalRoot) {
             return false;
         }
         copiedPaths_ = {node->path};
@@ -129,6 +130,12 @@ void MainWindow::moveNode(Node* source, Node* targetDir)
 
         if (sourcePath.isEmpty() || targetDirPath.isEmpty() || !targetIsDir || sourceIsRoot) {
             recordDebugEvent(QStringLiteral("move node aborted: invalid source or target"));
+            rebuild(false);
+            return;
+        }
+        if (source->isExternalRoot) {
+            // The door is only a link; moving it would physically move the external root.
+            recordDebugEvent(QStringLiteral("move node aborted: external root door"));
             rebuild(false);
             return;
         }
@@ -235,7 +242,8 @@ void MainWindow::moveDragItemsToFolder(NodeItem* sourceItem, Node* targetDir)
         QSet<QString> requestedPaths;
         for (NodeItem* item : dragItems) {
             Node* node = item ? item->node() : nullptr;
-            if (!node || node == root_.get() || requestedPaths.contains(node->path)) {
+            if (!node || node == root_.get() || node->isExternalRoot ||
+                requestedPaths.contains(node->path)) {  // doors are links, never moved physically
                 continue;
             }
             requestedPaths.insert(node->path);
@@ -879,7 +887,7 @@ bool MainWindow::reorderSelectedNode(int direction)
 bool MainWindow::promoteSelectedNode()
 {
         Node* node = singleSelectedNode();
-        if (!node || node == root_.get()) {
+        if (!node || node == root_.get() || node->isExternalRoot) {
             return false;
         }
 

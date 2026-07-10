@@ -554,6 +554,92 @@ void MainWindow::makeFolderChildRoot(const QString& folderPath)
         rebuild(false);  // the folder is now a sub-root; keep the current view
     }
 
+QString MainWindow::resolvedExternalRootTarget(const ExternalRootLink& link) const
+{
+        if (link.target.isEmpty()) {
+            return {};
+        }
+        if (QFileInfo(link.target).isAbsolute()) {
+            return QDir::cleanPath(link.target);
+        }
+        return QDir::cleanPath(QDir(rootPath_).absoluteFilePath(link.target));
+    }
+
+void MainWindow::linkExternalRootIntoFolder(const QString& folderPath)
+{
+        if (!mycelStorageEnabled_ || folderPath.isEmpty() || !QFileInfo(folderPath).isDir()) {
+            return;
+        }
+        const QString picked = QFileDialog::getExistingDirectory(
+            this, QStringLiteral("リンクする外部ルートのフォルダを選択"), rootPath_);
+        if (picked.isEmpty()) {
+            return;
+        }
+        const QString target = QDir::cleanPath(QFileInfo(picked).absoluteFilePath());
+        const QString rootClean = QDir::cleanPath(rootPath_);
+        if (target == rootClean) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"),
+                                 QStringLiteral("開いているルート自身はリンクできません。"));
+            return;
+        }
+        if (target.startsWith(rootClean + QLatin1Char('/'))) {
+            QMessageBox::warning(this, QStringLiteral("Mycel"),
+                                 QStringLiteral("現在のルート内のフォルダはリンクできません。\n"
+                                                "フォルダを右クリックして「子ルートにする」を使ってください。"));
+            return;
+        }
+
+        const QString dirKey = orderKeyForDirectory(folderPath);
+        for (const ExternalRootLink& link : externalRootLinks_) {
+            if (link.dirKey == dirKey && resolvedExternalRootTarget(link) == target) {
+                QMessageBox::information(this, QStringLiteral("Mycel"),
+                                         QStringLiteral("このフォルダにはすでにリンクされています。"));
+                return;
+            }
+        }
+
+        // Portable form: relative to this root when expressible (QDir::relativeFilePath falls
+        // back to the absolute path across drives).
+        QString stored = QDir(rootPath_).relativeFilePath(target);
+        if (stored.isEmpty() || QFileInfo(stored).isAbsolute()) {
+            stored = target;
+        }
+
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+        externalRootLinks_.push_back({dirKey, stored});
+        saveExternalRootsFile();
+        recordDebugEvent(QStringLiteral("external root linked: %1 -> %2").arg(dirKey, stored));
+        rebuild(false);
+        selectNodePath(target, true);
+        recordHistory(QStringLiteral("外部ルートをリンク"), {}, {}, historyBefore, historySelection);
+    }
+
+void MainWindow::removeExternalRootLinkAt(const QString& parentDirPath, const QString& targetPath)
+{
+        if (!mycelStorageEnabled_) {
+            return;
+        }
+        const QString dirKey = orderKeyForDirectory(parentDirPath);
+        const QString targetClean = QDir::cleanPath(targetPath);
+        const MetadataSnapshot historyBefore = captureMetadataSnapshot();
+        const QStringList historySelection = selectedNodePaths();
+        const auto oldSize = externalRootLinks_.size();
+        externalRootLinks_.erase(
+            std::remove_if(externalRootLinks_.begin(), externalRootLinks_.end(),
+                           [this, &dirKey, &targetClean](const ExternalRootLink& link) {
+                               return link.dirKey == dirKey && resolvedExternalRootTarget(link) == targetClean;
+                           }),
+            externalRootLinks_.end());
+        if (externalRootLinks_.size() == oldSize) {
+            return;
+        }
+        saveExternalRootsFile();
+        recordDebugEvent(QStringLiteral("external root unlinked: %1 -> %2").arg(dirKey, targetClean));
+        rebuild(false);
+        recordHistory(QStringLiteral("外部ルートのリンク解除"), {}, {}, historyBefore, historySelection);
+    }
+
 void MainWindow::integrateChildRootIntoParent(const QString& childDir)
 {
         if (!mycelStorageEnabled_ || childDir.isEmpty() || !directoryHasMycel(childDir)) {
@@ -732,13 +818,15 @@ void MainWindow::loadMetadataAndReconcileHashCache()
         loadColorFile();
         loadPreviewFile();
         loadLinkFile();
+        loadExternalRootsFile();
         loadHashCacheFile();
         if (!mycelStorageEnabled_) {
             return;  // no metadata to reconcile or hash; skip the whole-tree walk entirely
         }
 
-        // One whole-tree walk feeds both passes below (they used to walk separately).
-        const TreeWalkResult walk = walkRealTree(rootPath_);
+        // One whole-tree walk feeds both passes below (they used to walk separately). Child
+        // roots (sub-root boundaries) are excluded: each root checks only its own tree.
+        const TreeWalkResult walk = walkRealTree(rootPath_, nullptr, mycelStorageEnabled_);
 
         // Whole-tree scope: safe to prune metadata for files with no match anywhere in the root.
         QSet<QString> currentPaths;
@@ -778,6 +866,7 @@ void MainWindow::completeDeferredStartup()
         loadColorFile();
         loadPreviewFile();
         loadLinkFile();
+        loadExternalRootsFile();
         loadHashCacheFile();
         if (!loadCollapsedFile()) {
             applyLargeTreeStartupCollapse();

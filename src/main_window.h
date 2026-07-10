@@ -279,6 +279,23 @@ public:
     void makeFolderChildRoot(const QString& folderPath);
 
 
+    // Link a root living outside this tree as a door node inside `folderPath` (folder picker).
+    void linkExternalRootIntoFolder(const QString& folderPath);
+
+
+    // Remove the external-root link shown in `parentDirPath` pointing at `targetPath`.
+    // Only the link record is removed; the linked folder itself is never touched.
+    void removeExternalRootLinkAt(const QString& parentDirPath, const QString& targetPath);
+
+
+    // Resolve a link's stored (possibly root-relative) target to an absolute path.
+    QString resolvedExternalRootTarget(const ExternalRootLink& link) const;
+
+
+    // Append the synthetic door nodes for external root links to the freshly scanned tree.
+    void injectExternalRootNodes();
+
+
     static QJsonObject readJsonObjectFile(const QString& path);
 
 
@@ -835,6 +852,7 @@ public:
         std::map<QString, qreal> previewImageScales;
         std::map<QString, QStringList> fileOrders;
         std::vector<FileLink> fileLinks;
+        std::vector<ExternalRootLink> externalRootLinks;
         // Board: the active pattern and its cards at capture time (empty name = no board data).
         QString boardPatternName;
         std::map<QString, BoardCardState> boardCards;
@@ -1302,6 +1320,9 @@ private:
     QString linkFilePath() const;
 
 
+    QString externalRootsFilePath() const;
+
+
     QString collapsedFilePath() const;
 
 
@@ -1351,6 +1372,12 @@ private:
 
 
     void saveLinkFile();
+
+
+    void loadExternalRootsFile();
+
+
+    void saveExternalRootsFile();
 
 
     QJsonObject currentWindowStateObject() const;
@@ -1601,6 +1628,7 @@ private:
     QString dragHoverLinkTargetPath_;
     QStringList copiedPaths_;
     std::vector<FileLink> fileLinks_;
+    std::vector<ExternalRootLink> externalRootLinks_;
 
     // ---- Undo/Redo history (types defined above, near the history methods) -------------
     std::vector<HistoryEntry> undoStack_;

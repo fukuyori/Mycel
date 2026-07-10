@@ -4,7 +4,7 @@ Mycel is a C++/Qt mind-map tool that uses the system's folder and file structure
 
 Instead of treating files as a vertical file list, Mycel lays out folders and files as connected nodes on a whiteboard-style canvas. It is designed for exploring project structure, understanding document sets, and organizing information as a map while keeping the underlying data in normal system folders and files.
 
-- Current version: 0.8.0
+- Current version: 0.8.1
 - Release history: [CHANGELOG.md](CHANGELOG.md)
 - Documentation index: [docs/README.ja.md](docs/README.ja.md)
 - Development plan: [docs/development-plan.ja.md](docs/development-plan.ja.md)
@@ -31,6 +31,8 @@ Instead of treating files as a vertical file list, Mycel lays out folders and fi
 - Multi-selection, range selection, and range zoom
 - Hierarchical `.mycel` roots: a child folder that has its own `.mycel` is shown as a Mycel-badged sub-root boundary (its contents are not expanded); double-click it to switch the board into that root. The parent root is drawn to the left of the root node, connected by an edge, and double-clicking it switches back up. Window position and size are kept when switching roots
 - Turn a folder into a child root ("子ルートにする") or integrate a sub-root back into its parent ("親に統合"), merging the child's metadata into the parent, from the folder/sub-root context menu
+- External root links: a root living outside the parent's folder can be placed as a door node via the folder context menu ("外部ルートをリンク…"; recorded in `.mycel/external-roots.json`, stored relative on the same drive so the parent tree stays portable). Unlink from the door's context menu — the linked folder itself is never touched
+- Rescans, file watching and integrity checks stay within the active root: they never descend into sub-roots (child roots)
 
 ### Board Mode (free-form card layout)
 

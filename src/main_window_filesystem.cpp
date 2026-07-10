@@ -98,8 +98,8 @@ void MainWindow::resetFileSystemWatcher()
         fileWatcherResetCancelled_ = cancelled;
         const QString scannedRootPath = rootPath_;
         fileWatcherResetThread_ = QThread::create(
-            [this, scannedRootPath, cancelled] {
-                TreeWalkResult walk = walkRealTree(scannedRootPath, cancelled.get());
+            [this, scannedRootPath, storageEnabled = mycelStorageEnabled_, cancelled] {
+                TreeWalkResult walk = walkRealTree(scannedRootPath, cancelled.get(), storageEnabled);
                 if (cancelled->load()) {
                     return;  // window is closing; the destructor waits for this thread
                 }

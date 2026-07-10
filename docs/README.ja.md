@@ -12,6 +12,7 @@
 | [hierarchical-mycel-plan.ja.md](hierarchical-mycel-plan.ja.md) | 設計検討（未実装） | `.mycel` を親子で分散管理する階層型モデルの設計メモ。採用方針は「切り替え式（ルート切り替えナビゲーション）」：サブルートを扉ノードとして境界で止め、切り替えで再ルート化。シームレス方式（最寄り `.mycel` 所有）は付録に代替案として保持。 |
 | [board-mode-plan.ja.md](board-mode-plan.ja.md) | 設計メモ（実装済み） | ツリーとは別の「ボードモード」：フォルダを除く全ファイルをカードとして自由配置し、複数パターンを `.mycel/boards/<名前>.json` に保存。初期配置は行=フォルダ、非表示/呼び出し方式（実削除なし）、Undo/Redo 統合。 |
 | [keyboard-shortcut-ideas.ja.md](keyboard-shortcut-ideas.ja.md) | 確定仕様（実装済み） | コンテキストメニュー専用操作（横リンク移動・関連解除・色設定など）へのキーボードショートカット拡充と、Enter/Space/Shift+N の再編の確定仕様。 |
+| [external-root-link-plan.ja.md](external-root-link-plan.ja.md) | 設計（0.8.1 で実装済み） | 親フォルダ外にある子ルートを扉ノードとしてリンクする「外部ルートリンク」の設計。リンクの作成・解除操作、スキャン境界（アクティブルート内で完結）を含む。 |
 
 ## 2 つの設計ドキュメントの関係
 

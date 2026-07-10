@@ -35,6 +35,12 @@ void MainWindow::addFileLink(Node* from, Node* to)
         if (!from || !to || from->isDir || from->path == to->path) {  // link source must be a file; target may be a folder
             return;
         }
+        if (to->isExternalRoot) {
+            // Linking would physically move the external root into the source's folder.
+            recordDebugEvent(QStringLiteral("file link rejected: target is an external root door"));
+            relayout();
+            return;
+        }
 
         const QString fromPath = from->path;
         QString toPath = to->path;

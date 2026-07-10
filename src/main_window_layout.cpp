@@ -197,11 +197,48 @@ void MainWindow::rebuild(bool fitAfterRebuild)
         finishInlineRename(false);
         root_ = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_,
                          mycelStorageEnabled_);
+        injectExternalRootNodes();
         if (boardMode_) {
             renderBoardScene(fitAfterRebuild);
             return;
         }
         renderCurrentTree(fitAfterRebuild);
+    }
+
+void MainWindow::injectExternalRootNodes()
+{
+        if (!mycelStorageEnabled_ || !root_ || externalRootLinks_.empty()) {
+            return;
+        }
+        std::vector<Node*> touchedParents;
+        for (const ExternalRootLink& link : externalRootLinks_) {
+            const QString dirPath = link.dirKey.isEmpty()
+                                        ? QDir::cleanPath(rootPath_)
+                                        : QDir::cleanPath(QDir(rootPath_).absoluteFilePath(link.dirKey));
+            Node* parent = findVisibleNodeByPath(root_.get(), dirPath);
+            if (!parent || !parent->isDir || parent->isSubRoot) {
+                continue;  // the containing folder is hidden, gone, or itself a boundary
+            }
+            const QString target = resolvedExternalRootTarget(link);
+            if (target.isEmpty() || !QFileInfo(target).isDir()) {
+                // Broken link: keep the record but show nothing until the target reappears.
+                recordDebugEvent(QStringLiteral("external root link target missing: %1").arg(link.target));
+                continue;
+            }
+            if (parent->collapsed) {
+                ++parent->hiddenChildren;  // count the door in the collapsed badge
+                continue;
+            }
+            parent->children.push_back(makeExternalRootDoorNode(target, *parent));
+            touchedParents.push_back(parent);
+        }
+        // Re-apply the per-directory manual order so door nodes sort like normal siblings.
+        for (Node* parent : touchedParents) {
+            const auto order = fileOrders_.find(orderKeyForDirectory(parent->path));
+            if (order != fileOrders_.end()) {
+                reorderChildrenInPlace(*parent, order->second);
+            }
+        }
     }
 
 void MainWindow::refreshCachedNodeMetadata(Node& node)
