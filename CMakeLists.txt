@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(Mycel VERSION 0.8.1 LANGUAGES CXX)
+project(Mycel VERSION 0.9.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,6 +41,7 @@ add_executable(mycel
     src/main_window_actions.cpp
     src/main_window_preview.cpp
     src/main_window_board.cpp
+    src/main_window_search.cpp
     assets/mycel.qrc
 )
 
@@ -111,6 +112,12 @@ if(TARGET Qt6::Core)
     target_include_directories(mycel_fileops_test PRIVATE src)
     target_link_libraries(mycel_fileops_test PRIVATE Qt6::Core)
     add_test(NAME fileops COMMAND mycel_fileops_test)
+
+    add_executable(mycel_search_controller_test tests/search_controller_test.cpp)
+    set_target_properties(mycel_search_controller_test PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+    target_include_directories(mycel_search_controller_test PRIVATE src)
+    target_link_libraries(mycel_search_controller_test PRIVATE Qt6::Core)
+    add_test(NAME search_controller COMMAND mycel_search_controller_test)
 endif()
 
 # Packaging (Linux .deb). Run with: scripts/package-linux.sh

@@ -480,6 +480,10 @@ void MainWindow::finishBackgroundReconcile(const QString& scannedRootPath, const
             rebuild(false);
         }
 
+        // The walked lists double as the node-search index (docs/search-feature-design.ja.md
+        // §4.3), same as finishStartupScan(): external creates/deletes/renames land here.
+        rebuildSearchIndexFromLists(result.directories, result.files, /*complete=*/true);
+
         // Network roots get no native change notifications, so this sweep is also their
         // structural refresh: external adds/removes surface here instead of via the watcher.
         if (nativeWatcherDisabled_) {
@@ -509,11 +513,12 @@ MainWindow::SubtreeRefresh MainWindow::replaceScannedSubtree(const QString& dire
             return SubtreeRefresh::NotFound;
         }
 
+        const QSet<QString>* revealPaths = searchRevealPaths_.isEmpty() ? nullptr : &searchRevealPaths_;
         const QString cleanPath = QDir::cleanPath(directoryPath);
         const QString cleanRoot = QDir::cleanPath(root_->path);
         if (cleanPath == cleanRoot) {
             auto rescanned = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_,
-                                      fileOrders_, rootPath_, mycelStorageEnabled_);
+                                      fileOrders_, rootPath_, mycelStorageEnabled_, revealPaths);
             if (sameVisibleStructure(*root_, *rescanned)) {
                 return SubtreeRefresh::Unchanged;
             }
@@ -535,7 +540,7 @@ MainWindow::SubtreeRefresh MainWindow::replaceScannedSubtree(const QString& dire
             if (QDir::cleanPath(child->path) == cleanPath) {
                 auto rescanned = scanTree(cleanPath, existing->depth, existing->branch,
                                           collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_,
-                                          mycelStorageEnabled_);
+                                          mycelStorageEnabled_, revealPaths);
                 if (sameVisibleStructure(*child, *rescanned)) {
                     return SubtreeRefresh::Unchanged;
                 }
@@ -591,6 +596,13 @@ void MainWindow::refreshFromFileSystemChange()
         pendingFileSystemPaths_.clear();
         cancelQueuedInlinePreviewToggle();
 
+        // While a search is open, external structure changes should reach the search index
+        // promptly instead of waiting for the next periodic sweep; the sweep's own guards
+        // (pending scans, drags, edits) keep this from piling up walks.
+        if (searchBarActive()) {
+            runBackgroundReconcile();
+        }
+
         // Reconcile external renames/moves and refresh the hash cache against the real
         // directories that changed, regardless of whether they are visible/expanded in the
         // display tree (collapsed folders still need this to keep their metadata from going
@@ -645,7 +657,8 @@ void MainWindow::refreshFromFileSystemChange()
 
         if (needFullRescan) {
             auto rescanned = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_,
-                                      fileOrders_, rootPath_, mycelStorageEnabled_);
+                                      fileOrders_, rootPath_, mycelStorageEnabled_,
+                                      searchRevealPaths_.isEmpty() ? nullptr : &searchRevealPaths_);
             if (!root_ || !sameVisibleStructure(*root_, *rescanned)) {
                 root_ = std::move(rescanned);
                 changed = true;
@@ -670,6 +683,9 @@ void MainWindow::refreshFromFileSystemChange()
 
 void MainWindow::removeDeletedPathMetadata(const QString& deletedPath, bool wasDir)
 {
+        searchController_.removeSubtree(deletedPath);
+        refreshSearchAfterIndexUpdate();
+
         if (wasDir) {
             for (const QString& path : collapsedPaths_.values()) {
                 if (path == deletedPath || isDescendantPath(deletedPath, path)) {
@@ -816,6 +832,19 @@ void MainWindow::rekeyPathMetadataAfterRename(const QString& oldPath, const QStr
             updatedHashCache[relativeKeyForPath(updatedAbsolutePath)] = entry;
         }
         fileHashCache_ = std::move(updatedHashCache);
+
+        if (isMetadataPath(newPath)) {
+            // Moved into .mycel (e.g. undo parks a created item in the history trash): that is
+            // a deletion as far as the search index is concerned.
+            searchController_.removeSubtree(oldPath);
+        } else {
+            searchController_.rekeySubtree(oldPath, newPath);
+            // Restored from outside the index (e.g. redo/undo pulls the item back out of the
+            // history trash): seed at least the moved path itself; a folder's contents follow
+            // with the next background walk.
+            searchController_.addPath(newPath, wasDir);
+        }
+        refreshSearchAfterIndexUpdate();
     }
 
 QString MainWindow::rekeyPathAfterRename(const QString& path, const QString& oldPath, const QString& newPath, bool wasDir) const

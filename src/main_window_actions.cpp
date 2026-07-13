@@ -27,6 +27,8 @@ QString MainWindow::createFileInDirectory(const QString& dirPath, const QString&
         appendCreatedItemToOrder(dir.absolutePath(), name, false,
                                  afterSiblingPath.isEmpty() ? QString() : QFileInfo(afterSiblingPath).fileName());
         saveOrderFile();
+        searchController_.addPath(path, false);
+        refreshSearchAfterIndexUpdate();
         rebuild(false);
         selectNodePath(path, true);  // focus the newly created file
         const QString trashPath = allocateTrashPath(name);
@@ -60,6 +62,8 @@ QString MainWindow::createFolderInDirectory(const QString& dirPath, const QStrin
         appendCreatedItemToOrder(dir.absolutePath(), name, true,
                                  afterSiblingPath.isEmpty() ? QString() : QFileInfo(afterSiblingPath).fileName());
         saveOrderFile();
+        searchController_.addPath(path, true);
+        refreshSearchAfterIndexUpdate();
         rebuild(false);
         selectNodePath(path, true);  // focus the newly created folder
         const QString trashPath = allocateTrashPath(name);
@@ -157,6 +161,10 @@ bool MainWindow::handleBoardShortcut(QKeyEvent* event)
 
         Qt::KeyboardModifiers modifiers = event->modifiers();
         modifiers &= ~Qt::KeypadModifier;
+        if (event->key() == Qt::Key_Escape && modifiers == Qt::NoModifier && searchBarActive()) {
+            closeSearchBar();  // Esc ends the search even when the canvas has focus (§3.2)
+            return true;
+        }
         if (boardMode_) {
             // Board mode: no file-structure operations (create/delete/rename/paste/move). Keep
             // preview, open, edit and colour; everything else falls through to the view's own keys.

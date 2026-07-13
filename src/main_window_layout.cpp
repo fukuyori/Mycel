@@ -140,6 +140,7 @@ void MainWindow::renderCurrentTree(bool fitAfterRender)
             nodeItemsByPath_.insert(node.path, item);
         });
         restackNodeItemsByVisualOrder();
+        applySearchHighlights();  // the marks live on the items just recreated (§8 全体再描画)
         suppressSideEditorSelectionUpdate_ = previousSuppressSelectionUpdate;
 
         QRectF bounds = root_->subtreeBounds;
@@ -196,7 +197,8 @@ void MainWindow::rebuild(bool fitAfterRebuild)
         saveSideEditorNow();
         finishInlineRename(false);
         root_ = scanTree(rootPath_, 0, -1, collapsedPaths_, previewPaths_, previewSizes_, fileOrders_, rootPath_,
-                         mycelStorageEnabled_);
+                         mycelStorageEnabled_,
+                         searchRevealPaths_.isEmpty() ? nullptr : &searchRevealPaths_);
         injectExternalRootNodes();
         if (boardMode_) {
             renderBoardScene(fitAfterRebuild);

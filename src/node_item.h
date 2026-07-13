@@ -82,6 +82,17 @@ public:
         linkDropHover_ = hover;
         update();
     }
+    // Node-search match mark (docs/search-feature-design.ja.md §3.4). Display-only state; the
+    // current result is expressed through the ordinary selection, not a separate mark.
+    void setSearchMatch(bool match)
+    {
+        if (searchMatch_ == match) {
+            return;
+        }
+        searchMatch_ = match;
+        update();
+    }
+    bool searchMatch() const { return searchMatch_; }
     QRectF linkDropSceneRect() const
     {
         if (node_->isDir) {
@@ -282,6 +293,11 @@ public:
         if (hasUserFill()) {
             painter->setPen(Qt::NoPen);
             painter->setBrush(windowFill());
+            painter->drawRoundedRect(box.adjusted(-4.0, -3.0, 4.0, 3.0), 8.0, 8.0);
+        }
+        if (searchMatch_ && !isSelected()) {
+            painter->setPen(QPen(colors.searchMatchBorder, 2.0));
+            painter->setBrush(colors.searchMatchFill);
             painter->drawRoundedRect(box.adjusted(-4.0, -3.0, 4.0, 3.0), 8.0, 8.0);
         }
         if (isSelected()) {
@@ -579,6 +595,7 @@ private:
     bool externalDropHover_ = false;
     bool internalDropHover_ = false;
     bool linkDropHover_ = false;
+    bool searchMatch_ = false;
     QPointF resizeStartScene_;
     QSizeF resizeStartSize_;
     QGraphicsProxyWidget* previewProxy_ = nullptr;

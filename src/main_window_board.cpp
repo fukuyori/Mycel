@@ -235,6 +235,7 @@ void MainWindow::renderBoardScene(bool restoreView)
             bounds = bounds.united(item->sceneBoundingRect());
             boardNodes_.push_back(std::move(node));
         }
+        applySearchHighlights();  // the marks live on the items just recreated (§8 全体再描画)
         suppressSideEditorSelectionUpdate_ = previousSuppress;
 
         if (bounds.isNull()) {
@@ -360,6 +361,11 @@ void MainWindow::setBoardMode(bool on, bool persistCurrent)
         }
         updateBoardPatternMenu();
         saveViewState();  // persist the new mode flag
+        if (searchBarActive()) {
+            // Mode switch keeps the query but re-evaluates it against the new mode's
+            // candidate set (docs/search-feature-design.ja.md §8).
+            updateSearchCandidateScope();
+        }
         recordDebugEvent(QStringLiteral("board mode: %1 pattern=%2")
                              .arg(on ? QStringLiteral("on") : QStringLiteral("off"), boardPatternName_));
     }

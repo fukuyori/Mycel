@@ -7,6 +7,7 @@
 | ドキュメント | 種別 | 概要 |
 | --- | --- | --- |
 | [development-plan.ja.md](development-plan.ja.md) | 機能予定 | 今後検討している操作・機能（フォルダ直下ソート など）の予定。 |
+| [search-feature-design.ja.md](search-feature-design.ja.md) | 詳細設計（0.9.0 で実装済み） | `Ctrl + F` によるノード検索のUI、全体走査を再利用する索引、折りたたみ・表示上限を越えた一時表示、ボード対応、バックグラウンド本文検索、テスト方針。 |
 | [architecture-redesign-plan.ja.md](architecture-redesign-plan.ja.md) | 再設計計画（現行リポジトリ） | `main.cpp` に集中した責務を、入力・ドラッグ・ファイル操作・レイアウト・線描画へ段階的に分離する計画。Phase 0〜6。 |
 | [new-project-detailed-design.ja.md](new-project-detailed-design.ja.md) | 詳細設計（新規プロジェクト） | 既存実装の知見を踏まえ、新規リポジトリで再実装する場合のレイヤ構成・コンポーネント設計・テスト設計。 |
 | [hierarchical-mycel-plan.ja.md](hierarchical-mycel-plan.ja.md) | 設計検討（未実装） | `.mycel` を親子で分散管理する階層型モデルの設計メモ。採用方針は「切り替え式（ルート切り替えナビゲーション）」：サブルートを扉ノードとして境界で止め、切り替えで再ルート化。シームレス方式（最寄り `.mycel` 所有）は付録に代替案として保持。 |

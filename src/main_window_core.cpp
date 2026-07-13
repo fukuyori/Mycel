@@ -79,7 +79,17 @@ MainWindow::MainWindow(QString rootPath, bool mycelStorageEnabled, QWidget* pare
 
         editorSplitter_->addWidget(view_);
         editorSplitter_->addWidget(sideEditorPanel_);
-        setCentralWidget(editorSplitter_);
+        // The node-search bar (docs/search-feature-design.ja.md §3.1) sits between the toolbar
+        // and the canvas, hidden until Ctrl+F. The splitter itself is untouched, so the
+        // preview-pane repositioning keeps operating on editorSplitter_ as before.
+        auto* centralContainer = new QWidget(this);
+        auto* centralLayout = new QVBoxLayout(centralContainer);
+        centralLayout->setContentsMargins(0, 0, 0, 0);
+        centralLayout->setSpacing(0);
+        centralLayout->addWidget(createSearchBar());
+        centralLayout->addWidget(editorSplitter_, 1);
+        setCentralWidget(centralContainer);
+        searchController_.resetForRoot(rootPath_);
 
         debugDock_ = new QDockWidget(QStringLiteral("Debug"), this);
         debugDock_->setObjectName(QStringLiteral("DebugDock"));
@@ -132,6 +142,10 @@ MainWindow::MainWindow(QString rootPath, bool mycelStorageEnabled, QWidget* pare
         maximizeAction->setShortcut(QKeySequence(Qt::Key_F11));
         maximizeAction->setShortcutContext(Qt::ApplicationShortcut);
         addAction(maximizeAction);
+        QAction* searchAction = new QAction(QStringLiteral("検索"), this);
+        searchAction->setShortcut(QKeySequence::Find);
+        searchAction->setShortcutContext(Qt::ApplicationShortcut);
+        addAction(searchAction);
         QAction* openSelectedPreviewsAction = new QAction(QStringLiteral("プレビューを開く"), this);
         QAction* closeSelectedPreviewsAction = new QAction(QStringLiteral("プレビューを閉じる"), this);
         editorPaneAction_ = new QAction(QStringLiteral("プレビューペイン"), this);
@@ -208,6 +222,7 @@ MainWindow::MainWindow(QString rootPath, bool mycelStorageEnabled, QWidget* pare
         viewMenu->addAction(refreshAction);
         viewMenu->addAction(fitAction);
         viewMenu->addAction(maximizeAction);
+        viewMenu->addAction(searchAction);
         viewMenu->addSeparator();
         boardModeAction_ = viewMenu->addAction(QStringLiteral("ボード表示"));
         boardModeAction_->setCheckable(true);
@@ -320,6 +335,7 @@ MainWindow::MainWindow(QString rootPath, bool mycelStorageEnabled, QWidget* pare
                 updateSideEditorForSelection();
             }
         });
+        connect(searchAction, &QAction::triggered, this, [this] { openSearchBar(); });
         connect(renameSelectedAction, &QAction::triggered, this, [this] { renameSelectedItem(); });
         connect(maximizeAction, &QAction::triggered, this, [this] {
             if (isMaximized()) {
@@ -417,6 +433,7 @@ MainWindow::~MainWindow()
             delete reconcileScanThread_;
             reconcileScanThread_ = nullptr;
         }
+        cancelContentSearch();  // same treatment for the full-text scan worker
         if (fileWatcherResetCancelled_) {
             fileWatcherResetCancelled_->store(true);
         }
@@ -484,6 +501,14 @@ void MainWindow::openRootFolder(const QString& dir)
         if (QDir::cleanPath(normalized) == QDir::cleanPath(rootPath_)) {
             return;  // already open
         }
+        // End the search session before switching (docs/search-feature-design.ja.md §8): the
+        // reveal set belongs to the old root (cleared first so closeSearchBar() does not
+        // trigger a redundant rebuild of it), and the old index is discarded with the root.
+        searchRevealPaths_.clear();
+        searchCurrentPath_.clear();
+        closeSearchBar();
+        searchController_.resetForRoot(normalized);
+        contentSearchCache_.clear();  // body texts belong to the outgoing root
         // Persist the outgoing root's canvas state now (parent⇄child navigation included), and
         // cancel any re-centering still pending from this root's own restore so it can neither
         // suppress this save nor recenter the next root's view.
@@ -773,6 +798,9 @@ void MainWindow::showCheatSheet()
                 "F11 : ウィンドウを最大化/通常表示\n"
                 "Ctrl + 0 : 全体表示\n"
                 "+ / - : ズームイン/ズームアウト\n"
+                "Ctrl + F : ノード検索（名前・相対パス・本文）\n"
+                "検索バー内 Enter / Shift + Enter : 次/前の検索結果へ移動\n"
+                "検索バー内 Esc : 検索を閉じる\n"
                 "Ctrl + E : プレビューペインの表示/非表示\n"
                 "E : 選択ファイルをプレーンテキストで編集\n"
                 "O : 選択項目を OS の既定アプリで開く\n"
@@ -971,6 +999,10 @@ void MainWindow::finishStartupScan(const QString& scannedRootPath, const Startup
             applyFileSystemWatcherPaths(result.directories, result.files);
         }
         // If a rename was in progress, the resume path calls resetFileSystemWatcher() itself.
+
+        // The walked lists double as the node-search index (docs/search-feature-design.ja.md
+        // §4.3); this replaces the provisional visible-nodes index and re-evaluates the query.
+        rebuildSearchIndexFromLists(result.directories, result.files, /*complete=*/true);
     }
 
 void MainWindow::applyLargeTreeStartupCollapse()
@@ -1014,6 +1046,17 @@ bool MainWindow::isLargeRootTree() const
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event)
 {
+        if (searchInput_ && watched == searchInput_ && event->type() == QEvent::KeyPress) {
+            auto* keyEvent = static_cast<QKeyEvent*>(event);
+            if (keyEvent->key() == Qt::Key_Escape) {
+                closeSearchBar();
+                return true;
+            }
+            if (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter) {
+                goToSearchResult(!(keyEvent->modifiers() & Qt::ShiftModifier));
+                return true;
+            }
+        }
         if (renameEdit_ && event->type() == QEvent::KeyPress) {
             auto* keyEvent = static_cast<QKeyEvent*>(event);
             if (keyEvent->key() == Qt::Key_Escape) {

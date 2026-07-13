@@ -260,6 +260,10 @@ struct ThemeColors {
     QColor fileStroke;
     QColor fileInk;
     QColor linkAccent;
+    // Node-search match marks (docs/search-feature-design.ja.md §3.4): amber, so they stay
+    // distinguishable from selection (blue), drop targets (highlight blue), and links (green).
+    QColor searchMatchBorder;
+    QColor searchMatchFill;
 };
 
 inline ThemeColors themeColors(AppTheme theme)
@@ -301,6 +305,8 @@ inline ThemeColors themeColors(AppTheme theme)
             QColor("#87929c"),
             QColor("#cdd6df"),
             QColor("#4cc58a"),
+            QColor("#e3b341"),
+            QColor(227, 179, 65, 42),
         };
     }
 
@@ -340,6 +346,8 @@ inline ThemeColors themeColors(AppTheme theme)
         QColor("#879198"),
         QColor("#59666d"),
         QColor("#0f9f6e"),
+        QColor("#c08a1a"),
+        QColor(255, 205, 92, 70),
     };
 }
 
@@ -1172,11 +1180,16 @@ inline bool lessByFileOrder(const QString& aName, bool aIsDir, const QString& bN
     return QString::compare(aName, bName, Qt::CaseInsensitive) < 0;
 }
 
+// `revealPaths` (node search, docs/search-feature-design.ja.md §6.2): the current search
+// result and its ancestor folders. Nodes on that chain are shown past the collapse state,
+// the MaxDepth cut-off, and the MaxChildren cap — without touching collapsedPaths/fileOrders,
+// so nothing of the temporary expansion is ever persisted.
 inline std::unique_ptr<Node> scanTree(const QString& path, int depth, int branch,
                                const QSet<QString>& collapsedPaths, const QSet<QString>& previewPaths,
                                const std::map<QString, QSizeF>& previewSizes,
                                const std::map<QString, QStringList>& fileOrders,
-                               const QString& rootPath, bool detectSubRoots)
+                               const QString& rootPath, bool detectSubRoots,
+                               const QSet<QString>* revealPaths = nullptr)
 {
     QFileInfo info(path);
     auto node = std::make_unique<Node>();
@@ -1184,11 +1197,12 @@ inline std::unique_ptr<Node> scanTree(const QString& path, int depth, int branch
     node->parentPath = info.absoluteDir().absolutePath();
     node->name = info.fileName().isEmpty() ? info.absoluteFilePath() : info.fileName();
     node->isDir = info.isDir();
+    const bool onRevealPath = revealPaths && revealPaths->contains(node->path);
     // A child directory carrying its own .mycel is a sub-root: display it as a single boundary node
     // (do not descend into it). The opened root itself (depth 0) is never a sub-root.
     node->isSubRoot = detectSubRoots && node->isDir && depth >= 1 &&
                       directoryHasMycel(info.absoluteFilePath());
-    node->collapsed = node->isDir && collapsedPaths.contains(info.absoluteFilePath());
+    node->collapsed = node->isDir && collapsedPaths.contains(info.absoluteFilePath()) && !onRevealPath;
     node->previewOpen = !node->isDir && previewPaths.contains(info.absoluteFilePath());
     node->depth = depth;
     node->branch = branch;
@@ -1206,7 +1220,7 @@ inline std::unique_ptr<Node> scanTree(const QString& path, int depth, int branch
         node->previewSize = found == previewSizes.end() ? automaticPreviewSize(info) : found->second;
     }
 
-    if (!node->isDir || depth >= MaxDepth || node->isSubRoot) {
+    if (!node->isDir || (depth >= MaxDepth && !onRevealPath) || node->isSubRoot) {
         return node;
     }
 
@@ -1236,9 +1250,22 @@ inline std::unique_ptr<Node> scanTree(const QString& path, int depth, int branch
     for (int i = 0; i < visible; ++i) {
         node->children.push_back(scanTree(entries[i].absoluteFilePath(), depth + 1, branch,
                                           collapsedPaths, previewPaths, previewSizes, fileOrders, rootPath,
-                                          detectSubRoots));
+                                          detectSubRoots, revealPaths));
     }
-    node->hiddenChildren = entries.size() - visible;
+    int forcedChildren = 0;
+    if (revealPaths && !revealPaths->isEmpty()) {
+        // A child past the MaxChildren cap that lies on the reveal chain is appended to the
+        // visible set (display only; the persisted order is untouched).
+        for (int i = visible; i < static_cast<int>(entries.size()); ++i) {
+            if (revealPaths->contains(entries[i].absoluteFilePath())) {
+                node->children.push_back(scanTree(entries[i].absoluteFilePath(), depth + 1, branch,
+                                                  collapsedPaths, previewPaths, previewSizes, fileOrders,
+                                                  rootPath, detectSubRoots, revealPaths));
+                ++forcedChildren;
+            }
+        }
+    }
+    node->hiddenChildren = static_cast<int>(entries.size()) - visible - forcedChildren;
     return node;
 }
 

@@ -153,6 +153,7 @@ using mycel::isDescendantPath;
 #include "text_editor.h"
 #include "drop_target_resolver.h"
 #include "selection_controller.h"
+#include "search_controller.h"
 #include "parent_root_item.h"
 
 class MainWindow final : public QMainWindow {
@@ -1569,6 +1570,71 @@ private:
     void applyEditorPanePosition(QString position, bool persist);
 
 
+    // ---- Node search (docs/search-feature-design.ja.md); implemented in main_window_search.cpp ----
+
+
+    // Builds the hidden search bar placed between the toolbar and the canvas.
+    QWidget* createSearchBar();
+
+
+    bool searchBarActive() const;
+
+
+    void openSearchBar();
+
+
+    void closeSearchBar();
+
+
+    // Debounced input → query update. Only the match marks and the counts change here; the
+    // selection and preview are untouched until Enter / Shift+Enter / the arrow buttons (§3.3).
+    void applySearchQueryFromInput();
+
+
+    void goToSearchResult(bool forward);
+
+
+    // Reveals the current result (temporary expansion past the collapse/depth/child-count
+    // limits when it is not displayed), selects it, and scrolls it into view.
+    void focusCurrentSearchResult();
+
+
+    void updateSearchBarStatus();
+
+
+    // Re-marks every live NodeItem from the current result set; called after any re-render.
+    void applySearchHighlights();
+
+
+    // Replaces the whole index from a startup/reconcile walk's directory+file lists.
+    void rebuildSearchIndexFromLists(const QStringList& directories, const QStringList& files, bool complete);
+
+
+    // Provisional index of just the displayed nodes, used until the startup scan lands.
+    void rebuildProvisionalSearchIndexFromTree();
+
+
+    // After index edits (create/delete/rename/move/replace): same query, refreshed results.
+    void refreshSearchAfterIndexUpdate();
+
+
+    // Tree mode searches the whole index; board mode restricts hits to the visible cards.
+    void updateSearchCandidateScope();
+
+
+    // Full-text search (§13): scans the indexed text-preview files on a worker thread via
+    // mycel::runContentSearch and reports body-only matches back into the controller. Each
+    // query change supersedes the previous scan (cancel flag + generation counter).
+    void startContentSearch();
+
+
+    void finishContentSearch(quint64 generation, const QString& query,
+                             const mycel::ContentSearchResult& result);
+
+
+    void cancelContentSearch();
+
+
     QString rootPath_;
     bool mycelStorageEnabled_ = true;
     QSet<QString> collapsedPaths_;
@@ -1692,4 +1758,25 @@ private:
     int pendingViewRestoreReapplies_ = 0;
     int viewRestoreGeneration_ = 0;
     bool suppressSideEditorSelectionUpdate_ = false;
+    // ---- Node search state (docs/search-feature-design.ja.md). searchRevealPaths_ holds the
+    // current result and its ancestors being temporarily shown past the collapse/depth/child
+    // limits; it is never merged into collapsedPaths_/fileOrders_, so nothing persists. ----
+    mycel::SearchController searchController_;
+    QWidget* searchBar_ = nullptr;
+    QLineEdit* searchInput_ = nullptr;
+    QLabel* searchCountLabel_ = nullptr;
+    QLabel* searchPathLabel_ = nullptr;
+    QToolButton* searchPrevButton_ = nullptr;
+    QToolButton* searchNextButton_ = nullptr;
+    QTimer searchDebounceTimer_;
+    QSet<QString> searchRevealPaths_;
+    QString searchCurrentPath_;
+    // Full-text scan state: one worker at a time (superseded scans are cancelled and briefly
+    // waited on — the worker checks the flag per file, so the wait is bounded by one read).
+    // The body cache lives for the root; (size, mtime) staleness makes rescans cheap.
+    QThread* contentSearchThread_ = nullptr;
+    std::shared_ptr<std::atomic_bool> contentSearchCancelled_;
+    quint64 contentSearchGeneration_ = 0;
+    bool contentSearchRunning_ = false;
+    std::map<QString, mycel::ContentSearchCacheEntry> contentSearchCache_;
     std::unique_ptr<Node> root_;};
