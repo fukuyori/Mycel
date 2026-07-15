@@ -1750,6 +1750,8 @@ private:
     bool sideEditorLoading_ = false;
     bool sideEditorDirty_ = false;
     bool sideEditorEditing_ = false;
+    QPoint sidePreviewPressPos_;
+    bool sidePreviewPressed_ = false;
     bool restoringViewState_ = false;
     // Startup/root-switch view restore: the scene-space centre to re-apply once the window
     // geometry settles, and how many re-applies remain (saves are suppressed meanwhile).

@@ -1096,6 +1096,26 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
             recordDebugEvent(QStringLiteral("board key: %1").arg(debugKeyName(keyEvent)));
             Qt::KeyboardModifiers modifiers = keyEvent->modifiers();
             modifiers &= ~Qt::KeypadModifier;
+            const bool ctrlC = modifiers == Qt::ControlModifier && keyEvent->key() == Qt::Key_C;
+            const bool ctrlA = isSelectAllShortcut(keyEvent->key(), modifiers);
+            if ((ctrlC || ctrlA) && view_->scene()) {
+                // A read-only inline text preview never satisfies textInputWidgetHasFocus() (it
+                // checks !isReadOnly()), so without this check Ctrl+C/Ctrl+A here always fall
+                // through to the board's "copy node"/"select all nodes" shortcuts instead of
+                // acting on the preview's own text.
+                if (auto* proxy = qgraphicsitem_cast<QGraphicsProxyWidget*>(view_->scene()->focusItem())) {
+                    if (auto* previewText = qobject_cast<QTextEdit*>(proxy->widget())) {
+                        if (ctrlC && previewText->textCursor().hasSelection()) {
+                            previewText->copy();
+                            return true;
+                        }
+                        if (ctrlA) {
+                            previewText->selectAll();
+                            return true;
+                        }
+                    }
+                }
+            }
             const bool boardShortcut =
                 (modifiers == Qt::NoModifier &&
                  (keyEvent->key() == Qt::Key_Up || keyEvent->key() == Qt::Key_Down ||
@@ -1128,9 +1148,43 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
             if (mouseEvent->button() == Qt::LeftButton) {
                 if (const QString path = inlinePreviewPathForObject(watched); !path.isEmpty()) {
                     selectNodePath(path);
+                    // selectNodePath() moves keyboard focus to the canvas; give it back to the
+                    // clicked preview widget so a click-drag text selection can still be copied
+                    // with Ctrl+C instead of the keystroke landing on the board (node copy).
+                    QWidget* focusTarget = nullptr;
+                    for (QObject* object = watched; object; object = object->parent()) {
+                        if (auto* textEdit = qobject_cast<QTextEdit*>(object)) {
+                            focusTarget = textEdit;
+                            break;
+                        }
+                    }
+                    if (!focusTarget) {
+                        focusTarget = qobject_cast<QWidget*>(watched);
+                    }
+                    if (focusTarget) {
+                        focusTarget->setFocus(Qt::MouseFocusReason);
+                    }
                 }
                 if (isSidePreviewObject(watched) && !sideEditorPath_.isEmpty()) {
-                    return focusEditorForPath(sideEditorPath_);
+                    // Defer opening the editor to mouse-release so a click-drag gesture can
+                    // select/copy preview text instead of always jumping into the editor.
+                    sidePreviewPressed_ = true;
+                    sidePreviewPressPos_ = mouseEvent->globalPosition().toPoint();
+                }
+            }
+        } else if (event->type() == QEvent::MouseButtonRelease) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (mouseEvent->button() == Qt::LeftButton && sidePreviewPressed_) {
+                sidePreviewPressed_ = false;
+                if (isSidePreviewObject(watched) && !sideEditorPath_.isEmpty()) {
+                    const bool dragged =
+                        (mouseEvent->globalPosition().toPoint() - sidePreviewPressPos_).manhattanLength() >
+                        QApplication::startDragDistance();
+                    const bool hasSelection =
+                        sidePreviewText_ && sidePreviewText_->textCursor().hasSelection();
+                    if (!dragged && !hasSelection) {
+                        return focusEditorForPath(sideEditorPath_);
+                    }
                 }
             }
         }
