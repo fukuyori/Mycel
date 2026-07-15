@@ -1,4 +1,5 @@
 #include "main_window.h"
+#include "file_name_order.h"
 
 QString MainWindow::createFileInDirectory(const QString& dirPath, const QString& afterSiblingPath)
 {
@@ -395,7 +396,9 @@ void MainWindow::sortFolderChildren(const QString& folderPath, bool byDate, bool
         QDir dir(folderInfo.absoluteFilePath());
         QFileInfoList entries = dir.entryInfoList(
             QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System, QDir::NoSort);
-        std::sort(entries.begin(), entries.end(), [byDate, descending](const QFileInfo& a, const QFileInfo& b) {
+        const QCollator fileNameCollator = mycel::makeFileNameCollator();
+        std::sort(entries.begin(), entries.end(), [byDate, descending, &fileNameCollator](const QFileInfo& a,
+                                                                                         const QFileInfo& b) {
             if (a.isDir() != b.isDir()) {
                 return a.isDir();  // folders first, regardless of direction
             }
@@ -405,10 +408,10 @@ void MainWindow::sortFolderChildren(const QString& folderPath, bool byDate, bool
                 const QDateTime tb = b.lastModified();
                 cmp = ta < tb ? -1 : (ta > tb ? 1 : 0);
                 if (cmp == 0) {
-                    cmp = QString::compare(a.fileName(), b.fileName(), Qt::CaseInsensitive);
+                    cmp = mycel::compareFileNames(fileNameCollator, a.fileName(), b.fileName());
                 }
             } else {
-                cmp = QString::compare(a.fileName(), b.fileName(), Qt::CaseInsensitive);
+                cmp = mycel::compareFileNames(fileNameCollator, a.fileName(), b.fileName());
             }
             return descending ? cmp > 0 : cmp < 0;
         });
