@@ -30,6 +30,9 @@ QString MainWindow::createFileInDirectory(const QString& dirPath, const QString&
         saveOrderFile();
         searchController_.addPath(path, false);
         refreshSearchAfterIndexUpdate();
+        if (collapsedPaths_.remove(dir.absolutePath())) {
+            saveCollapsedFile();  // expand the target folder so the new file is visible
+        }
         rebuild(false);
         selectNodePath(path, true);  // focus the newly created file
         const QString trashPath = allocateTrashPath(name);
@@ -65,6 +68,9 @@ QString MainWindow::createFolderInDirectory(const QString& dirPath, const QStrin
         saveOrderFile();
         searchController_.addPath(path, true);
         refreshSearchAfterIndexUpdate();
+        if (collapsedPaths_.remove(dir.absolutePath())) {
+            saveCollapsedFile();  // expand the target folder so the new folder is visible
+        }
         rebuild(false);
         selectNodePath(path, true);  // focus the newly created folder
         const QString trashPath = allocateTrashPath(name);
