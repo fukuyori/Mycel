@@ -347,7 +347,7 @@ Build and create a `.deb` package in one step (requires `dpkg-dev`; install
 The package is written to `dist/`. Installing it places `mycel` in `/usr/bin` and registers the desktop entry and icon for the application menu.
 
 ```sh
-sudo apt install ./dist/mycel_<version>_amd64.deb
+sudo apt install ./dist/Mycel-<version>-linux-<arch>.deb
 ```
 
 ### Windows Installer
@@ -358,7 +358,7 @@ After building and deploying the Windows output, create an Inno Setup installer:
 .\scripts\package-windows-inno.ps1
 ```
 
-The installer script uses the existing files in `build-windows-msvc` and does not rebuild Mycel. It requires Inno Setup's `ISCC.exe`; pass `-IsccPath` if it is not installed in a standard location.
+The installer script uses the existing files in `build-windows-msvc` and does not rebuild Mycel. It writes `Mycel-<version>-windows-x64.exe`. It requires Inno Setup's `ISCC.exe`; pass `-IsccPath` if it is not installed in a standard location.
 
 If you select the `Add Mycel to the user PATH` additional task, the installer adds the install directory to the user PATH so newly opened terminals can run `mycel`. The entry is removed during uninstall.
 

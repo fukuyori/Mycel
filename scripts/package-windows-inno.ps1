@@ -182,6 +182,8 @@ Copy-Item -LiteralPath $IconPath -Destination $StagingDir -Force
 $EscapedPayloadDir = Escape-IssString $StagingDir
 $EscapedOutputDir = Escape-IssString $OutputDir
 $EscapedAppVersion = Escape-IssString $AppVersion
+$PackageBaseName = "Mycel-$AppVersion-windows-x64"
+$EscapedPackageBaseName = Escape-IssString $PackageBaseName
 $EscapedIconPath = Escape-IssString $IconPath
 
 $IssContent = @"
@@ -198,7 +200,7 @@ DefaultDirName={localappdata}\Programs\Mycel
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=$EscapedOutputDir
-OutputBaseFilename=MycelSetup-{#MyAppVersion}
+OutputBaseFilename=$EscapedPackageBaseName
 SetupIconFile=$EscapedIconPath
 LicenseFile={#PayloadDir}\LICENSE
 Compression=lzma2
@@ -384,5 +386,5 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-$InstallerPath = Join-Path $OutputDir "MycelSetup-$AppVersion.exe"
+$InstallerPath = Join-Path $OutputDir "$PackageBaseName.exe"
 Write-Host "Created installer: $InstallerPath"

@@ -12,6 +12,19 @@ DIST_DIR="${DIST_DIR:-"$ROOT_DIR/dist"}"
 CMAKE_BIN="${CMAKE_BIN:-cmake}"
 CPACK_BIN="${CPACK_BIN:-cpack}"
 
+APP_VERSION="$(sed -nE 's/^[[:space:]]*project\([[:space:]]*Mycel[[:space:]]+VERSION[[:space:]]+([0-9]+(\.[0-9]+){1,3}).*/\1/p' "$ROOT_DIR/CMakeLists.txt" | head -n 1)"
+if [[ -z "$APP_VERSION" ]]; then
+    echo "error: could not read the Mycel version from CMakeLists.txt" >&2
+    exit 1
+fi
+
+PACKAGE_ARCH="$(uname -m | tr '[:upper:]' '[:lower:]')"
+case "$PACKAGE_ARCH" in
+    x86_64|amd64) PACKAGE_ARCH="x64" ;;
+    aarch64|arm64) PACKAGE_ARCH="arm64" ;;
+esac
+PACKAGE_PATH="$DIST_DIR/Mycel-$APP_VERSION-linux-$PACKAGE_ARCH.deb"
+
 if ! command -v dpkg-shlibdeps >/dev/null 2>&1; then
     echo "error: dpkg-shlibdeps not found. Install it with: sudo apt install dpkg-dev" >&2
     exit 1
@@ -37,5 +50,9 @@ mkdir -p "$DIST_DIR"
 rm -rf "$DIST_DIR/_CPack_Packages"
 
 echo
-echo "Package(s) created in $DIST_DIR:"
-ls -1 "$DIST_DIR"/*.deb
+if [[ -f "$PACKAGE_PATH" ]]; then
+    echo "Created package: $PACKAGE_PATH"
+else
+    echo "Package(s) created in $DIST_DIR:"
+    find "$DIST_DIR" -maxdepth 1 -type f -name "Mycel-$APP_VERSION-linux-*.deb" | sort
+fi
