@@ -18,7 +18,6 @@
 #include <QtCore/QJsonObject>
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QXmlStreamReader>
-#include <QtCore/private/qzipreader_p.h>
 #include <QtCore/QPointF>
 #include <QtCore/QRectF>
 #include <QtCore/QRegularExpression>
@@ -70,6 +69,10 @@
 #include <memory>
 #include <optional>
 #include <vector>
+
+#if MYCEL_HAS_LIBZIP
+#include <zip.h>
+#endif
 
 #ifdef Q_OS_WIN
 #include <QtCore/qt_windows.h>
@@ -602,17 +605,79 @@ inline bool isEpubThumbnailFile(const QFileInfo& info)
     return info.suffix().compare(QStringLiteral("epub"), Qt::CaseInsensitive) == 0;
 }
 
+#if MYCEL_HAS_LIBZIP
+inline QByteArray zipFileData(zip_t* zip, const QString& path)
+{
+    if (!zip || path.isEmpty()) {
+        return {};
+    }
+
+    const QByteArray entryName = QDir::fromNativeSeparators(path).toUtf8();
+    const zip_int64_t index = zip_name_locate(zip, entryName.constData(), ZIP_FL_ENC_GUESS);
+    if (index < 0) {
+        return {};
+    }
+
+    zip_stat_t stat;
+    zip_stat_init(&stat);
+    if (zip_stat_index(zip, static_cast<zip_uint64_t>(index), 0, &stat) != 0 ||
+        !(stat.valid & ZIP_STAT_SIZE)) {
+        return {};
+    }
+
+    constexpr zip_uint64_t kMaxEntryBytes = 128ULL * 1024ULL * 1024ULL;
+    if (stat.size > kMaxEntryBytes ||
+        stat.size > static_cast<zip_uint64_t>(std::numeric_limits<int>::max())) {
+        return {};
+    }
+
+    zip_file_t* file = zip_fopen_index(zip, static_cast<zip_uint64_t>(index), 0);
+    if (!file) {
+        return {};
+    }
+
+    QByteArray data;
+    data.resize(static_cast<qsizetype>(stat.size));
+    qsizetype offset = 0;
+    while (offset < data.size()) {
+        const zip_int64_t read = zip_fread(
+            file, data.data() + offset, static_cast<zip_uint64_t>(data.size() - offset));
+        if (read < 0) {
+            zip_fclose(file);
+            return {};
+        }
+        if (read == 0) {
+            break;
+        }
+        offset += static_cast<qsizetype>(read);
+    }
+    zip_fclose(file);
+
+    if (offset != data.size()) {
+        data.resize(offset);
+    }
+    return data;
+}
+#endif
+
 // Extract the cover image from an EPUB (a ZIP): META-INF/container.xml -> OPF package document ->
 // the manifest's cover image (EPUB3 properties="cover-image", or EPUB2 <meta name="cover">), with
 // a fallback to the first image in the manifest. Returns a null image on failure.
 inline QImage epubCoverImage(const QFileInfo& info)
 {
-    QZipReader zip(info.absoluteFilePath());
-    if (!zip.isReadable()) {
+#if !MYCEL_HAS_LIBZIP
+    Q_UNUSED(info);
+    return {};
+#else
+    int error = ZIP_ER_OK;
+    zip_t* zip = zip_open(info.absoluteFilePath().toUtf8().constData(), ZIP_RDONLY, &error);
+    if (!zip) {
         return {};
     }
 
-    const QByteArray container = zip.fileData(QStringLiteral("META-INF/container.xml"));
+    const auto closeZip = std::unique_ptr<zip_t, decltype(&zip_close)>(zip, &zip_close);
+
+    const QByteArray container = zipFileData(zip, QStringLiteral("META-INF/container.xml"));
     if (container.isEmpty()) {
         return {};
     }
@@ -631,7 +696,7 @@ inline QImage epubCoverImage(const QFileInfo& info)
         return {};
     }
 
-    const QByteArray opf = zip.fileData(opfPath);
+    const QByteArray opf = zipFileData(zip, opfPath);
     if (opf.isEmpty()) {
         return {};
     }
@@ -687,7 +752,7 @@ inline QImage epubCoverImage(const QFileInfo& info)
     href = QUrl::fromPercentEncoding(href.toUtf8());
     QString imagePath = opfDir.isEmpty() ? href : opfDir + QLatin1Char('/') + href;
     imagePath = QDir::cleanPath(imagePath);
-    const QByteArray imageData = zip.fileData(imagePath);
+    const QByteArray imageData = zipFileData(zip, imagePath);
     if (imageData.isEmpty()) {
         return {};
     }
@@ -704,6 +769,7 @@ inline QImage epubCoverImage(const QFileInfo& info)
         return {};
     }
     return reader.read();
+#endif
 }
 
 // Cover image pixel size, cached so the EPUB is not re-extracted for every layout pass.
@@ -2495,9 +2561,6 @@ inline QStringList recentRootPaths()
             continue;
         }
         const QString path = normalizedDirectoryPath(savedPath);
-        if (!QFileInfo(path).isDir()) {
-            continue;
-        }
         const QString key = historyPathKey(path);
         if (seen.contains(key)) {
             continue;

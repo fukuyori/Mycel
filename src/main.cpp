@@ -17,7 +17,6 @@
 #include <QtCore/QProcess>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QXmlStreamReader>
-#include <QtCore/private/qzipreader_p.h>
 #include <QtCore/QPointF>
 #include <QtCore/QPointer>
 #include <QtCore/QRectF>

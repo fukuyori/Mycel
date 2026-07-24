@@ -2,6 +2,13 @@
 
 Mycel の主な変更履歴です。
 
+## 0.9.4
+
+### Qt private API 依存の削除
+
+- EPUB カバー抽出を Qt private API の `QZipReader` から libzip に置き換え、Linux パッケージの `qt6-base-private-abi` 厳密依存を削除した
+- libzip が見つからない環境では EPUB カバープレビューのみ無効化し、アプリ本体はビルドできるようにした
+
 ## 0.9.3
 
 ### N / Shift+N によるファイル・フォルダ作成

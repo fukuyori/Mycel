@@ -44,7 +44,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev
+          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev libzip-dev
 
       - name: Configure MSVC
         if: runner.os == 'Windows'

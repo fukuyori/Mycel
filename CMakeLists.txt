@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(Mycel VERSION 0.9.3 LANGUAGES CXX)
+project(Mycel VERSION 0.9.4 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,10 +9,8 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-# CorePrivate ヘッダの使用に伴う Qt 純正の警告を抑制（内部ヘッダ利用は意図的）
-set(QT_NO_PRIVATE_MODULE_WARNING ON)
-
-find_package(Qt6 REQUIRED COMPONENTS Widgets Network Multimedia MultimediaWidgets CorePrivate)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Network Multimedia MultimediaWidgets)
+find_package(libzip QUIET)
 
 # Optional modules are searched only inside the Qt installation Qt6 itself came from
 # (Qt6_DIR/.. is the cmake/ directory holding every Qt6* module of that installation).
@@ -77,8 +75,12 @@ if(UNIX AND NOT APPLE)
 endif()
 
 target_link_libraries(mycel PRIVATE Qt6::Widgets Qt6::Network Qt6::Multimedia Qt6::MultimediaWidgets)
-# QZipReader (used to extract EPUB cover images) lives in Qt Core's private API.
-target_link_libraries(mycel PRIVATE Qt6::CorePrivate)
+if(TARGET libzip::zip)
+    target_link_libraries(mycel PRIVATE libzip::zip)
+    target_compile_definitions(mycel PRIVATE MYCEL_HAS_LIBZIP=1)
+else()
+    target_compile_definitions(mycel PRIVATE MYCEL_HAS_LIBZIP=0)
+endif()
 
 if(TARGET Qt6::WebEngineWidgets)
     target_link_libraries(mycel PRIVATE Qt6::WebEngineWidgets)
