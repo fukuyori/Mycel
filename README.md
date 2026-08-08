@@ -337,15 +337,28 @@ If you use MinGW or a specific generator, pass `-Generator`:
 .\scripts\build-windows.ps1 -Generator "Ninja" -CMakePrefixPath "C:\Qt\6.x\mingw_64"
 ```
 
-### macOS Package (.dmg)
+### macOS Package (.pkg)
 
-Build and create a disk image in one step:
+Build and create an installer package in one step:
 
 ```sh
 ./scripts/package-mac.sh
 ```
 
-The package is written to `dist/Mycel-<version>-macos-<arch>.dmg`.
+The package is written to `dist/Mycel-<version>-macos-<arch>.pkg` and installs
+`Mycel.app` into `/Applications`. The script signs the application and installer with the
+project's Developer ID certificates, submits the package to Apple, waits for notarization,
+and staples and validates the ticket.
+
+Store the notarization credentials in the keychain once before packaging:
+
+```sh
+xcrun notarytool store-credentials notarytool \
+  --apple-id <apple-id> --team-id Q6GG27UYG5 --password <app-specific-password>
+```
+
+Set `APPLICATION_IDENTITY`, `INSTALLER_IDENTITY`, or `NOTARYTOOL_PROFILE` to override
+their defaults.
 
 ### Linux Package (.deb)
 

@@ -337,15 +337,28 @@ MinGW や特定の generator を使う場合は `-Generator` を指定します�
 .\scripts\build-windows.ps1 -Generator "Ninja" -CMakePrefixPath "C:\Qt\6.x\mingw_64"
 ```
 
-### macOS パッケージ（.dmg）
+### macOS パッケージ（.pkg）
 
-ビルドとディスクイメージの作成をまとめて実行します。
+ビルドとインストーラーパッケージの作成をまとめて実行します。
 
 ```sh
 ./scripts/package-mac.sh
 ```
 
-パッケージは `dist/Mycel-<version>-macos-<arch>.dmg` に生成されます。
+パッケージは `dist/Mycel-<version>-macos-<arch>.pkg` に生成され、`Mycel.app` を
+`/Applications` にインストールします。スクリプトはプロジェクトの Developer ID 証明書で
+アプリとインストーラーを署名し、Apple への提出、公証完了待ち、チケットのステープルと
+検証まで行います。
+
+パッケージ作成前に、公証用の認証情報を一度だけキーチェーンへ登録してください。
+
+```sh
+xcrun notarytool store-credentials notarytool \
+  --apple-id <Apple ID> --team-id Q6GG27UYG5 --password <App用パスワード>
+```
+
+既定値を変更する場合は `APPLICATION_IDENTITY`、`INSTALLER_IDENTITY`、
+`NOTARYTOOL_PROFILE` を指定します。
 
 ### Linux パッケージ（.deb）
 
