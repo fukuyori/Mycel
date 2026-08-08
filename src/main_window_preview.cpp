@@ -1420,13 +1420,13 @@ void MainWindow::renderMarkdownThumbnailForInlinePreview(const QString& path)
                 return;
             }
             // Mermaid renders asynchronously; give it a moment before capturing the page.
-            QTimer::singleShot(450, this, [this, page, cachePath, finish]() mutable {
+            QTimer::singleShot(450, this, [page, cachePath, finish]() mutable {
                 // Rasterise at the height ceiling, then crop the empty band: 1 CSS px == 1 pt, so
                 // the PDF page matches the content box exactly.
                 const QPageSize pageSize(QSizeF(kMarkdownThumbnailWidth, kMarkdownThumbnailMaxHeight),
                                          QPageSize::Point);
                 QPageLayout layout(pageSize, QPageLayout::Portrait, QMarginsF(0, 0, 0, 0));
-                page->printToPdf([this, cachePath, finish](const QByteArray& pdf) mutable {
+                page->printToPdf([cachePath, finish](const QByteArray& pdf) mutable {
                     // buffer is declared first so it outlives the document that reads it.
                     QBuffer buffer;
                     buffer.setData(pdf);
@@ -1723,4 +1723,3 @@ bool MainWindow::isSidePreviewObject(QObject* watched) const
         }
         return false;
     }
-
