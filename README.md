@@ -337,6 +337,16 @@ If you use MinGW or a specific generator, pass `-Generator`:
 .\scripts\build-windows.ps1 -Generator "Ninja" -CMakePrefixPath "C:\Qt\6.x\mingw_64"
 ```
 
+### macOS Package (.dmg)
+
+Build and create a disk image in one step:
+
+```sh
+./scripts/package-mac.sh
+```
+
+The package is written to `dist/Mycel-<version>-macos-<arch>.dmg`.
+
 ### Linux Package (.deb)
 
 Build and create a `.deb` package in one step (requires `dpkg-dev`; install

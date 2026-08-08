@@ -337,6 +337,16 @@ MinGW や特定の generator を使う場合は `-Generator` を指定します�
 .\scripts\build-windows.ps1 -Generator "Ninja" -CMakePrefixPath "C:\Qt\6.x\mingw_64"
 ```
 
+### macOS パッケージ（.dmg）
+
+ビルドとディスクイメージの作成をまとめて実行します。
+
+```sh
+./scripts/package-mac.sh
+```
+
+パッケージは `dist/Mycel-<version>-macos-<arch>.dmg` に生成されます。
+
 ### Linux パッケージ（.deb）
 
 ビルドと `.deb` パッケージの作成をまとめて実行します（`dpkg-dev` が必要です。
