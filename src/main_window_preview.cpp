@@ -435,13 +435,28 @@ void MainWindow::loadSidePreviewFile(const QString& path)
         const QString text = QString::fromUtf8(file.readAll());
         sidePreviewText_->clear();
         if (isMarkdownPreviewFile(info)) {
-            sidePreviewText_->setMarkdown(filterPreviewMetadataLines(text));
+            const QString body = filterPreviewMetadataLines(text);
+#if MYCEL_HAS_WEBENGINE
+            // Mermaid diagrams and TeX math need the bundled mermaid.js / KaTeX, which only run in
+            // the QtWebEngine view. Plain Markdown keeps using the lighter QTextEdit renderer.
+            if (markdownNeedsRichRendering(body)) {
+                QWebEngineView* web = ensureHtmlPreviewView();
+                web->setHtml(markdownToRichHtml(body), QUrl(QStringLiteral("qrc:/web/")));
+                applyHtmlPreviewZoom();
+                sidePreviewStack_->setCurrentWidget(web);
+                setSidePaneMode(false, QStringLiteral("Markdown プレビュー（図・数式）"));
+                sideEditorStatusLabel_->setText(QStringLiteral("Markdown プレビュー（図・数式）"));
+                return;
+            }
+#endif
+            sidePreviewText_->setMarkdown(body);
             setSidePaneMode(false, QStringLiteral("Markdown プレビュー"));
             sideEditorStatusLabel_->setText(QStringLiteral("Markdown プレビュー"));
         } else if (isHtmlPreviewFile(info)) {
 #if MYCEL_HAS_WEBENGINE
             QWebEngineView* web = ensureHtmlPreviewView();
             web->setHtml(text, QUrl::fromLocalFile(info.absolutePath() + QStringLiteral("/")));
+            applyHtmlPreviewZoom();
             sidePreviewStack_->setCurrentWidget(web);
 #else
             sidePreviewText_->setHtml(text);
@@ -1019,7 +1034,8 @@ void MainWindow::setPreviewSize(Node* node, const QSizeF& size, bool preferHeigh
             previewSizes_[node->path] = imagePreviewSizeForScale(info, scale);
         } else {
             previewImageScales_.erase(node->path);
-            previewSizes_[node->path] = clampedPreviewSizeForFile(info, size, preferHeight);
+            previewSizes_[node->path] = clampedPreviewSizeForFile(info, size, preferHeight,
+                                                                  markdownThumbnailSourceSize(node->path));
         }
         savePreviewFile();
         relayout();
@@ -1213,6 +1229,232 @@ QString MainWindow::youtubeThumbnailCachePathForEmbedUrl(const QString& embedUrl
             return {};
         }
         return QDir(youtubeThumbnailCacheDirectoryPath()).filePath(videoId + QStringLiteral(".jpg"));
+    }
+
+QString MainWindow::markdownThumbnailCacheDirectoryPath() const
+{
+        return QDir(rootPath_).filePath(QStringLiteral(".mycel/md-thumbnails"));
+    }
+
+QString MainWindow::markdownThumbnailCachePathForFile(const QFileInfo& info) const
+{
+        if (!info.exists()) {
+            return {};
+        }
+        // The key covers the file identity, its content revision and the theme, so an edit or a
+        // light/dark switch produces a fresh image instead of a stale one.
+        const QString key = QStringLiteral("%1|%2|%3|%4|%5")
+                                .arg(info.absoluteFilePath())
+                                .arg(info.lastModified().toMSecsSinceEpoch())
+                                .arg(info.size())
+                                .arg(appThemeToString(currentAppTheme()))
+                                .arg(kMarkdownThumbnailWidth);
+        const QString hash = QString::fromLatin1(
+            QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha256).toHex());
+        return QDir(markdownThumbnailCacheDirectoryPath()).filePath(hash + QStringLiteral(".png"));
+    }
+
+QString MainWindow::cachedMarkdownThumbnailPathForFile(const QString& path) const
+{
+        if (!mycelStorageEnabled_) {
+            return {};
+        }
+        const QString cachePath = markdownThumbnailCachePathForFile(QFileInfo(path));
+        return (!cachePath.isEmpty() && QFileInfo::exists(cachePath)) ? cachePath : QString();
+    }
+
+void MainWindow::applyHtmlPreviewZoom()
+{
+#if MYCEL_HAS_WEBENGINE
+        if (!sideHtmlWeb_) {
+            return;
+        }
+        if (htmlPreviewZoom_ <= 0.0) {
+            htmlPreviewZoom_ = std::clamp(QSettings().value(QStringLiteral("preview/webZoom"), 1.0).toDouble(),
+                                          kHtmlPreviewZoomMin, kHtmlPreviewZoomMax);
+        }
+        sideHtmlWeb_->setZoomFactor(htmlPreviewZoom_);
+#endif
+    }
+
+void MainWindow::changeHtmlPreviewZoom(qreal factor)
+{
+#if MYCEL_HAS_WEBENGINE
+        const qreal zoom = std::clamp(htmlPreviewZoom_ * factor, kHtmlPreviewZoomMin, kHtmlPreviewZoomMax);
+        if (qFuzzyCompare(zoom, htmlPreviewZoom_)) {
+            return;  // already at the limit
+        }
+        htmlPreviewZoom_ = zoom;
+        QSettings settings;
+        settings.setValue(QStringLiteral("preview/webZoom"), htmlPreviewZoom_);
+        applyHtmlPreviewZoom();
+#else
+        Q_UNUSED(factor);
+#endif
+    }
+
+void MainWindow::resetHtmlPreviewZoom()
+{
+#if MYCEL_HAS_WEBENGINE
+        htmlPreviewZoom_ = 1.0;
+        QSettings settings;
+        settings.setValue(QStringLiteral("preview/webZoom"), htmlPreviewZoom_);
+        applyHtmlPreviewZoom();
+#endif
+    }
+
+bool MainWindow::handleHtmlPreviewZoomEvent(QObject* object, QEvent* event)
+{
+#if MYCEL_HAS_WEBENGINE
+        if (!sideHtmlWeb_) {
+            return false;
+        }
+        // Chromium delivers input to an internal child widget, so accept events from the view or
+        // anything inside it.
+        auto* widget = qobject_cast<QWidget*>(object);
+        if (object != sideHtmlWeb_ && !(widget && sideHtmlWeb_->isAncestorOf(widget))) {
+            return false;
+        }
+        if (event->type() == QEvent::Wheel) {
+            auto* wheel = static_cast<QWheelEvent*>(event);
+            // Touchpads report pixelDelta with a zero angleDelta, so accept either.
+            const int delta = wheel->angleDelta().y() != 0 ? wheel->angleDelta().y() : wheel->pixelDelta().y();
+            if ((wheel->modifiers() & Qt::ControlModifier) && delta != 0) {
+                changeHtmlPreviewZoom(delta > 0 ? kHtmlPreviewZoomStep : 1.0 / kHtmlPreviewZoomStep);
+                return true;
+            }
+        } else if (event->type() == QEvent::KeyPress) {
+            auto* key = static_cast<QKeyEvent*>(event);
+            if (key->modifiers() & Qt::ControlModifier) {
+                if (key->key() == Qt::Key_Plus || key->key() == Qt::Key_Equal ||
+                    key->key() == Qt::Key_Semicolon) {  // Ctrl + ';' is Ctrl + '+' on JIS layouts
+                    changeHtmlPreviewZoom(kHtmlPreviewZoomStep);
+                    return true;
+                }
+                if (key->key() == Qt::Key_Minus) {
+                    changeHtmlPreviewZoom(1.0 / kHtmlPreviewZoomStep);
+                    return true;
+                }
+                if (key->key() == Qt::Key_0) {
+                    resetHtmlPreviewZoom();
+                    return true;
+                }
+            }
+        }
+#else
+        Q_UNUSED(object);
+        Q_UNUSED(event);
+#endif
+        return false;
+    }
+
+QSizeF MainWindow::markdownThumbnailSourceSize(const QString& path) const
+{
+        const QString cachePath = cachedMarkdownThumbnailPathForFile(path);
+        if (cachePath.isEmpty()) {
+            return {};
+        }
+        QImageReader reader(cachePath);  // header-only read, does not decode the image
+        const QSize size = reader.size();
+        return size.isValid() && !size.isEmpty() ? QSizeF(size) : QSizeF();
+    }
+
+void MainWindow::renderMarkdownThumbnailForInlinePreview(const QString& path)
+{
+#if MYCEL_HAS_WEBENGINE && MYCEL_HAS_PDF
+        if (!mycelStorageEnabled_ || pendingMarkdownThumbnailPaths_.contains(path)) {
+            return;
+        }
+        const QFileInfo info(path);
+        const QString cachePath = markdownThumbnailCachePathForFile(info);
+        if (cachePath.isEmpty() || QFileInfo::exists(cachePath)) {
+            return;
+        }
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            return;
+        }
+        const QString markdown = filterPreviewMetadataLines(QString::fromUtf8(file.readAll()));
+        file.close();
+        if (!QDir().mkpath(markdownThumbnailCacheDirectoryPath())) {
+            recordDebugEvent(QStringLiteral("markdown thumbnail cache mkdir failed"));
+            return;
+        }
+
+        pendingMarkdownThumbnailPaths_.insert(path);
+        recordDebugEvent(QStringLiteral("markdown thumbnail render: %1").arg(relativeKeyForPath(path)));
+
+        // Render in a view-less page: printToPdf works fully offscreen (grabbing a hidden widget
+        // does not), and the resulting PDF is rasterised with Qt PDF.
+        auto* page = new QWebEnginePage(this);
+        page->setBackgroundColor(currentThemeColors().previewTextBackground);
+        auto finish = [this, page, path, cachePath](bool ok) {
+            pendingMarkdownThumbnailPaths_.remove(path);
+            page->deleteLater();
+            if (!ok) {
+                recordDebugEvent(QStringLiteral("markdown thumbnail failed: %1").arg(relativeKeyForPath(path)));
+                return;
+            }
+            if (!previewPaths_.contains(path) || !QFileInfo::exists(path)) {
+                return;  // preview was closed (or the file vanished) while rendering
+            }
+            // Snap the frame to the image's aspect so the drawing fills it from the first paint;
+            // the user can then resize freely and the picture scales with the frame.
+            const QSizeF source = markdownThumbnailSourceSize(path);
+            if (!source.isEmpty()) {
+                const auto current = previewSizes_.find(path);
+                const qreal width = current == previewSizes_.end() ? kMarkdownThumbnailWidth
+                                                                   : current->second.width();
+                previewSizes_[path] = clampedPreviewSizeForFile(QFileInfo(path), QSizeF(width, 0.0),
+                                                                false, source);
+                savePreviewFile();
+            }
+            relayout();
+            recordDebugEvent(QStringLiteral("markdown thumbnail cached: %1").arg(relativeKeyForPath(path)));
+        };
+
+        connect(page, &QWebEnginePage::loadFinished, this,
+                [this, page, cachePath, finish](bool loadOk) mutable {
+            if (!loadOk) {
+                finish(false);
+                return;
+            }
+            // Mermaid renders asynchronously; give it a moment before capturing the page.
+            QTimer::singleShot(450, this, [this, page, cachePath, finish]() mutable {
+                // Rasterise at the height ceiling, then crop the empty band: 1 CSS px == 1 pt, so
+                // the PDF page matches the content box exactly.
+                const QPageSize pageSize(QSizeF(kMarkdownThumbnailWidth, kMarkdownThumbnailMaxHeight),
+                                         QPageSize::Point);
+                QPageLayout layout(pageSize, QPageLayout::Portrait, QMarginsF(0, 0, 0, 0));
+                page->printToPdf([this, cachePath, finish](const QByteArray& pdf) mutable {
+                    // buffer is declared first so it outlives the document that reads it.
+                    QBuffer buffer;
+                    buffer.setData(pdf);
+                    buffer.open(QIODevice::ReadOnly);
+                    QPdfDocument doc;
+                    doc.load(&buffer);  // device overload reports status, not a return code
+                    if (pdf.isEmpty() || doc.status() != QPdfDocument::Status::Ready ||
+                        doc.pageCount() < 1) {
+                        finish(false);
+                        return;
+                    }
+                    const QSizeF pointSize = doc.pagePointSize(0);
+                    const qreal scale = 2.0;  // render at 2x for a crisp card image
+                    const QImage rendered = doc.render(
+                        0, QSize(qRound(pointSize.width() * scale), qRound(pointSize.height() * scale)));
+                    const QImage image = trimImageMargins(rendered,
+                                                          currentThemeColors().previewTextBackground,
+                                                          qRound(10 * scale));
+                    finish(!image.isNull() && image.save(cachePath, "PNG"));
+                }, layout);
+            });
+        });
+        // Pin the body to the print width so the measured height matches the rendered page.
+        page->setHtml(markdownToRichHtml(markdown, kMarkdownThumbnailWidth),
+                      QUrl(QStringLiteral("qrc:/web/")));
+#else
+        Q_UNUSED(path);
+#endif
     }
 
 QString MainWindow::urlThumbnailCacheDirectoryPath() const

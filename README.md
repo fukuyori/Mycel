@@ -2,7 +2,7 @@
 
 Mycel is a mind-map tool that uses the folders and files on your system as its data source. It treats existing files as nodes without converting them to a proprietary format, so they remain available to other applications as usual. We are also exploring its use as a pipeline tool by combining links between files with script execution.
 
-- Current version: 0.9.4
+- Current version: 0.9.5
 - Release history: [CHANGELOG.md](CHANGELOG.md)
 - Documentation index: [docs/README.ja.md](docs/README.ja.md)
 - Development plan: [docs/development-plan.ja.md](docs/development-plan.ja.md)
@@ -66,6 +66,7 @@ Mycel is a mind-map tool that uses the folders and files on your system as its d
 - Preview pane for text, HTML, Markdown, CSV, images, and videos
 - Thumbnail previews of the first page of PDFs and the cover of EPUBs, cached under `.mycel/thumbnails` and generated when the preview is opened
 - Inline previews for text and Markdown files, showing up to 200 lines so a taller frame reveals more text
+- Mermaid diagrams (```mermaid fences) and TeX math (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`) are rendered in Markdown previews. mermaid.js and KaTeX ship inside the binary, so rendering works offline with no network access. The preview pane draws them live; inline cards show a cached image under `.mycel/md-thumbnails` that is regenerated when the file or the theme changes
 - Text and other plain preview frames can be freely resized on both axes by dragging the lower-right corner; image, PDF, and EPUB frames keep their source aspect ratio
 - Select and copy text inside previews
 - Lightweight preview frames for images, PDFs, and other files
@@ -75,6 +76,7 @@ Mycel is a mind-map tool that uses the folders and files on your system as its d
 - Clear preview/edit mode indicators with labels, background color, and borders
 - Automatic saving, `Ctrl + S` to save, and `Esc` to return to preview mode
 - Shared persistent preview/edit font size changed with `Ctrl + mouse wheel`
+- Markdown previews with diagrams or math (web-rendered) have their own zoom: `Ctrl + mouse wheel`, `Ctrl + +`, `Ctrl + -`, and `Ctrl + 0` to reset (0.25x–5.0x, persisted)
 - Preview/edit text size can also be changed with `Ctrl + +`, `Ctrl + -`, `Ctrl + 0`, or trackpad pinch on the preview/edit pane
 - Image previews open at original size unless their longest side exceeds 460 px, in which case they are scaled down to 460 px
 - File-watcher refresh is paused while editing so focus and edit mode are preserved
@@ -94,6 +96,7 @@ Mycel writes local metadata into a `.mycel` directory under the opened root fold
 | `.mycel/links.json` | File-to-file links |
 | `.mycel/view.json` | Canvas view, window size, maximized state, full-screen state, and display mode (tree/board) |
 | `.mycel/boards/<name>.json` | Board patterns (card positions, hidden state, per-pattern view) |
+| `.mycel/md-thumbnails/` | Rendered images of Markdown with Mermaid/TeX (cache) |
 
 In `--no-mycel` mode, Mycel does not load or create these files. Reordering, node color changes, file-to-file linking, folder collapse restoration, and persisted view/window restoration are disabled in this mode.
 
@@ -220,6 +223,7 @@ On macOS, two-finger trackpad slide pans the canvas while trackpad pinch remains
 | Shift + Enter while editing | Plain newline without list continuation |
 | Tab / Shift + Tab while editing | Indent or outdent the selected lines |
 | Ctrl + mouse wheel in preview/edit mode | Change text font size |
+| Ctrl + mouse wheel / Ctrl + + / Ctrl + - over a diagram or math preview | Zoom the preview (Ctrl + 0 resets) |
 | Ctrl + + / Ctrl + - in preview/edit mode | Increase or decrease text font size |
 | Ctrl + 0 in preview/edit mode | Reset text font size |
 | Trackpad pinch on the preview/edit pane | Change text font size |

@@ -84,8 +84,10 @@ public:
         setConfiguredPointSize(surface, DefaultPointSize);
     }
 
-private:
+    // Public so the web-rendered preview can express the configured size as a page zoom factor.
     static constexpr int DefaultPointSize = 10;
+
+private:
     static constexpr int MinPointSize = 7;
     static constexpr int MaxPointSize = 32;
 

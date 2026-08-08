@@ -233,7 +233,8 @@ protected:
             }
             const QPointF delta = mapToScene(event->pos()) - imageResizeStartScene_;
             const QSizeF targetSize = previewResizeTargetSize(QFileInfo(imageResizePath_),
-                                                              imageResizeStartSize_, delta);
+                                                              imageResizeStartSize_, delta,
+                                                              resizeItem->previewAspectLocked());
             const bool preferHeight = std::abs(delta.y()) > std::abs(delta.x());
             if (isImagePreviewFile(QFileInfo(imageResizePath_))) {
                 imageResizeCurrentScale_ = imagePreviewScaleForSize(QFileInfo(imageResizePath_),
@@ -281,7 +282,8 @@ protected:
                     const QPointF delta = mapToScene(event->pos()) - imageResizeStartScene_;
                     const bool preferHeight = std::abs(delta.y()) > std::abs(delta.x());
                     const QSizeF targetSize = previewResizeTargetSize(QFileInfo(imageResizePath_),
-                                                                      imageResizeStartSize_, delta);
+                                                                      imageResizeStartSize_, delta,
+                                                                      resizeItem->previewAspectLocked());
                     resizeItem->savePreviewSize(targetSize, preferHeight);
                 }
             } else {

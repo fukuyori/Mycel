@@ -732,6 +732,36 @@ QString NodeItem::windowMarkdownPreviewText() const
     return window_->inlineMarkdownPreviewText(node_);
 }
 
+bool NodeItem::windowIsRichMarkdownPreview(const QFileInfo& info) const
+{
+#if MYCEL_HAS_WEBENGINE && MYCEL_HAS_PDF
+    return isMarkdownPreviewFile(info) && markdownNeedsRichRendering(windowMarkdownPreviewText());
+#else
+    Q_UNUSED(info);
+    return false;  // no renderer available: fall back to the plain Markdown text
+#endif
+}
+
+QSizeF NodeItem::lockedPreviewSourceSize() const
+{
+    if (!node_ || node_->isDir || !isMarkdownPreviewFile(QFileInfo(node_->path))) {
+        return {};
+    }
+    return window_->markdownThumbnailSourceSize(node_->path);
+}
+
+QPixmap NodeItem::windowMarkdownThumbnail(const QFileInfo& info) const
+{
+    const QString cachePath = window_->cachedMarkdownThumbnailPathForFile(info.absoluteFilePath());
+    if (cachePath.isEmpty()) {
+        window_->renderMarkdownThumbnailForInlinePreview(info.absoluteFilePath());
+        return {};
+    }
+    QPixmap pixmap;
+    pixmap.load(cachePath);
+    return pixmap;
+}
+
 void NodeItem::resizePreview(const QSizeF& size, bool preferHeight)
 {
     window_->setPreviewSize(node_, size, preferHeight);
@@ -821,6 +851,11 @@ void NodeItem::createPreviewWidget()
                                 .arg(cssColor(colors.inlinePreviewText),
                                      cssColor(colors.highlight),
                                      cssColor(colors.highlightedText)));
+
+    if (windowIsRichMarkdownPreview(info)) {
+        delete textEdit;
+        return;  // Mermaid / TeX Markdown is drawn as an image by paintPreviewFrame
+    }
 
     QFont previewFont;
     if (isMarkdownPreviewFile(info)) {

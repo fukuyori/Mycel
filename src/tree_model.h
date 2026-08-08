@@ -788,10 +788,30 @@ inline QSizeF epubCoverPixelSize(const QFileInfo& info)
     return size;
 }
 
-inline QSizeF clampedPreviewSizeForFile(const QFileInfo& info, const QSizeF& size, bool preferHeight = false)
+// lockedSource pins the frame to that aspect ratio even for file types that are normally free-form.
+// It is used for Markdown rendered to an image (Mermaid/TeX): without it the picture is capped by
+// the frame width, so dragging the height only adds blank space instead of enlarging the drawing.
+inline QSizeF clampedPreviewSizeForFile(const QFileInfo& info, const QSizeF& size, bool preferHeight = false,
+                                        const QSizeF& lockedSource = QSizeF())
 {
     if (isImagePreviewFile(info)) {
         return clampedImagePreviewSize(info, size, preferHeight);
+    }
+    if (!lockedSource.isEmpty() && lockedSource.width() > 0.0 && lockedSource.height() > 0.0) {
+        const qreal aspect = lockedSource.width() / lockedSource.height();
+        qreal height = preferHeight ? size.height() : size.width() / aspect;
+        // A wide one-line formula has a large aspect, so a tall floor would force a very wide card;
+        // clamp the width too and derive the height from whichever limit binds first.
+        height = std::clamp(height, 32.0, 900.0);
+        qreal width = height * aspect;
+        if (width > 1200.0) {
+            width = 1200.0;
+            height = width / aspect;
+        } else if (width < 120.0) {
+            width = 120.0;
+            height = width / aspect;
+        }
+        return QSizeF(width, height);
     }
     // Documents (PDF first page / EPUB cover) keep their source aspect ratio so the frame always
     // matches the thumbnail (no side gaps); resizing drives the size from the dragged dimension.
@@ -831,9 +851,10 @@ inline bool isAspectLockedPreviewFile(const QFileInfo& info)
 
 // Target frame size while dragging the resize grip. Aspect-locked previews move one axis (the
 // dominant drag direction); free previews follow the grip on both axes.
-inline QSizeF previewResizeTargetSize(const QFileInfo& info, const QSizeF& startSize, const QPointF& delta)
+inline QSizeF previewResizeTargetSize(const QFileInfo& info, const QSizeF& startSize, const QPointF& delta,
+                                      bool forceAspectLock = false)
 {
-    if (isAspectLockedPreviewFile(info)) {
+    if (forceAspectLock || isAspectLockedPreviewFile(info)) {
         return std::abs(delta.x()) >= std::abs(delta.y())
                    ? QSizeF(startSize.width() + delta.x(), startSize.height())
                    : QSizeF(startSize.width(), startSize.height() + delta.y());
@@ -2249,6 +2270,254 @@ inline QString filterPreviewMetadataLines(const QString& text)
         }
     }
     return filtered.join(QLatin1Char('\n'));
+}
+
+// True when the Markdown text contains a ```mermaid fence or a TeX math delimiter ($...$, $$...$$,
+// \(...\), \[...\]). Such files need the QtWebEngine renderer (mermaid.js + KaTeX) instead of
+// QTextEdit::setMarkdown(), which shows the sources verbatim.
+inline bool markdownNeedsRichRendering(const QString& text)
+{
+    static const QRegularExpression mermaidFence(QStringLiteral("(?m)^\\s*```\\s*mermaid\\b"),
+                                                 QRegularExpression::CaseInsensitiveOption);
+    if (text.contains(mermaidFence)) {
+        return true;
+    }
+    static const QRegularExpression blockMath(QStringLiteral("\\$\\$[\\s\\S]+?\\$\\$"));
+    if (text.contains(blockMath) || text.contains(QStringLiteral("\\[")) ||
+        text.contains(QStringLiteral("\\("))) {
+        return true;
+    }
+    // Inline $…$ on one line. Prices must not count as math, so the opening $ may not be followed by
+    // a digit or space ("$10 and $20" is skipped), and the body must either carry a TeX signal
+    // (\ ^ _ { } =) or be a short symbol like $x$.
+    static const QRegularExpression inlineMath(
+        QStringLiteral("\\$(?![\\s\\d])(?:[^$\\n]*[\\\\^_{}=][^$\\n]*|[A-Za-z0-9]{1,3})\\$"));
+    return text.contains(inlineMath);
+}
+
+// Self-contained HTML that renders Markdown with Mermaid diagrams and KaTeX math. The libraries are
+// bundled in the binary (qrc:/web/...), so no network access is needed. Rendering happens in the
+// page: fenced mermaid blocks become diagrams, and $…$ / $$…$$ / \(…\) / \[…\] become math.
+// Crops the empty border of a rendered page. The page is rasterised at a fixed size, so a short
+// formula sits in the middle of a tall, wide sheet; element bounds cannot be trusted either
+// (Mermaid's <svg> reserves more room than it draws). The painted extent is therefore found from
+// the pixels: every fully-background row and column is dropped, keeping `padding` px around the
+// content. Returns a null image when nothing was painted.
+inline QImage trimImageMargins(const QImage& image, const QColor& background, int padding = 10)
+{
+    if (image.isNull()) {
+        return image;
+    }
+    const QImage rgb = image.format() == QImage::Format_ARGB32 ? image
+                                                               : image.convertToFormat(QImage::Format_ARGB32);
+    const QRgb bg = background.rgb() | 0xff000000u;
+    int top = -1;
+    int bottom = -1;
+    int left = rgb.width();
+    int right = -1;
+    for (int y = 0; y < rgb.height(); ++y) {
+        const auto* pixels = reinterpret_cast<const QRgb*>(rgb.constScanLine(y));
+        int rowLeft = -1;
+        int rowRight = -1;
+        for (int x = 0; x < rgb.width(); ++x) {
+            if ((pixels[x] | 0xff000000u) != bg) {
+                if (rowLeft < 0) {
+                    rowLeft = x;
+                }
+                rowRight = x;
+            }
+        }
+        if (rowLeft < 0) {
+            continue;  // fully background row
+        }
+        if (top < 0) {
+            top = y;
+        }
+        bottom = y;
+        left = std::min(left, rowLeft);
+        right = std::max(right, rowRight);
+    }
+    if (top < 0 || right < 0) {
+        return {};  // nothing painted
+    }
+    const int x0 = std::max(0, left - padding);
+    const int y0 = std::max(0, top - padding);
+    const int x1 = std::min(rgb.width() - 1, right + padding);
+    const int y1 = std::min(rgb.height() - 1, bottom + padding);
+    return rgb.copy(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+}
+
+// fixedWidthPx > 0 pins the body to that width (used when rendering to an image: the measured
+// content height must match the print width, otherwise the page is sized from a different layout).
+// 0 keeps the body fluid for the resizable side preview.
+inline QString markdownToRichHtml(const QString& markdown, int fixedWidthPx = 0)
+{
+    const ThemeColors colors = currentThemeColors();
+    const bool dark = currentAppTheme() == AppTheme::Dark;
+    const QString widthRule = fixedWidthPx > 0
+                                  ? QStringLiteral("width:%1px;box-sizing:border-box;").arg(fixedWidthPx)
+                                  : QString();
+    // The Markdown source is injected as text (not HTML) and converted in the page, so nothing in
+    // the document can inject markup here.
+    QString escaped = markdown;
+    escaped.replace(QStringLiteral("</script>"), QStringLiteral("<\\/script>"));
+
+    return QStringLiteral(R"HTML(<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="qrc:/web/web/katex.min.css">
+<style>
+body{font-family:Meiryo,'Segoe UI',sans-serif;color:%1;background:%2;margin:0;padding:10px;
+     font-size:14px;line-height:1.7;word-wrap:break-word;%8}
+h1:first-child,h2:first-child,h3:first-child{margin-top:.2em;}
+h1,h2,h3,h4{margin:1.1em 0 .5em;line-height:1.3;}
+h1{font-size:1.6em;} h2{font-size:1.35em;} h3{font-size:1.15em;}
+code{background:%3;padding:1px 4px;border-radius:3px;font-family:Consolas,monospace;font-size:.92em;}
+pre{background:%3;padding:8px 10px;border-radius:5px;overflow-x:auto;}
+pre code{background:none;padding:0;}
+blockquote{margin:.8em 0;padding:.2em .9em;border-left:3px solid %4;color:%1;opacity:.85;}
+table{border-collapse:collapse;margin:.8em 0;}
+th,td{border:1px solid %4;padding:4px 8px;}
+img{max-width:100%%;height:auto;}
+a{color:%5;}
+hr{border:none;border-top:1px solid %4;margin:1.2em 0;}
+.mermaid{margin:1em 0;text-align:center;}
+/* KaTeX defaults to 1.21em, which reads small next to Japanese body text; scale it up and give
+   display math extra size so formulas stay legible in the card image too. */
+.katex{font-size:1.45em;}
+.katex-display{margin:1.1em 0;}
+.katex-display>.katex{font-size:1.75em;}
+.mycel-error{color:#e06c6c;font-family:Consolas,monospace;font-size:.85em;white-space:pre-wrap;}
+</style></head>
+<body>
+<div id="content"></div>
+<script id="mycel-src" type="text/plain">%6</script>
+<script src="qrc:/web/web/mermaid.min.js"></script>
+<script src="qrc:/web/web/katex.min.js"></script>
+<script src="qrc:/web/web/auto-render.min.js"></script>
+<script>
+// Minimal Markdown renderer: enough for notes (headings, lists, tables, code, emphasis, links,
+// images) while keeping ```mermaid fences and math delimiters intact for the libraries below.
+(function () {
+  var src = document.getElementById('mycel-src').textContent;
+  var mermaidBlocks = [];
+  var mathBlocks = [];
+  function esc(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  // 1) Pull out mermaid fences and math so Markdown processing cannot mangle them.
+  src = src.replace(/```[ \t]*mermaid[ \t]*\r?\n([\s\S]*?)```/gi, function (m, code) {
+    mermaidBlocks.push(code);
+    return ' MERMAID' + (mermaidBlocks.length - 1) + ' ';
+  });
+  function stashMath(re, display) {
+    src = src.replace(re, function (m, body) {
+      mathBlocks.push({ body: body, display: display });
+      return ' MATH' + (mathBlocks.length - 1) + ' ';
+    });
+  }
+  stashMath(/\$\$([\s\S]+?)\$\$/g, true);
+  stashMath(/\\\[([\s\S]+?)\\\]/g, true);
+  stashMath(/\\\(([\s\S]+?)\\\)/g, false);
+  stashMath(/\$([^$\n]+?)\$/g, false);
+
+  // 2) Fenced code blocks (non-mermaid).
+  var codeBlocks = [];
+  src = src.replace(/```([A-Za-z0-9_+-]*)[ \t]*\r?\n([\s\S]*?)```/g, function (m, lang, code) {
+    codeBlocks.push(code);
+    return ' CODE' + (codeBlocks.length - 1) + ' ';
+  });
+
+  var lines = src.split(/\r?\n/);
+  var out = [];
+  var listStack = [];
+  function closeLists(toDepth) {
+    while (listStack.length > toDepth) { out.push(listStack.pop() === 'ol' ? '</ol>' : '</ul>'); }
+  }
+  function inline(t) {
+    t = esc(t);
+    t = t.replace(/`([^`]+)`/g, '<code>$1</code>');
+    t = t.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, '<img alt="$1" src="$2">');
+    t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>');
+    t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    t = t.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+    t = t.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+    return t;
+  }
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    var trimmed = line.trim();
+    if (!trimmed) { closeLists(0); continue; }
+    var ph = trimmed.match(/^ (MERMAID|MATH|CODE)(\d+) $/);
+    if (ph) { closeLists(0); out.push(trimmed); continue; }
+    var h = trimmed.match(/^(#{1,6})\s+(.*)$/);
+    if (h) { closeLists(0); out.push('<h' + h[1].length + '>' + inline(h[2]) + '</h' + h[1].length + '>'); continue; }
+    if (/^(---+|\*\*\*+|___+)$/.test(trimmed)) { closeLists(0); out.push('<hr>'); continue; }
+    if (/^>\s?/.test(trimmed)) { closeLists(0); out.push('<blockquote>' + inline(trimmed.replace(/^>\s?/, '')) + '</blockquote>'); continue; }
+    // Tables: header row followed by a |---|---| separator.
+    if (trimmed.indexOf('|') !== -1 && i + 1 < lines.length && /^\s*\|?[\s:-]*\|[\s:|-]*$/.test(lines[i + 1])) {
+      closeLists(0);
+      var cells = function (row) {
+        return row.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(function (c) { return c.trim(); });
+      };
+      out.push('<table><thead><tr>' + cells(trimmed).map(function (c) { return '<th>' + inline(c) + '</th>'; }).join('') + '</tr></thead><tbody>');
+      i += 2;
+      for (; i < lines.length && lines[i].indexOf('|') !== -1 && lines[i].trim(); i++) {
+        out.push('<tr>' + cells(lines[i].trim()).map(function (c) { return '<td>' + inline(c) + '</td>'; }).join('') + '</tr>');
+      }
+      i--;
+      out.push('</tbody></table>');
+      continue;
+    }
+    var li = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+    if (li) {
+      var depth = Math.floor(li[1].replace(/\t/g, '  ').length / 2) + 1;
+      var kind = /^\d/.test(li[2]) ? 'ol' : 'ul';
+      while (listStack.length < depth) { out.push(kind === 'ol' ? '<ol>' : '<ul>'); listStack.push(kind); }
+      closeLists(depth);
+      out.push('<li>' + inline(li[3]) + '</li>');
+      continue;
+    }
+    closeLists(0);
+    out.push('<p>' + inline(trimmed) + '</p>');
+  }
+  closeLists(0);
+  var html = out.join('\n');
+
+  // 3) Restore the stashed blocks.
+  html = html.replace(/ CODE(\d+) /g, function (m, n) {
+    return '<pre><code>' + esc(codeBlocks[+n]) + '</code></pre>';
+  });
+  html = html.replace(/ MERMAID(\d+) /g, function (m, n) {
+    return '<div class="mermaid">' + esc(mermaidBlocks[+n]) + '</div>';
+  });
+  html = html.replace(/ MATH(\d+) /g, function (m, n) {
+    var b = mathBlocks[+n];
+    try {
+      return katex.renderToString(b.body, { displayMode: b.display, throwOnError: false });
+    } catch (e) {
+      return '<span class="mycel-error">' + esc(b.body) + '</span>';
+    }
+  });
+  document.getElementById('content').innerHTML = html;
+
+  try {
+    mermaid.initialize({ startOnLoad: false, theme: %7, securityLevel: 'strict' });
+    mermaid.run({ querySelector: '.mermaid' });
+  } catch (e) {
+    var nodes = document.querySelectorAll('.mermaid');
+    for (var k = 0; k < nodes.length; k++) { nodes[k].className = 'mycel-error'; }
+  }
+})();
+</script>
+</body></html>)HTML")
+        .arg(cssColor(colors.previewText),
+             cssColor(colors.previewTextBackground),
+             cssColor(dark ? colors.previewTextBackground.lighter(140) : colors.alternateBase),
+             cssColor(colors.previewTextBorder),
+             cssColor(colors.highlight),
+             escaped,
+             dark ? QStringLiteral("'dark'") : QStringLiteral("'default'"),
+             widthRule);
 }
 
 inline QStringList parseCsvLine(const QString& line)

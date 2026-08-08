@@ -1046,6 +1046,11 @@ bool MainWindow::isLargeRootTree() const
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event)
 {
+        // Zooming the web-rendered preview (HTML, or Markdown with Mermaid/TeX) must be handled
+        // before the generic preview-pane filters below swallow the event.
+        if (handleHtmlPreviewZoomEvent(watched, event)) {
+            return true;
+        }
         if (searchInput_ && watched == searchInput_ && event->type() == QEvent::KeyPress) {
             auto* keyEvent = static_cast<QKeyEvent*>(event);
             if (keyEvent->key() == Qt::Key_Escape) {

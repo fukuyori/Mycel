@@ -2,4 +2,30 @@
     <qresource prefix="/icons">
         <file>mycel.png</file>
     </qresource>
+    <qresource prefix="/web">
+        <file>web/mermaid.min.js</file>
+        <file>web/katex.min.js</file>
+        <file>web/katex.min.css</file>
+        <file>web/auto-render.min.js</file>
+        <file>web/fonts/KaTeX_AMS-Regular.woff2</file>
+        <file>web/fonts/KaTeX_Caligraphic-Bold.woff2</file>
+        <file>web/fonts/KaTeX_Caligraphic-Regular.woff2</file>
+        <file>web/fonts/KaTeX_Fraktur-Bold.woff2</file>
+        <file>web/fonts/KaTeX_Fraktur-Regular.woff2</file>
+        <file>web/fonts/KaTeX_Main-Bold.woff2</file>
+        <file>web/fonts/KaTeX_Main-BoldItalic.woff2</file>
+        <file>web/fonts/KaTeX_Main-Italic.woff2</file>
+        <file>web/fonts/KaTeX_Main-Regular.woff2</file>
+        <file>web/fonts/KaTeX_Math-BoldItalic.woff2</file>
+        <file>web/fonts/KaTeX_Math-Italic.woff2</file>
+        <file>web/fonts/KaTeX_SansSerif-Bold.woff2</file>
+        <file>web/fonts/KaTeX_SansSerif-Italic.woff2</file>
+        <file>web/fonts/KaTeX_SansSerif-Regular.woff2</file>
+        <file>web/fonts/KaTeX_Script-Regular.woff2</file>
+        <file>web/fonts/KaTeX_Size1-Regular.woff2</file>
+        <file>web/fonts/KaTeX_Size2-Regular.woff2</file>
+        <file>web/fonts/KaTeX_Size3-Regular.woff2</file>
+        <file>web/fonts/KaTeX_Size4-Regular.woff2</file>
+        <file>web/fonts/KaTeX_Typewriter-Regular.woff2</file>
+    </qresource>
 </RCC>

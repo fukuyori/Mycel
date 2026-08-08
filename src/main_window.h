@@ -78,6 +78,9 @@
 #include <QtNetwork/QNetworkReply>
 #include <QtNetwork/QNetworkRequest>
 #if MYCEL_HAS_WEBENGINE
+#include <QtGui/QPageLayout>
+#include <QtGui/QPageSize>
+#include <QtWebEngineCore/QWebEnginePage>
 #include <QtWebEngineCore/QWebEngineSettings>
 #include <QtWebEngineWidgets/QWebEngineView>
 #endif
@@ -450,6 +453,23 @@ public:
     // needed to preview HTML files. Create the view on first use so launch stays fast and light
     // for the common case where no HTML file is previewed.
     QWebEngineView* ensureHtmlPreviewView();
+
+
+    // The HTML/Markdown preview is a web page, so it carries its own browser-style zoom factor
+    // (Ctrl + wheel / Ctrl + +,-,0). A multiplicative step keeps enlarging and shrinking even, which
+    // the discrete 7–32pt text sizes could not do (they bottomed out at 0.7x).
+    void applyHtmlPreviewZoom();
+
+
+    // factor > 1 enlarges, < 1 shrinks; the result is clamped, persisted and applied.
+    void changeHtmlPreviewZoom(qreal factor);
+
+
+    void resetHtmlPreviewZoom();
+
+
+    // Ctrl + wheel / Ctrl + +,-,0 over the web preview. Returns true when the event was consumed.
+    bool handleHtmlPreviewZoomEvent(QObject* object, QEvent* event);
 #endif
 
     // Documents whose first page can be rendered to a thumbnail (currently PDF).
@@ -465,6 +485,9 @@ public:
     // source's modified time and size so a changed file produces a new thumbnail.
     // Bump this when the rendering (e.g. resolution) changes, so existing caches are invalidated.
     static constexpr int kThumbnailVersion = 400;
+    // Inline Markdown (Mermaid/TeX) thumbnails: render width and a height ceiling, in CSS px.
+    static constexpr int kMarkdownThumbnailWidth = 460;
+    static constexpr int kMarkdownThumbnailMaxHeight = 900;
 
     QString thumbnailCachePathFor(const QFileInfo& info) const;
 
@@ -823,6 +846,27 @@ public:
 
 
     QString urlThumbnailCachePathForUrl(const QUrl& url) const;
+
+
+    // Inline previews of Markdown containing Mermaid diagrams or TeX math are rendered to an image
+    // (mermaid.js / KaTeX in an offscreen web page), cached under .mycel/md-thumbnails.
+    QString markdownThumbnailCacheDirectoryPath() const;
+
+
+    QString markdownThumbnailCachePathForFile(const QFileInfo& info) const;
+
+
+    // Cache path if a current thumbnail exists, else empty (never renders).
+    QString cachedMarkdownThumbnailPathForFile(const QString& path) const;
+
+
+    // Pixel size of the cached image, or an empty size when none exists. The preview frame locks to
+    // this aspect so resizing scales the drawing instead of padding it.
+    QSizeF markdownThumbnailSourceSize(const QString& path) const;
+
+
+    // Render asynchronously; on success the cache is written and the node repainted.
+    void renderMarkdownThumbnailForInlinePreview(const QString& path);
 
 
     void fetchYouTubeThumbnailForInlinePreview(const QString& path, const QString& embedUrl);
@@ -1642,6 +1686,12 @@ private:
     QSet<QString> pendingYouTubeThumbnailPaths_;
     QSet<QString> pendingUrlThumbnailPaths_;
     QSet<QString> pendingUrlThumbnailInlineOpenPaths_;
+    QSet<QString> pendingMarkdownThumbnailPaths_;
+    // Browser-style zoom of the web preview (HTML / Markdown with Mermaid or TeX), persisted.
+    qreal htmlPreviewZoom_ = 0.0;  // 0 = not loaded yet; applyHtmlPreviewZoom() reads the setting
+    static constexpr qreal kHtmlPreviewZoomStep = 1.1;
+    static constexpr qreal kHtmlPreviewZoomMin = 0.25;
+    static constexpr qreal kHtmlPreviewZoomMax = 5.0;
     QString queuedPreviewPath_;
     QString queuedCollapsePath_;
     QTimer previewClickTimer_;

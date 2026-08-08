@@ -157,13 +157,19 @@ public:
         syncPreviewWidgetGeometry();
         update();
     }
+    // Markdown drawn as an image (Mermaid/TeX) locks the frame to the picture's aspect, so dragging
+    // either edge scales the drawing instead of padding it. Empty for every other preview.
+    QSizeF lockedPreviewSourceSize() const;
+    bool previewAspectLocked() const { return !lockedPreviewSourceSize().isEmpty(); }
+
     void applyPreviewSize(const QSizeF& size, bool preferHeight)
     {
         if (!node_ || node_->isDir || isImagePreviewFile(QFileInfo(node_->path))) {
             return;
         }
         prepareGeometryChange();
-        node_->previewSize = clampedPreviewSizeForFile(QFileInfo(node_->path), size, preferHeight);
+        node_->previewSize = clampedPreviewSizeForFile(QFileInfo(node_->path), size, preferHeight,
+                                                       lockedPreviewSourceSize());
         syncPreviewWidgetGeometry();
         update();
     }
@@ -397,6 +403,10 @@ private:
     QString windowMarkdownPreviewText() const;
     bool windowIsDocumentThumbnail(const QFileInfo& info) const;
     QPixmap windowDocumentThumbnail(const QFileInfo& info) const;
+    // Markdown with Mermaid diagrams / TeX math: the card shows a rendered image instead of the
+    // Markdown source, because QTextEdit cannot draw diagrams or formulas.
+    bool windowIsRichMarkdownPreview(const QFileInfo& info) const;
+    QPixmap windowMarkdownThumbnail(const QFileInfo& info) const;
     void updateDragAtScene(const QPointF& scenePos);
     void finishDragAtScene(Qt::MouseButton button, const QPointF& scenePos);
     void resizePreview(const QSizeF& size, bool preferHeight);
@@ -559,6 +569,17 @@ private:
             previewPixmap = cachedImagePixmapForFile(info);
         } else if (windowIsDocumentThumbnail(info)) {
             previewPixmap = windowDocumentThumbnail(info);  // PDF first-page thumbnail
+        } else if (windowIsRichMarkdownPreview(info)) {
+            previewPixmap = windowMarkdownThumbnail(info);  // Mermaid / TeX rendered image
+            if (previewPixmap.isNull()) {
+                // Still rendering (or unavailable): tell the user instead of leaving a blank card.
+                QFont waitFont = painter->font();
+                waitFont.setPointSize(9);
+                waitFont.setBold(false);
+                painter->setFont(waitFont);
+                painter->setPen(colors.inlinePreviewText);
+                painter->drawText(body, Qt::AlignCenter, QStringLiteral("図・数式を描画中…"));
+            }
         }
         if (!previewPixmap.isNull()) {
             const QRectF imageArea = body.adjusted(6.0, 6.0, -6.0, -6.0);  // symmetric → centered
