@@ -4,7 +4,10 @@ param(
     [string]$WorkDir = "",
     [string]$IsccPath = "",
     [string]$AppVersion = "",
-    [switch]$GenerateOnly
+    [switch]$GenerateOnly,
+    [switch]$Sign,
+    [string]$SignToolPath = "",
+    [string]$TimestampUrl = "http://timestamp.digicert.com"
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,6 +63,127 @@ function Find-Iscc {
     }
 
     throw "ISCC.exe was not found. Install Inno Setup or pass -IsccPath. This script does not rebuild Mycel."
+}
+
+function Find-SignTool {
+    param([string]$PreferredPath)
+
+    if (-not [string]::IsNullOrWhiteSpace($PreferredPath)) {
+        return (Resolve-Path -LiteralPath $PreferredPath).Path
+    }
+
+    $Command = Get-Command "signtool.exe" -ErrorAction SilentlyContinue
+    if ($Command) {
+        return $Command.Source
+    }
+
+    $KitRoots = @(
+        (Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"),
+        (Join-Path $env:ProgramFiles "Windows Kits\10\bin")
+    )
+
+    $Candidates = @()
+    foreach ($KitRoot in $KitRoots) {
+        if ([string]::IsNullOrWhiteSpace($KitRoot) -or -not (Test-Path -LiteralPath $KitRoot)) {
+            continue
+        }
+
+        $Candidates += (Join-Path $KitRoot "x64\signtool.exe")
+        foreach ($VersionDir in (Get-ChildItem -LiteralPath $KitRoot -Directory -ErrorAction SilentlyContinue)) {
+            $Candidates += (Join-Path $VersionDir.FullName "x64\signtool.exe")
+        }
+    }
+
+    $Newest = $Candidates |
+        Where-Object { Test-Path -LiteralPath $_ } |
+        Sort-Object -Descending -Property @{
+            Expression = {
+                if ($_ -match "\\bin\\([0-9]+(?:\.[0-9]+){1,3})\\") { [version]$Matches[1] } else { [version]"0.0" }
+            }
+        } |
+        Select-Object -First 1
+
+    if ($Newest) {
+        return (Resolve-Path -LiteralPath $Newest).Path
+    }
+
+    throw "signtool.exe was not found. Install the Windows SDK signing tools or pass -SignToolPath."
+}
+
+function Get-CodeSignArguments {
+    param(
+        [string]$Certificate,
+        [string]$Timestamp
+    )
+
+    if ($Certificate.Contains('"')) {
+        throw "CODESIGN_CERT must not contain a double quote character."
+    }
+
+    $Arguments = @("sign", "/fd", "sha256")
+
+    $IsCertificateFile = $false
+    try {
+        $IsCertificateFile = Test-Path -LiteralPath $Certificate -PathType Leaf
+    } catch {
+        $IsCertificateFile = $false
+    }
+
+    $Thumbprint = ($Certificate -replace "[\s:]", "")
+
+    if ($IsCertificateFile) {
+        $Arguments += @("/f", (Resolve-Path -LiteralPath $Certificate).Path)
+        if (-not [string]::IsNullOrEmpty($env:CODESIGN_CERT_PASSWORD)) {
+            $Arguments += @("/p", $env:CODESIGN_CERT_PASSWORD)
+        }
+    } elseif ($Thumbprint -match "^[0-9a-fA-F]{40}$") {
+        $Arguments += @("/sha1", $Thumbprint)
+    } else {
+        $Arguments += @("/n", $Certificate)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($Timestamp)) {
+        $Arguments += @("/tr", $Timestamp, "/td", "sha256")
+    }
+
+    return ,$Arguments
+}
+
+function Invoke-CodeSign {
+    param([string]$Path)
+
+    & $SignToolExe @SignArguments $Path
+    if ($LASTEXITCODE -ne 0) {
+        throw "Code signing failed: $Path"
+    }
+
+    Assert-CodeSigned $Path
+}
+
+function Assert-CodeSigned {
+    param([string]$Path)
+
+    & $SignToolExe verify /pa $Path
+    if ($LASTEXITCODE -ne 0) {
+        throw "Signature verification failed: $Path"
+    }
+}
+
+function Format-IsccSignCommand {
+    param(
+        [string]$Executable,
+        [string[]]$Arguments
+    )
+
+    # Inno Setup expands $q to a double quote and $f to the file name it wants signed,
+    # and it quotes $f itself. Building the command with $q keeps quote characters out of
+    # the ISCC argument, which PowerShell would otherwise escape on the way to the compiler.
+    $Tokens = @($Executable) + $Arguments
+    $Formatted = foreach ($Token in $Tokens) {
+        if ($Token -match "\s") { "`$q$Token`$q" } else { $Token }
+    }
+
+    return (($Formatted -join " ") + " `$f")
 }
 
 function Read-AppVersion {
@@ -122,6 +246,23 @@ if (-not (Test-Path -LiteralPath $IconPath)) {
     throw "Installer icon was not found: $IconPath"
 }
 
+$SignToolExe = ""
+$SignArguments = @()
+
+if ($Sign) {
+    $SignCertificate = $env:CODESIGN_CERT
+    if ([string]::IsNullOrWhiteSpace($SignCertificate)) {
+        throw "-Sign requires the CODESIGN_CERT environment variable: a .pfx path, a certificate SHA1 thumbprint, or a certificate subject name."
+    }
+
+    $SignToolExe = Find-SignTool $SignToolPath
+    $SignArguments = Get-CodeSignArguments $SignCertificate $TimestampUrl
+
+    Write-Host "Code signing enabled"
+    Write-Host "  signtool:    $SignToolExe"
+    Write-Host "  certificate: $SignCertificate"
+}
+
 $RequiredRuntimeFiles = @(
     "Qt6Core.dll",
     "Qt6Gui.dll",
@@ -179,12 +320,25 @@ Copy-IfExists (Join-Path $RootDir "README.ja.md") $StagingDir
 Copy-IfExists (Join-Path $RootDir "LICENSE") $StagingDir
 Copy-Item -LiteralPath $IconPath -Destination $StagingDir -Force
 
+if ($Sign) {
+    $StagedExePath = Join-Path $StagingDir "mycel.exe"
+    Write-Host "Signing $StagedExePath"
+    Invoke-CodeSign $StagedExePath
+}
+
 $EscapedPayloadDir = Escape-IssString $StagingDir
 $EscapedOutputDir = Escape-IssString $OutputDir
 $EscapedAppVersion = Escape-IssString $AppVersion
 $PackageBaseName = "Mycel-$AppVersion-windows-x64"
 $EscapedPackageBaseName = Escape-IssString $PackageBaseName
 $EscapedIconPath = Escape-IssString $IconPath
+
+# Inno Setup signs the installer with the named Sign Tool, and SignedUninstaller makes it
+# sign the uninstaller it embeds. Both are passed to ISCC as /Smycelsign=<command>.
+$SignSetupDirectives = ""
+if ($Sign) {
+    $SignSetupDirectives = "`r`nSignTool=mycelsign`r`nSignedUninstaller=yes"
+}
 
 $IssContent = @"
 #define MyAppName "Mycel"
@@ -208,7 +362,7 @@ SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
-UninstallDisplayIcon={app}\mycel.ico
+UninstallDisplayIcon={app}\mycel.ico$SignSetupDirectives
 
 [Files]
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -381,10 +535,23 @@ if ($GenerateOnly) {
 }
 
 $ResolvedIsccPath = Find-Iscc $IsccPath
-& $ResolvedIsccPath $IssPath
+
+$IsccArguments = @()
+if ($Sign) {
+    $IsccArguments += "/Smycelsign=$(Format-IsccSignCommand $SignToolExe $SignArguments)"
+}
+$IsccArguments += $IssPath
+
+& $ResolvedIsccPath @IsccArguments
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
 $InstallerPath = Join-Path $OutputDir "$PackageBaseName.exe"
-Write-Host "Created installer: $InstallerPath"
+
+if ($Sign) {
+    Assert-CodeSigned $InstallerPath
+    Write-Host "Created signed installer: $InstallerPath"
+} else {
+    Write-Host "Created installer: $InstallerPath"
+}

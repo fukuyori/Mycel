@@ -385,6 +385,20 @@ After building and deploying the Windows output, create an Inno Setup installer:
 
 The installer script uses the existing files in `build-windows-msvc` and does not rebuild Mycel. It writes `Mycel-<version>-windows-x64.exe`. It requires Inno Setup's `ISCC.exe`; pass `-IsccPath` if it is not installed in a standard location.
 
+To code sign the application executable, the installer, and the uninstaller, pass `-Sign`:
+
+```powershell
+$env:CODESIGN_CERT = "<certificate>"
+.\scripts\package-windows-inno.ps1 -Sign
+```
+
+`CODESIGN_CERT` selects the certificate and accepts a `.pfx` file path (set
+`CODESIGN_CERT_PASSWORD` if it is protected), a SHA1 thumbprint, or a subject name of a
+certificate in the Windows certificate store. Signatures are SHA-256 and are timestamped
+through `http://timestamp.digicert.com`; pass `-TimestampUrl` to use another server.
+Signing requires the Windows SDK `signtool.exe`; pass `-SignToolPath` if it is not
+installed in a standard location.
+
 If you select the `Add Mycel to the user PATH` additional task, the installer adds the install directory to the user PATH so newly opened terminals can run `mycel`. The entry is removed during uninstall.
 
 ## GitHub Actions

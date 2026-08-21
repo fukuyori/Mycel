@@ -385,6 +385,19 @@ Windows のビルド済み出力を用意したあと、Inno Setup のインス�
 
 インストーラー作成スクリプトは `build-windows-msvc` にある既存ファイルを使い、Mycel を再ビルドしません。出力ファイル名は `Mycel-<version>-windows-x64.exe` です。Inno Setup の `ISCC.exe` が必要です。標準の場所にない場合は `-IsccPath` を指定してください。
 
+実行ファイル、インストーラー、アンインストーラーに電子署名を付与するには `-Sign` を指定します。
+
+```powershell
+$env:CODESIGN_CERT = "<証明書>"
+.\scripts\package-windows-inno.ps1 -Sign
+```
+
+証明書は環境変数 `CODESIGN_CERT` で指定します。`.pfx` ファイルのパス（パスワード付きの場合は
+`CODESIGN_CERT_PASSWORD` も設定）、SHA1 ハッシュ（拇印）、Windows 証明書ストア内の証明書の
+サブジェクト名のいずれも使えます。署名は SHA-256 で行い、`http://timestamp.digicert.com` で
+タイムスタンプを付与します（`-TimestampUrl` で変更可）。署名には Windows SDK の
+`signtool.exe` が必要です。標準の場所にない場合は `-SignToolPath` を指定してください。
+
 インストーラーの追加タスクで `Add Mycel to the user PATH` を選ぶと、インストール先がユーザー PATH に追加され、次回開くターミナルから `mycel` を実行できます。アンインストール時には PATH から削除されます。
 
 ## GitHub Actions
