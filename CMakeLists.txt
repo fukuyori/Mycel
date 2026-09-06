@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(Mycel VERSION 0.9.6 LANGUAGES CXX)
+project(Mycel VERSION 0.10.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -134,6 +134,20 @@ if(TARGET Qt6::Core)
         target_include_directories(mycel_markdown_line_breaks_test PRIVATE src)
         target_link_libraries(mycel_markdown_line_breaks_test PRIVATE Qt6::Core Qt6::Gui)
         add_test(NAME markdown_line_breaks COMMAND mycel_markdown_line_breaks_test)
+
+        add_executable(mycel_markdown_document_test tests/markdown_document_test.cpp)
+        set_target_properties(mycel_markdown_document_test PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+        target_include_directories(mycel_markdown_document_test PRIVATE src)
+        target_link_libraries(mycel_markdown_document_test PRIVATE Qt6::Core Qt6::Gui)
+        add_test(NAME markdown_document COMMAND mycel_markdown_document_test)
+    endif()
+
+    # The in-page Markdown renderer (JavaScript inside tree_model.h) is checked with Node when
+    # it is installed; it needs nothing but the bundled markdown-it.
+    find_program(MYCEL_NODE_EXECUTABLE NAMES node nodejs)
+    if(MYCEL_NODE_EXECUTABLE)
+        add_test(NAME markdown_renderer
+                 COMMAND ${MYCEL_NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/markdown_renderer_test.js)
     endif()
 endif()
 

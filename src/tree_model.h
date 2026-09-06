@@ -39,7 +39,7 @@
 #include <QtGui/QImage>
 #include <QtGui/QImageReader>
 
-#include "markdown_line_breaks.h"
+#include "markdown_document.h"
 #include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
 #include <QtGui/QPen>
@@ -937,7 +937,7 @@ inline QSizeF automaticPreviewSize(const QFileInfo& info)
         option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
         doc.setDefaultTextOption(option);
         doc.setDefaultStyleSheet(QStringLiteral("* { color: #243036; } a { color: #1168b3; }"));
-        mycel::setMarkdownWithLineBreaks(&doc, markdown);  // newline = line break
+        mycel::loadMarkdown(&doc, markdown, currentAppTheme() == AppTheme::Dark);
         if (doc.toPlainText().trimmed().isEmpty() && !markdown.trimmed().isEmpty()) {
             doc.setPlainText(markdown);
         }
@@ -2274,30 +2274,16 @@ inline QString filterPreviewMetadataLines(const QString& text)
     return filtered.join(QLatin1Char('\n'));
 }
 
-// True when the Markdown text contains a ```mermaid fence, a TeX math delimiter ($...$, $$...$$,
-// \(...\), \[...\]), a GitHub Alert ("> [!NOTE]" etc.) or Aozora Bunko ruby (漢字《かんじ》 /
-// ｜文字列《よみ》). Such files need the QtWebEngine renderer (mermaid.js + KaTeX + the extended
-// Markdown converter) instead of QTextEdit::setMarkdown(), which shows the sources verbatim and
-// cannot draw <ruby> or styled alerts.
+// True when the Markdown text contains a ```mermaid fence or a TeX math delimiter ($...$, $$...$$,
+// \(...\), \[...\]). Such files need the QtWebEngine renderer (mermaid.js + KaTeX) instead of
+// QTextEdit::setMarkdown(), which shows the sources verbatim. GitHub Alerts and Aozora ruby do
+// not force this path: both renderers handle them (markdown_document.h for the QTextEdit one),
+// and the image rendition would lose the scrolling, selectable text of a long note.
 inline bool markdownNeedsRichRendering(const QString& text)
 {
     static const QRegularExpression mermaidFence(QStringLiteral("(?m)^\\s*```\\s*mermaid\\b"),
                                                  QRegularExpression::CaseInsensitiveOption);
     if (text.contains(mermaidFence)) {
-        return true;
-    }
-    // GitHub Alerts: a blockquote whose first line is exactly [!TYPE] (upper case is canonical).
-    static const QRegularExpression githubAlert(
-        QStringLiteral("(?m)^\\s*>\\s*\\[!(?:NOTE|TIP|IMPORTANT|WARNING|CAUTION)\\]\\s*$"));
-    if (text.contains(githubAlert)) {
-        return true;
-    }
-    // Aozora ruby: explicit ｜base《reading》, or a run of kanji (々仝〆〇ヶ count as kanji) followed
-    // by 《reading》. Both the full-width ｜ and the half-width | open the explicit form.
-    static const QRegularExpression aozoraRuby(
-        QStringLiteral("(?:[｜|][^《》｜|\\r\\n]+|[\\p{Han}々仝〆〇ヶ])"
-                       "《[^《》\\r\\n]+》"));
-    if (text.contains(aozoraRuby)) {
         return true;
     }
     static const QRegularExpression blockMath(QStringLiteral("\\$\\$[\\s\\S]+?\\$\\$"));
@@ -2313,10 +2299,10 @@ inline bool markdownNeedsRichRendering(const QString& text)
     return text.contains(inlineMath);
 }
 
-// Self-contained HTML that renders Markdown with Mermaid diagrams, KaTeX math, GitHub Alerts and
-// Aozora Bunko ruby. The libraries are
-// bundled in the binary (qrc:/web/...), so no network access is needed. Rendering happens in the
-// page: fenced mermaid blocks become diagrams, and $…$ / $$…$$ / \(…\) / \[…\] become math.
+// Self-contained HTML that renders Markdown (markdown-it) with Mermaid diagrams, KaTeX math,
+// GitHub Alerts and Aozora Bunko ruby. The libraries are bundled in the binary (qrc:/web/...),
+// so no network access is needed. Rendering happens in the page: fenced mermaid blocks become
+// diagrams, and $…$ / $$…$$ / \(…\) / \[…\] become math.
 // Crops the empty border of a rendered page. The page is rasterised at a fixed size, so a short
 // formula sits in the middle of a tall, wide sheet; element bounds cannot be trusted either
 // (Mermaid's <svg> reserves more room than it draws). The painted extent is therefore found from
@@ -2381,18 +2367,14 @@ inline QString markdownToRichHtml(const QString& markdown, int fixedWidthPx = 0)
     QString escaped = markdown;
     escaped.replace(QStringLiteral("</script>"), QStringLiteral("<\\/script>"));
 
-    // GitHub's alert accent colours (light / dark), one rule per alert type. The tinted background
-    // keeps the box visible in the card thumbnail, where the thin border alone is easy to miss.
-    struct AlertColor { const char* type; const char* light; const char* dark; };
-    static const AlertColor alertColors[] = {
-        {"note", "9,105,218", "68,147,248"},
-        {"tip", "26,127,55", "63,185,80"},
-        {"important", "130,80,223", "171,125,248"},
-        {"warning", "154,103,0", "210,153,34"},
-        {"caution", "207,34,46", "248,81,73"},
-    };
+    // GitHub's alert accent colours (light / dark), one rule per alert type, shared with the
+    // QTextEdit rendition in markdown_document.h. The tinted background keeps the box visible in
+    // the card thumbnail, where the thin border alone is easy to miss.
+    int alertCount = 0;
+    const mycel::MarkdownAlertColor* alertColors = mycel::markdownAlertColors(&alertCount);
     QString alertPalette;
-    for (const AlertColor& c : alertColors) {
+    for (int i = 0; i < alertCount; ++i) {
+        const mycel::MarkdownAlertColor& c = alertColors[i];
         alertPalette += QStringLiteral(".markdown-alert-%1{--alert-color:rgb(%2);--alert-bg:rgba(%2,%3);}\n")
                             .arg(QLatin1String(c.type), QLatin1String(dark ? c.dark : c.light),
                                  dark ? QStringLiteral(".14") : QStringLiteral(".07"));
@@ -2441,31 +2423,39 @@ rt{font-size:.5em;line-height:1.1;}
 <body>
 <div id="content"></div>
 <script id="mycel-src" type="text/plain">%6</script>
+<script src="qrc:/web/web/markdown-it.min.js"></script>
 <script src="qrc:/web/web/mermaid.min.js"></script>
 <script src="qrc:/web/web/katex.min.js"></script>
 <script src="qrc:/web/web/auto-render.min.js"></script>
 <script>
-// Minimal Markdown renderer: enough for notes (headings, lists, tables, code, emphasis, links,
-// images, blockquotes) while keeping ```mermaid fences and math delimiters intact for the
-// libraries below. Two extensions on top: GitHub Alerts ("> [!NOTE]" ...) become
+// Markdown renderer for the web preview, built on markdown-it (CommonMark + GFM tables and
+// strikethrough, "newline = line break" via the breaks option, raw HTML disabled). Three Mycel
+// extensions sit on top: ```mermaid fences become diagrams, "> [!NOTE]"-style GitHub Alerts become
 // <aside class="markdown-alert">, and Aozora Bunko ruby (漢字《かんじ》 / ｜文字列《よみ》) becomes
-// <ruby>. Placeholders for stashed blocks are wrapped in NUL so they cannot collide with text.
+// <ruby>. TeX math is stashed before parsing so its backslashes, underscores and asterisks are
+// never read as Markdown, then rendered with KaTeX afterwards.
 (function () {
   var src = document.getElementById('mycel-src').textContent;
-  var mermaidBlocks = [];
   var mathBlocks = [];
   function esc(s) {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
-  // 1) Pull out mermaid fences and math so Markdown processing cannot mangle them.
-  src = src.replace(/```[ \t]*mermaid[ \t]*\r?\n([\s\S]*?)```/gi, function (m, code) {
-    mermaidBlocks.push(code);
-    return '\0MERMAID' + (mermaidBlocks.length - 1) + '\0';
-  });
+  // Placeholders use a private-use character: markdown-it keeps it as plain text (it would
+  // replace NUL by U+FFFD) and no Markdown syntax contains it.
+  var PH = '\uE000';
+
+  // 1) Stash math that sits outside code (fenced blocks and `code spans` keep their $ literal).
+  function outsideCode(text, fn) {
+    var parts = text.split(/(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]+`)/);
+    for (var i = 0; i < parts.length; i += 2) { parts[i] = fn(parts[i]); }
+    return parts.join('');
+  }
   function stashMath(re, display) {
-    src = src.replace(re, function (m, body) {
-      mathBlocks.push({ body: body, display: display });
-      return '\0MATH' + (mathBlocks.length - 1) + '\0';
+    src = outsideCode(src, function (text) {
+      return text.replace(re, function (m, body) {
+        mathBlocks.push({ body: body, display: display });
+        return PH + 'MATH' + (mathBlocks.length - 1) + PH;
+      });
     });
   }
   stashMath(/\$\$([\s\S]+?)\$\$/g, true);
@@ -2473,39 +2463,21 @@ rt{font-size:.5em;line-height:1.1;}
   stashMath(/\\\(([\s\S]+?)\\\)/g, false);
   stashMath(/\$([^$\n]+?)\$/g, false);
 
-  // 2) Fenced code blocks (non-mermaid).
-  var codeBlocks = [];
-  src = src.replace(/```([A-Za-z0-9_+-]*)[ \t]*\r?\n([\s\S]*?)```/g, function (m, lang, code) {
-    codeBlocks.push(code);
-    return '\0CODE' + (codeBlocks.length - 1) + '\0';
-  });
+  // 2) markdown-it with the Mycel extensions.
+  var md = window.markdownit({ html: false, linkify: false, typographer: false, breaks: true });
 
-  // Inline code is stashed while the other inline rules run, so emphasis, links and ruby never
-  // rewrite text inside backticks (`青梅《おうめ》` stays literal, as the spec requires).
-  var inlineCodes = [];
-  function rubyTag(m, base, reading) {
-    return '<ruby>' + base + '<rp>（</rp><rt>' + reading + '</rt><rp>）</rp></ruby>';
-  }
-  function inline(t) {
-    t = esc(t);
-    t = t.replace(/`([^`]+)`/g, function (m, code) {
-      inlineCodes.push('<code>' + code + '</code>');
-      return '\0IC' + (inlineCodes.length - 1) + '\0';
-    });
-    t = t.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, '<img alt="$1" src="$2">');
-    t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>');
-    t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    t = t.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
-    t = t.replace(/~~([^~]+)~~/g, '<del>$1</del>');
-    // Aozora ruby: the explicit form ｜base《reading》 first, then the shorthand whose base is the
-    // run of kanji (々仝〆〇ヶ count as kanji) right before 《. Tags, placeholders and an unclosed
-    // 《 never match, so such text stays as written. Only the full-width ｜ opens a ruby.
-    t = t.replace(/｜([^《》<>\0\r\n]+)《([^《》<>\0\r\n]+)》/g, rubyTag);
-    t = t.replace(/([\p{Script=Han}々仝〆〇ヶ]+)《([^《》<>\0\r\n]+)》/gu, rubyTag);
-    return t.replace(/\0IC(\d+)\0/g, function (m, n) { return inlineCodes[+n]; });
-  }
+  // ```mermaid → <div class="mermaid"> for mermaid.run() below.
+  var defaultFence = md.renderer.rules.fence;
+  md.renderer.rules.fence = function (tokens, idx, options, env, self) {
+    var token = tokens[idx];
+    if ((token.info || '').trim().toLowerCase() === 'mermaid') {
+      return '<div class="mermaid">' + esc(token.content) + '</div>\n';
+    }
+    return defaultFence(tokens, idx, options, env, self);
+  };
 
-  // GitHub Alert titles and icons (simple inline SVG, drawn in the accent colour).
+  // GitHub Alert titles and icons (simple inline SVG, drawn in the accent colour). The titles
+  // match markdownAlertColors() in markdown_document.h.
   var ALERTS = {
     NOTE: ['Note', '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="5" r="1" fill="currentColor"/><rect x="7.25" y="7" width="1.5" height="5" rx=".75" fill="currentColor"/></svg>'],
     TIP: ['Tip', '<svg viewBox="0 0 16 16"><path d="M8 1.5a4.5 4.5 0 0 0-2.5 8.2V11h5V9.7A4.5 4.5 0 0 0 8 1.5z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M6 13h4M6.5 14.8h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'],
@@ -2514,92 +2486,94 @@ rt{font-size:.5em;line-height:1.1;}
     CAUTION: ['Caution', '<svg viewBox="0 0 16 16"><path d="M5.2 1.5h5.6l4 4v5.6l-4 4H5.2l-4-4V5.5z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><rect x="7.25" y="4.5" width="1.5" height="4" rx=".75" fill="currentColor"/><circle cx="8" cy="10.75" r=".9" fill="currentColor"/></svg>']
   };
 
-  function renderBlocks(lines) {
-    var out = [];
-    var listStack = [];
-    function closeLists(toDepth) {
-      while (listStack.length > toDepth) { out.push(listStack.pop() === 'ol' ? '</ol>' : '</ul>'); }
-    }
-    // Consecutive text lines form one paragraph with a line break after each line ("newline =
-    // line break", the same rule the QTextEdit path gets from markdownWithHardLineBreaks()).
-    var para = [];
-    function flushPara() {
-      if (para.length) { out.push('<p>' + para.join('<br>') + '</p>'); para = []; }
-    }
-    function endBlock() { flushPara(); closeLists(0); }
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i];
-      var trimmed = line.trim();
-      if (!trimmed) { endBlock(); continue; }
-      var ph = trimmed.match(/^\0(MERMAID|MATH|CODE)(\d+)\0$/);
-      if (ph) { endBlock(); out.push(trimmed); continue; }
-      var h = trimmed.match(/^(#{1,6})\s+(.*)$/);
-      if (h) { endBlock(); out.push('<h' + h[1].length + '>' + inline(h[2]) + '</h' + h[1].length + '>'); continue; }
-      if (/^(---+|\*\*\*+|___+)$/.test(trimmed)) { endBlock(); out.push('<hr>'); continue; }
-      if (trimmed.charAt(0) === '>') {
-        endBlock();
-        // A blockquote spans every consecutive "> ..." line. Its body is rendered recursively so it
-        // can hold paragraphs, lists, tables and code like the top level; ">" alone separates
-        // paragraphs. When the first line is [!TYPE] the quote is a GitHub Alert instead.
-        var quoted = [];
-        for (; i < lines.length && /^\s*>/.test(lines[i]); i++) {
-          quoted.push(lines[i].replace(/^\s*>\s?/, ''));
-        }
-        i--;
-        var alert = quoted[0].trim().match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]$/);
-        if (alert) {
-          var kind = ALERTS[alert[1]];
-          out.push('<aside class="markdown-alert markdown-alert-' + alert[1].toLowerCase() + '">' +
-                   '<div class="markdown-alert-title">' + kind[1] + kind[0] + '</div>' +
-                   renderBlocks(quoted.slice(1)) + '</aside>');
-        } else {
-          out.push('<blockquote>' + renderBlocks(quoted) + '</blockquote>');
-        }
+  // Alerts: a blockquote whose first paragraph starts with "[!TYPE]" on its own line. Runs after
+  // block parsing and before inline parsing, so the marker can be cut out of the paragraph text.
+  md.core.ruler.after('block', 'mycel_alerts', function (state) {
+    var tokens = state.tokens;
+    for (var i = 0; i + 2 < tokens.length; i++) {
+      if (tokens[i].type !== 'blockquote_open' || tokens[i + 1].type !== 'paragraph_open' ||
+          tokens[i + 2].type !== 'inline') {
         continue;
       }
-      // Tables: header row followed by a |---|---| separator.
-      if (trimmed.indexOf('|') !== -1 && i + 1 < lines.length && /^\s*\|?[\s:-]*\|[\s:|-]*$/.test(lines[i + 1])) {
-        endBlock();
-        var cells = function (row) {
-          return row.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(function (c) { return c.trim(); });
-        };
-        out.push('<table><thead><tr>' + cells(trimmed).map(function (c) { return '<th>' + inline(c) + '</th>'; }).join('') + '</tr></thead><tbody>');
-        i += 2;
-        for (; i < lines.length && lines[i].indexOf('|') !== -1 && lines[i].trim(); i++) {
-          out.push('<tr>' + cells(lines[i].trim()).map(function (c) { return '<td>' + inline(c) + '</td>'; }).join('') + '</tr>');
-        }
-        i--;
-        out.push('</tbody></table>');
-        continue;
+      var inline = tokens[i + 2];
+      var m = inline.content.match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*(?:\n|$)/);
+      if (!m) { continue; }
+      var kind = ALERTS[m[1]];
+      var level = tokens[i].level;
+      var close = i + 1;
+      while (close < tokens.length &&
+             !(tokens[close].type === 'blockquote_close' && tokens[close].level === level)) { close++; }
+      if (close >= tokens.length) { continue; }
+      tokens[i].tag = 'aside';
+      tokens[i].attrSet('class', 'markdown-alert markdown-alert-' + m[1].toLowerCase());
+      tokens[close].tag = 'aside';
+      var title = new state.Token('html_block', '', 0);
+      title.content = '<div class="markdown-alert-title">' + kind[1] + kind[0] + '</div>\n';
+      title.level = tokens[i + 1].level;
+      var rest = inline.content.slice(m[0].length);
+      if (rest === '') {
+        tokens.splice(i + 1, 3, title);  // the paragraph held only the marker
+      } else {
+        inline.content = rest;
+        tokens.splice(i + 1, 0, title);
       }
-      var li = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
-      if (li) {
-        flushPara();
-        var depth = Math.floor(li[1].replace(/\t/g, '  ').length / 2) + 1;
-        var listKind = /^\d/.test(li[2]) ? 'ol' : 'ul';
-        while (listStack.length < depth) { out.push(listKind === 'ol' ? '<ol>' : '<ul>'); listStack.push(listKind); }
-        closeLists(depth);
-        out.push('<li>' + inline(li[3]) + '</li>');
-        continue;
-      }
-      closeLists(0);
-      // An explicit CommonMark hard break (trailing backslash; trailing spaces are already
-      // trimmed) is redundant here and would otherwise print the backslash.
-      para.push(inline(trimmed.replace(/\\$/, '')));
     }
-    endBlock();
-    return out.join('\n');
-  }
-  var html = renderBlocks(src.split(/\r?\n/));
+  });
 
-  // 3) Restore the stashed blocks.
-  html = html.replace(/\0CODE(\d+)\0/g, function (m, n) {
-    return '<pre><code>' + esc(codeBlocks[+n]) + '</code></pre>';
+  // Ruby: rewrites text tokens after inline parsing (so code spans, links and emphasis are already
+  // separated). The explicit form ｜base《reading》 (half-width | accepted, nearest bar wins) is
+  // matched first, then the shorthand whose base is the run of kanji (々仝〆〇ヶ included) right
+  // before 《. An unclosed 《 or a base without kanji stays plain text.
+  var EXPLICIT = /[｜|]([^《》｜|\n]+)《([^《》\n]+)》/g;
+  var SHORTHAND = /([\p{Script=Han}々仝〆〇ヶ]+)《([^《》\n]+)》/gu;
+  function rubyHtml(base, reading) {
+    return '<ruby>' + esc(base) + '<rp>（</rp><rt>' + esc(reading) + '</rt><rp>）</rp></ruby>';
+  }
+  function splitRuby(text, re, out) {
+    var last = 0;
+    var m;
+    re.lastIndex = 0;
+    while ((m = re.exec(text)) !== null) {
+      if (m.index > last) { out.push({ text: text.slice(last, m.index) }); }
+      out.push({ html: rubyHtml(m[1], m[2]) });
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) { out.push({ text: text.slice(last) }); }
+  }
+  md.core.ruler.push('mycel_ruby', function (state) {
+    var blocks = state.tokens;
+    for (var i = 0; i < blocks.length; i++) {
+      if (blocks[i].type !== 'inline' || !blocks[i].children) { continue; }
+      var children = blocks[i].children;
+      var replaced = [];
+      var changed = false;
+      for (var k = 0; k < children.length; k++) {
+        var token = children[k];
+        if (token.type !== 'text' || token.content.indexOf('《') === -1) { replaced.push(token); continue; }
+        var pieces = [];
+        splitRuby(token.content, EXPLICIT, pieces);
+        var pieces2 = [];
+        for (var p = 0; p < pieces.length; p++) {
+          if (pieces[p].html) { pieces2.push(pieces[p]); } else { splitRuby(pieces[p].text, SHORTHAND, pieces2); }
+        }
+        if (pieces2.length === 1 && pieces2[0].text !== undefined) { replaced.push(token); continue; }
+        changed = true;
+        for (var q = 0; q < pieces2.length; q++) {
+          var piece = pieces2[q];
+          var t = new state.Token(piece.html ? 'html_inline' : 'text', '', 0);
+          t.content = piece.html ? piece.html : piece.text;
+          t.level = token.level;
+          replaced.push(t);
+        }
+      }
+      if (changed) { blocks[i].children = replaced; }
+    }
   });
-  html = html.replace(/\0MERMAID(\d+)\0/g, function (m, n) {
-    return '<div class="mermaid">' + esc(mermaidBlocks[+n]) + '</div>';
-  });
-  html = html.replace(/\0MATH(\d+)\0/g, function (m, n) {
+
+  var html = md.render(src);
+
+  // 3) Restore the stashed math.
+  html = html.replace(new RegExp(PH + 'MATH(\\d+)' + PH, 'g'), function (m, n) {
     var b = mathBlocks[+n];
     try {
       return katex.renderToString(b.body, { displayMode: b.display, throwOnError: false });

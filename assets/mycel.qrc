@@ -3,6 +3,7 @@
         <file>mycel.png</file>
     </qresource>
     <qresource prefix="/web">
+        <file>web/markdown-it.min.js</file>
         <file>web/mermaid.min.js</file>
         <file>web/katex.min.js</file>
         <file>web/katex.min.css</file>

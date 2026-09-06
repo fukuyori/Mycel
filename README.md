@@ -2,7 +2,7 @@
 
 Mycel is a mind-map tool that uses the folders and files on your system as its data source. It treats existing files as nodes without converting them to a proprietary format, so they remain available to other applications as usual. We are also exploring its use as a pipeline tool by combining links between files with script execution.
 
-- Current version: 0.9.6
+- Current version: 0.10.0
 - Release history: [CHANGELOG.md](CHANGELOG.md)
 - Documentation index: [docs/README.ja.md](docs/README.ja.md)
 - Development plan: [docs/development-plan.ja.md](docs/development-plan.ja.md)
@@ -66,8 +66,8 @@ Mycel is a mind-map tool that uses the folders and files on your system as its d
 - Preview pane for text, HTML, Markdown, CSV, images, and videos
 - Thumbnail previews of the first page of PDFs and the cover of EPUBs, cached under `.mycel/thumbnails` and generated when the preview is opened
 - Inline previews for text and Markdown files, showing up to 200 lines so a taller frame reveals more text
-- Mermaid diagrams (```mermaid fences) and TeX math (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`) are rendered in Markdown previews. mermaid.js and KaTeX ship inside the binary, so rendering works offline with no network access. The preview pane draws them live; inline cards show a cached image under `.mycel/md-thumbnails` that is regenerated when the file or the theme changes
-- GitHub Alerts (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`) and Aozora Bunko ruby (`漢字《かんじ》`, `｜base《reading》`; the bar may be full- or half-width) are rendered in Markdown previews. Text inside inline code and code blocks is left untouched
+- Mermaid diagrams (```mermaid fences) and TeX math (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`) are rendered in Markdown previews. markdown-it, mermaid.js and KaTeX ship inside the binary, so rendering works offline with no network access. The preview pane draws them live; inline cards show a cached image under `.mycel/md-thumbnails` that is regenerated when the file or the theme changes
+- GitHub Alerts (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`) and Aozora Bunko ruby (`漢字《かんじ》`, `｜base《reading》`; the bar may be full- or half-width) are rendered in Markdown previews. Plain previews show the reading as small superscript text after the base; files with Mermaid/TeX use HTML `<ruby>`. Text inside inline code and code blocks is left untouched
 - A newline in Markdown text is shown as a line break (a blank line still starts a new paragraph). New files created with `N` default to `.md`
 - Text and other plain preview frames can be freely resized on both axes by dragging the lower-right corner; image, PDF, and EPUB frames keep their source aspect ratio
 - Select and copy text inside previews
@@ -310,6 +310,25 @@ cmake -S . -B build
 cmake --build build
 ```
 
+### Tests
+
+The GUI-free core is covered by unit tests run through CTest.
+
+```sh
+ctest --test-dir build --output-on-failure
+```
+
+| Test | Covers |
+| --- | --- |
+| `fileops` | File move / copy / conflict renaming |
+| `search_controller` | Search controller |
+| `file_name_order` | Natural file-name ordering |
+| `markdown_line_breaks` | "Newline = line break" preprocessing and the imported document |
+| `markdown_document` | Aozora ruby and GitHub Alerts in the plain preview |
+| `markdown_renderer` | The web preview renderer (markdown-it); registered only when `node` is found |
+
+The Markdown extension syntax is documented (in Japanese) in [docs/markdown-extensions.ja.md](docs/markdown-extensions.ja.md).
+
 ### Build Script Options
 
 The macOS and Linux scripts read these environment variables:
@@ -420,3 +439,9 @@ It includes nested folders and Markdown notes for current-state analysis, issue 
 ## License
 
 Mycel is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
+
+The Markdown preview bundles the following libraries under `assets/web/` (all MIT licensed):
+
+- [markdown-it](https://github.com/markdown-it/markdown-it) 14.1.0 (`assets/web/markdown-it.LICENSE`)
+- [mermaid](https://github.com/mermaid-js/mermaid)
+- [KaTeX](https://github.com/KaTeX/KaTeX), fonts included

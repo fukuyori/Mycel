@@ -854,7 +854,7 @@ void NodeItem::createPreviewWidget()
 
     if (windowIsRichMarkdownPreview(info)) {
         delete textEdit;
-        return;  // Mermaid / TeX / Alert / ruby Markdown is drawn as an image by paintPreviewFrame
+        return;  // Mermaid / TeX Markdown is drawn as an image by paintPreviewFrame
     }
 
     QFont previewFont;
@@ -862,8 +862,9 @@ void NodeItem::createPreviewWidget()
         previewFont.setPointSize(10);
         textEdit->setFont(previewFont);
         const QString markdown = windowMarkdownPreviewText();
-        textEdit->setMarkdown(mycel::markdownWithHardLineBreaks(markdown));  // newline = line break
-        mycel::mergeHardLineBreaks(textEdit->document());
+        // Newline = line break, plus Aozora ruby and GitHub Alerts in their text rendition.
+        textEdit->setMarkdown(mycel::prepareMarkdownSource(markdown));
+        mycel::finishMarkdownDocument(textEdit->document(), currentAppTheme() == AppTheme::Dark);
         if (textEdit->toPlainText().trimmed().isEmpty() && !markdown.trimmed().isEmpty()) {
             textEdit->setPlainText(markdown);
         }

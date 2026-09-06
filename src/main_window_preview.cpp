@@ -437,21 +437,22 @@ void MainWindow::loadSidePreviewFile(const QString& path)
         if (isMarkdownPreviewFile(info)) {
             const QString body = filterPreviewMetadataLines(text);
 #if MYCEL_HAS_WEBENGINE
-            // Mermaid diagrams, TeX math, GitHub Alerts and Aozora ruby need the extended renderer
-            // (mermaid.js / KaTeX / <ruby>), which only runs in the QtWebEngine view. Plain Markdown
-            // keeps using the lighter QTextEdit renderer.
+            // Mermaid diagrams and TeX math need the bundled mermaid.js / KaTeX, which only run in
+            // the QtWebEngine view. Plain Markdown (including Alerts and ruby, which both renderers
+            // support) keeps using the lighter QTextEdit renderer.
             if (markdownNeedsRichRendering(body)) {
                 QWebEngineView* web = ensureHtmlPreviewView();
                 web->setHtml(markdownToRichHtml(body), QUrl(QStringLiteral("qrc:/web/")));
                 applyHtmlPreviewZoom();
                 sidePreviewStack_->setCurrentWidget(web);
-                setSidePaneMode(false, QStringLiteral("Markdown プレビュー（拡張）"));
-                sideEditorStatusLabel_->setText(QStringLiteral("Markdown プレビュー（拡張）"));
+                setSidePaneMode(false, QStringLiteral("Markdown プレビュー（図・数式）"));
+                sideEditorStatusLabel_->setText(QStringLiteral("Markdown プレビュー（図・数式）"));
                 return;
             }
 #endif
-            sidePreviewText_->setMarkdown(mycel::markdownWithHardLineBreaks(body));  // newline = line break
-            mycel::mergeHardLineBreaks(sidePreviewText_->document());
+            // Newline = line break, plus Aozora ruby and GitHub Alerts in their text rendition.
+            sidePreviewText_->setMarkdown(mycel::prepareMarkdownSource(body));
+            mycel::finishMarkdownDocument(sidePreviewText_->document(), currentAppTheme() == AppTheme::Dark);
             setSidePaneMode(false, QStringLiteral("Markdown プレビュー"));
             sideEditorStatusLabel_->setText(QStringLiteral("Markdown プレビュー"));
         } else if (isHtmlPreviewFile(info)) {
@@ -1243,14 +1244,16 @@ QString MainWindow::markdownThumbnailCachePathForFile(const QFileInfo& info) con
         if (!info.exists()) {
             return {};
         }
-        // The key covers the file identity, its content revision and the theme, so an edit or a
-        // light/dark switch produces a fresh image instead of a stale one.
-        const QString key = QStringLiteral("%1|%2|%3|%4|%5")
+        // The key covers the file identity, its content revision, the theme and the renderer
+        // revision, so an edit, a light/dark switch or a change to the HTML/CSS/JS renderer
+        // produces a fresh image instead of a stale one.
+        const QString key = QStringLiteral("%1|%2|%3|%4|%5|r%6")
                                 .arg(info.absoluteFilePath())
                                 .arg(info.lastModified().toMSecsSinceEpoch())
                                 .arg(info.size())
                                 .arg(appThemeToString(currentAppTheme()))
-                                .arg(kMarkdownThumbnailWidth);
+                                .arg(kMarkdownThumbnailWidth)
+                                .arg(kMarkdownRendererRevision);
         const QString hash = QString::fromLatin1(
             QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha256).toHex());
         return QDir(markdownThumbnailCacheDirectoryPath()).filePath(hash + QStringLiteral(".png"));

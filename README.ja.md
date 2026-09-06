@@ -2,7 +2,7 @@
 
 Mycelは、システム上のフォルダとファイルをデータソースとして利用するマインドマップツールです。既存のファイルを独自形式へ変換せず、そのままノードとして扱うため、他のアプリケーションからも従来どおり利用できます。さらに、ファイル同士の関連付けやスクリプト実行を組み合わせた、パイプラインツールとしての活用も検討しています。
 
-- 現在のバージョン: 0.9.6
+- 現在のバージョン: 0.10.0
 - 変更履歴: [CHANGELOG.md](CHANGELOG.md)
 - ドキュメント索引: [docs/README.ja.md](docs/README.ja.md)
 - 開発予定: [docs/development-plan.ja.md](docs/development-plan.ja.md)
@@ -66,8 +66,8 @@ Mycelは、システム上のフォルダとファイルをデータソースと
 - テキスト、HTML、Markdown、CSV、画像、動画のプレビューペイン表示
 - PDF の1ページ目・EPUB のカバーをサムネイル表示（`.mycel/thumbnails` にキャッシュ、プレビューを開いた時に生成）
 - テキストと Markdown のインラインプレビュー（最大 200 行まで表示し、枠を高くすると続きが見える）
-- Markdown プレビューでの Mermaid 図（```mermaid フェンス）と TeX 数式（`$…$` / `$$…$$` / `\(…\)` / `\[…\]`）の描画。mermaid.js と KaTeX を同梱しているため、外部通信なしでオフライン動作する。プレビューペインでは直接描画し、インラインのカードでは `.mycel/md-thumbnails` にキャッシュした画像を表示（ファイル更新・テーマ切り替えで自動再生成）
-- Markdown プレビューでの GitHub Alerts（`> [!NOTE]` / `[!TIP]` / `[!IMPORTANT]` / `[!WARNING]` / `[!CAUTION]`）と青空文庫形式のルビ（`漢字《かんじ》` / `｜対象文字列《よみ》`、区切りは全角・半角どちらでも可）の描画。インラインコードとコードブロック内は変換しない
+- Markdown プレビューでの Mermaid 図（```mermaid フェンス）と TeX 数式（`$…$` / `$$…$$` / `\(…\)` / `\[…\]`）の描画。markdown-it・mermaid.js・KaTeX を同梱しているため、外部通信なしでオフライン動作する。プレビューペインでは直接描画し、インラインのカードでは `.mycel/md-thumbnails` にキャッシュした画像を表示（ファイル更新・テーマ切り替えで自動再生成）
+- Markdown プレビューでの GitHub Alerts（`> [!NOTE]` / `[!TIP]` / `[!IMPORTANT]` / `[!WARNING]` / `[!CAUTION]`）と青空文庫形式のルビ（`漢字《かんじ》` / `｜対象文字列《よみ》`、区切りは全角・半角どちらでも可）の描画。通常の Markdown プレビューではルビを親文字直後の小さな上付き文字として表示し、Mermaid / 数式を含むファイルでは HTML の `<ruby>` として描画する。インラインコードとコードブロック内は変換しない
 - Markdown 本文の改行は「行の折り返し」として表示（空行が段落区切り）。新規ファイル（`N`）の既定拡張子は `.md`
 - テキストなどの通常プレビュー枠は右下グリップのドラッグで幅・高さを同時に自由変更可能（画像・PDF・EPUB は縦横比を維持）
 - プレビュー内テキストの選択とコピー
@@ -310,6 +310,25 @@ cmake -S . -B build
 cmake --build build
 ```
 
+### テスト
+
+GUI を使わないコア部分のユニットテストを CTest で実行できます。
+
+```sh
+ctest --test-dir build --output-on-failure
+```
+
+| テスト | 内容 |
+| --- | --- |
+| `fileops` | ファイル移動・コピー・同名衝突リネーム |
+| `search_controller` | 検索コントローラー |
+| `file_name_order` | ファイル名の自然順ソート |
+| `markdown_line_breaks` | Markdown の改行（行の折り返し）前処理と取り込み結果 |
+| `markdown_document` | 通常プレビューでの青空文庫ルビと GitHub Alerts |
+| `markdown_renderer` | Web プレビュー（markdown-it）のレンダラー。`node` が見つかった場合のみ登録される |
+
+Markdown 拡張記法の仕様は [docs/markdown-extensions.ja.md](docs/markdown-extensions.ja.md) を参照してください。
+
 ### ビルドスクリプトのオプション
 
 macOS/Linux スクリプトは以下の環境変数を参照します。
@@ -419,3 +438,9 @@ GitHub Actions 用の workflow を `.github/workflows/build.yml` に追加して
 ## ライセンス
 
 Mycel は Apache License, Version 2.0 のもとでライセンスされています。詳細は [LICENSE](LICENSE) を参照してください。
+
+Markdown プレビュー用に次のライブラリを `assets/web/` に同梱しています（いずれも MIT ライセンス）。
+
+- [markdown-it](https://github.com/markdown-it/markdown-it) 14.1.0（`assets/web/markdown-it.LICENSE`）
+- [mermaid](https://github.com/mermaid-js/mermaid)
+- [KaTeX](https://github.com/KaTeX/KaTeX)（フォントを含む）

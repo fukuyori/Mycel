@@ -488,6 +488,9 @@ public:
     // Inline Markdown (Mermaid/TeX) thumbnails: render width and a height ceiling, in CSS px.
     static constexpr int kMarkdownThumbnailWidth = 460;
     static constexpr int kMarkdownThumbnailMaxHeight = 900;
+    // Bump whenever markdownToRichHtml() changes its output (CSS, JS renderer, libraries), so
+    // cached card images are regenerated even though the source files are untouched.
+    static constexpr int kMarkdownRendererRevision = 3;
 
     QString thumbnailCachePathFor(const QFileInfo& info) const;
 
@@ -848,8 +851,8 @@ public:
     QString urlThumbnailCachePathForUrl(const QUrl& url) const;
 
 
-    // Inline previews of Markdown containing Mermaid diagrams, TeX math, GitHub Alerts or Aozora ruby
-    // are rendered to an image (offscreen web page), cached under .mycel/md-thumbnails.
+    // Inline previews of Markdown containing Mermaid diagrams or TeX math are rendered to an image
+    // (mermaid.js / KaTeX in an offscreen web page), cached under .mycel/md-thumbnails.
     QString markdownThumbnailCacheDirectoryPath() const;
 
 

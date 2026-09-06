@@ -99,6 +99,12 @@ int main(int argc, char** argv)
     ok &= check("table", "| a | b |\n|---|---|\n| 1 | 2 |\nafter", "| a | b |\n|---|---|\n| 1 | 2 |\nafter");
     ok &= check("text before table", "t\n| a |\n|---|", "t\n| a |\n|---|");
     ok &= check("html block", "<div>\na\n</div>", "<div>\na\n</div>");
+    ok &= check("setext h1", "Title\n===\nbody", "Title\n===\nbody");
+    ok &= check("setext h2", "Title\n---\nbody", "Title\n---\nbody");
+    ok &= check("link definitions", "[a]: http://a\n[b]: http://b\ntext", "[a]: http://a\n[b]: http://b\ntext");
+    ok &= check("text before link definition", "t\n[a]: http://a", "t⏎\n[a]: http://a");
+    ok &= checkDocument("doc: setext heading", "Title\n===\nbody", QStringLiteral("Title | body"));
+    ok &= checkDocument("doc: reference link", "[a]: http://a\n[x][a]\nb", QStringLiteral("x<LS>b"));
     ok &= check("japanese", "吾輩は猫である。\n名前はまだ無い。", "吾輩は猫である。⏎\n名前はまだ無い。");
 
     // 2) The imported document: broken lines share one block (joined by a line separator, no

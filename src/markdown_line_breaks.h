@@ -116,6 +116,20 @@ inline bool isHtmlBlockStart(const QString& s)
     return html.match(s).hasMatch();
 }
 
+// "Title" followed by "===" is a setext H1 (the "---" form is caught by isThematicBreak).
+inline bool isSetextUnderline(const QString& s)
+{
+    static const QRegularExpression underline(QStringLiteral("^ {0,3}=+\\s*$"));
+    return underline.match(s).hasMatch();
+}
+
+// "[label]: destination" — a break marker would become part of the destination.
+inline bool isLinkReferenceDefinition(const QString& s)
+{
+    static const QRegularExpression definition(QStringLiteral("^ {0,3}\\[[^\\]]+\\]:\\s*\\S"));
+    return definition.match(s).hasMatch();
+}
+
 inline bool endsWithHardBreak(const QString& s)
 {
     return s.endsWith(QLatin1Char('\\')) || s.endsWith(QStringLiteral("  "));
@@ -198,8 +212,8 @@ inline QString markdownWithHardLineBreaks(const QString& markdown)
             isTableSeparator(content.at(i + 1))) {
             inTable = true;
         }
-        if (inTable || isHeading(body) || isThematicBreak(body) || isHtmlBlockStart(body) ||
-            endsWithHardBreak(body)) {
+        if (inTable || isHeading(body) || isThematicBreak(body) || isSetextUnderline(body) ||
+            isHtmlBlockStart(body) || isLinkReferenceDefinition(body) || endsWithHardBreak(body)) {
             out.append(line);
             continue;
         }
@@ -210,8 +224,8 @@ inline QString markdownWithHardLineBreaks(const QString& markdown)
         if (joinable) {
             const QString& next = content.at(i + 1);
             joinable = !isBlank(next) && !isFenceLine(next) && !isHeading(next) &&
-                       !isThematicBreak(next) && !isListItem(next) && !isHtmlBlockStart(next) &&
-                       quoteDepth.at(i + 1) <= quoteDepth.at(i) &&
+                       !isThematicBreak(next) && !isSetextUnderline(next) && !isListItem(next) &&
+                       !isHtmlBlockStart(next) && quoteDepth.at(i + 1) <= quoteDepth.at(i) &&
                        !(next.contains(QLatin1Char('|')) && i + 2 < count &&
                          isTableSeparator(content.at(i + 2)));
         }
