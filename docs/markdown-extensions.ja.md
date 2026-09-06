@@ -1,6 +1,6 @@
 # Markdown 拡張仕様（実装済み）
 
-Mycel の Markdown プレビュー（プレビューペインとファイル名下のインラインカード）が解釈する記法のうち、CommonMark / GitHub Flavored Markdown に含まれない拡張をまとめます。0.10.0 時点の実装に基づきます。
+Mycel の Markdown プレビュー（プレビューペインとファイル名下のインラインカード）が解釈する記法のうち、CommonMark / GitHub Flavored Markdown に含まれない拡張をまとめます。0.10.1 時点の実装に基づきます。
 
 ## 1. 描画経路
 
@@ -84,7 +84,7 @@ Alert とルビの有無は経路の選択に影響しません。長い文書�
 ### 表示
 
 - 拡張経路: HTML5 の `<ruby>青梅<rp>（</rp><rt>おうめ</rt><rp>）</rp></ruby>`。読みが親文字の上に表示されます。
-- 通常経路: Qt の文書は親文字の上に読みを重ねられないため、読みを親文字直後の小さな上付き文字として表示します。内部的には Unicode の行間注釈文字（U+FFF9 / U+FFFA / U+FFFB）で取り込み、取り込み後に書式を付けます。
+- 通常経路: Qt の文書にはルビが無いため、独自のインラインオブジェクト（`src/ruby_text_object.cpp` の `RubyTextObject`）を登録し、親文字の上に半分の大きさで読みを描画します。行の高さは読みの分だけ広がります。内部的には Unicode の行間注釈文字（U+FFF9 / U+FFFA / U+FFFB）で取り込み、取り込み後にオブジェクトへ置き換えます。オブジェクトは 1 文字（U+FFFC）として扱われるため、プレビューからコピーした文字列にはルビ部分の文字は含まれません。
 
 ### 注意
 
@@ -129,7 +129,7 @@ Markdown 入力
   ↓ 段落内の行末へハード改行を付与
   ↓ QTextDocument::setMarkdown()
   ↓ ハード改行のブロックを結合（行区切りへ）
-  ↓ 注釈文字 → 上付き読み
+  ↓ 注釈文字 → ルビオブジェクト（読みを上に描画）
   ↓ Alert のタイトル・背景色
 ```
 
@@ -138,7 +138,7 @@ Markdown 入力
 | テスト | 内容 |
 | --- | --- |
 | `tests/markdown_line_breaks_test.cpp` | 改行印の挿入位置と、取り込み後のブロック構成 |
-| `tests/markdown_document_test.cpp` | 通常経路のルビ変換と Alert の書式 |
+| `tests/markdown_document_test.cpp` | 通常経路のルビ変換（オブジェクト化と寸法）と Alert の書式 |
 | `tests/markdown_renderer_test.js` | 拡張経路のページ内スクリプトを Node で実行し HTML を検証（`node` がある場合に CTest から実行） |
 
 ## 8. 同梱ライブラリ

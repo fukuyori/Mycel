@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(Mycel VERSION 0.10.0 LANGUAGES CXX)
+project(Mycel VERSION 0.10.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -40,6 +40,7 @@ add_executable(mycel
     src/main_window_preview.cpp
     src/main_window_board.cpp
     src/main_window_search.cpp
+    src/ruby_text_object.cpp
     assets/mycel.qrc
 )
 
@@ -135,8 +136,9 @@ if(TARGET Qt6::Core)
         target_link_libraries(mycel_markdown_line_breaks_test PRIVATE Qt6::Core Qt6::Gui)
         add_test(NAME markdown_line_breaks COMMAND mycel_markdown_line_breaks_test)
 
-        add_executable(mycel_markdown_document_test tests/markdown_document_test.cpp)
-        set_target_properties(mycel_markdown_document_test PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+        # RubyTextObject is a QObject (custom inline text object), so this test keeps AUTOMOC on.
+        add_executable(mycel_markdown_document_test tests/markdown_document_test.cpp src/ruby_text_object.cpp)
+        set_target_properties(mycel_markdown_document_test PROPERTIES AUTOMOC ON AUTOUIC OFF AUTORCC OFF)
         target_include_directories(mycel_markdown_document_test PRIVATE src)
         target_link_libraries(mycel_markdown_document_test PRIVATE Qt6::Core Qt6::Gui)
         add_test(NAME markdown_document COMMAND mycel_markdown_document_test)

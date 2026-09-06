@@ -14,7 +14,7 @@
 | [board-mode-plan.ja.md](board-mode-plan.ja.md) | 設計メモ（実装済み） | ツリーとは別の「ボードモード」：フォルダを除く全ファイルをカードとして自由配置し、複数パターンを `.mycel/boards/<名前>.json` に保存。初期配置は行=フォルダ、非表示/呼び出し方式（実削除なし）、Undo/Redo 統合。 |
 | [keyboard-shortcut-ideas.ja.md](keyboard-shortcut-ideas.ja.md) | 確定仕様（実装済み） | コンテキストメニュー専用操作（横リンク移動・関連解除・色設定など）へのキーボードショートカット拡充と、Enter/Space/Shift+N の再編の確定仕様。 |
 | [external-root-link-plan.ja.md](external-root-link-plan.ja.md) | 設計（0.8.1 で実装済み） | 親フォルダ外にある子ルートを扉ノードとしてリンクする「外部ルートリンク」の設計。リンクの作成・解除操作、スキャン境界（アクティブルート内で完結）を含む。 |
-| [markdown-extensions.ja.md](markdown-extensions.ja.md) | 仕様（0.10.0 で実装済み） | Markdown プレビューの拡張記法：改行の折り返し、GitHub Alerts、青空文庫ルビ、Mermaid / TeX 数式。2 つの描画経路の違い、処理順序、テスト、同梱ライブラリ。 |
+| [markdown-extensions.ja.md](markdown-extensions.ja.md) | 仕様（0.10.1 で実装済み） | Markdown プレビューの拡張記法：改行の折り返し、GitHub Alerts、青空文庫ルビ、Mermaid / TeX 数式。2 つの描画経路の違い、処理順序、テスト、同梱ライブラリ。 |
 | [version-update-checklist.md](version-update-checklist.md) | 手順 | バージョン番号を変更するときに更新するファイル（`CMakeLists.txt`・README・CHANGELOG）と確認事項の一覧。 |
 
 ## 2 つの設計ドキュメントの関係

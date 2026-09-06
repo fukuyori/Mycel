@@ -2,7 +2,7 @@
 
 Mycel is a mind-map tool that uses the folders and files on your system as its data source. It treats existing files as nodes without converting them to a proprietary format, so they remain available to other applications as usual. We are also exploring its use as a pipeline tool by combining links between files with script execution.
 
-- Current version: 0.10.0
+- Current version: 0.10.1
 - Release history: [CHANGELOG.md](CHANGELOG.md)
 - Documentation index: [docs/README.ja.md](docs/README.ja.md)
 - Development plan: [docs/development-plan.ja.md](docs/development-plan.ja.md)
@@ -67,7 +67,7 @@ Mycel is a mind-map tool that uses the folders and files on your system as its d
 - Thumbnail previews of the first page of PDFs and the cover of EPUBs, cached under `.mycel/thumbnails` and generated when the preview is opened
 - Inline previews for text and Markdown files, showing up to 200 lines so a taller frame reveals more text
 - Mermaid diagrams (```mermaid fences) and TeX math (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`) are rendered in Markdown previews. markdown-it, mermaid.js and KaTeX ship inside the binary, so rendering works offline with no network access. The preview pane draws them live; inline cards show a cached image under `.mycel/md-thumbnails` that is regenerated when the file or the theme changes
-- GitHub Alerts (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`) and Aozora Bunko ruby (`漢字《かんじ》`, `｜base《reading》`; the bar may be full- or half-width) are rendered in Markdown previews. Plain previews show the reading as small superscript text after the base; files with Mermaid/TeX use HTML `<ruby>`. Text inside inline code and code blocks is left untouched
+- GitHub Alerts (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`) and Aozora Bunko ruby (`漢字《かんじ》`, `｜base《reading》`; the bar may be full- or half-width) are rendered in Markdown previews. The reading is drawn above the base in both preview paths (a custom inline object in the plain preview, HTML `<ruby>` for files with Mermaid/TeX). Text inside inline code and code blocks is left untouched
 - A newline in Markdown text is shown as a line break (a blank line still starts a new paragraph). New files created with `N` default to `.md`
 - Text and other plain preview frames can be freely resized on both axes by dragging the lower-right corner; image, PDF, and EPUB frames keep their source aspect ratio
 - Select and copy text inside previews

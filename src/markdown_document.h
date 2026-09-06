@@ -7,8 +7,8 @@
 // - GitHub Alerts ("> [!NOTE]" ...): the [!TYPE] line becomes a bold, accent-coloured title and
 //   the whole quote gets a tinted background. QTextDocument has no <aside>, so this is the closest
 //   equivalent of GitHub's box.
-// - Aozora Bunko ruby (漢字《かんじ》 / ｜文字列《よみ》): QTextDocument cannot stack a reading over
-//   its base, so the reading follows the base as small superscript text (青梅ᵒᵘᵐᵉ-style). Inline
+// - Aozora Bunko ruby (漢字《かんじ》 / ｜文字列《よみ》): drawn as an inline object (RubyTextObject)
+//   that paints the reading above the base, since Qt's rich text has no ruby of its own. Inline
 //   code and fenced code keep the source verbatim, like the web renderer.
 //
 // The ruby is carried through Qt's Markdown importer with the Unicode interlinear annotation
@@ -16,6 +16,7 @@
 // this and are invisible should one ever survive.
 
 #include "markdown_line_breaks.h"
+#include "ruby_text_object.h"
 
 #include <QtCore/QRegularExpression>
 #include <QtCore/QString>
@@ -209,12 +210,15 @@ inline QString prepareMarkdownSource(const QString& markdown)
     return markdownWithHardLineBreaks(out.join(QLatin1Char('\n')));
 }
 
-// Turns the annotation characters left by prepareMarkdownSource() into small superscript readings.
+// Turns the annotation characters left by prepareMarkdownSource() into ruby objects: each
+// "anchor base separator reading terminator" run becomes one inline RubyTextObject that draws
+// the reading above the base. The object inherits the font and colour of the base text.
 inline void styleRubyAnnotations(QTextDocument* doc)
 {
     if (!doc) {
         return;
     }
+    RubyTextObject::ensureRegistered(doc);
     QTextCursor cursor(doc);
     cursor.beginEditBlock();
     for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
@@ -226,25 +230,20 @@ inline void styleRubyAnnotations(QTextDocument* doc)
             }
             const int separator = text.indexOf(QChar(kRubySeparator), anchor + 1);
             const int terminator = separator < 0 ? -1 : text.indexOf(QChar(kRubyTerminator), separator + 1);
-            const int base = block.position();
+            const int position = block.position();
             if (separator < 0 || terminator < 0) {
-                cursor.setPosition(base + anchor);
+                cursor.setPosition(position + anchor);
                 cursor.deleteChar();  // stray anchor: drop it and keep the text
                 continue;
             }
-            // Delete from the end so earlier offsets stay valid.
-            cursor.setPosition(base + terminator);
-            cursor.deleteChar();
-            cursor.setPosition(base + separator + 1);
-            cursor.setPosition(base + terminator, QTextCursor::KeepAnchor);
-            QTextCharFormat reading;
-            reading.setVerticalAlignment(QTextCharFormat::AlignSuperScript);
-            reading.setProperty(QTextFormat::FontSizeAdjustment, -1);  // one step smaller again
-            cursor.mergeCharFormat(reading);
-            cursor.setPosition(base + separator);
-            cursor.deleteChar();
-            cursor.setPosition(base + anchor);
-            cursor.deleteChar();
+            const QString baseText = text.mid(anchor + 1, separator - anchor - 1);
+            const QString reading = text.mid(separator + 1, terminator - separator - 1);
+            cursor.setPosition(position + anchor + 1);
+            const QTextCharFormat inherited = cursor.charFormat();  // format of the base text
+            cursor.setPosition(position + anchor);
+            cursor.setPosition(position + terminator + 1, QTextCursor::KeepAnchor);
+            cursor.insertText(QString(QChar(QChar::ObjectReplacementCharacter)),
+                              RubyTextObject::makeFormat(inherited, baseText, reading));
         }
     }
     cursor.endEditBlock();

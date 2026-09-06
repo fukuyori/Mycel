@@ -1,8 +1,11 @@
 #include "markdown_document.h"
 
+#include <QtGui/QAbstractTextDocumentLayout>
+#include <QtGui/QFontMetricsF>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QTextBlock>
 #include <QtGui/QTextDocument>
+#include <QtGui/QTextObjectInterface>
 
 #include <iostream>
 
@@ -37,8 +40,8 @@ bool checkRuby(const char* label, const char* input, const char* expected)
                        QString::fromUtf8(expected), label);
 }
 
-// Per-block description of a loaded document: [quote]/[bg] flags, text, and the ranges that carry
-// the superscript ruby format as {reading}.
+// Per-block description of a loaded document: [quote]/[bg] flags, text, ruby objects as
+// {base|reading}, and bold runs as <b>…</b>.
 QString describe(const QTextDocument& doc)
 {
     QStringList parts;
@@ -50,25 +53,25 @@ QString describe(const QTextDocument& doc)
         if (b.blockFormat().background().style() != Qt::NoBrush) {
             s += QStringLiteral("[bg]");
         }
-        bool inRuby = false;
         bool bold = false;
         for (QTextBlock::iterator it = b.begin(); !it.atEnd(); ++it) {
             const QTextFragment f = it.fragment();
-            const bool superscript =
-                f.charFormat().verticalAlignment() == QTextCharFormat::AlignSuperScript;
-            if (superscript != inRuby) {
-                s += superscript ? QStringLiteral("{") : QStringLiteral("}");
-                inRuby = superscript;
-            }
-            const bool isBold = f.charFormat().fontWeight() >= QFont::Bold;
+            const QTextCharFormat format = f.charFormat();
+            const bool isBold = format.fontWeight() >= QFont::Bold;
             if (isBold != bold) {
                 s += isBold ? QStringLiteral("<b>") : QStringLiteral("</b>");
                 bold = isBold;
             }
+            if (format.objectType() == mycel::RubyTextObject::kObjectType) {
+                // One fragment per object character.
+                for (int i = 0; i < f.length(); ++i) {
+                    s += QStringLiteral("{%1|%2}")
+                             .arg(format.stringProperty(mycel::RubyTextObject::BaseText),
+                                  format.stringProperty(mycel::RubyTextObject::ReadingText));
+                }
+                continue;
+            }
             s += f.text();
-        }
-        if (inRuby) {
-            s += QStringLiteral("}");
         }
         if (bold) {
             s += QStringLiteral("</b>");
@@ -76,6 +79,30 @@ QString describe(const QTextDocument& doc)
         parts << visible(s);
     }
     return parts.join(QStringLiteral(" | "));
+}
+
+// The ruby object must be registered on the layout and be taller than the base text alone, so
+// the reading gets its own room above the line.
+bool checkRubyGeometry()
+{
+    QTextDocument doc;
+    mycel::loadMarkdown(&doc, QStringLiteral("青梅《おうめ》"), false);
+    QTextObjectInterface* handler = doc.documentLayout()->handlerForObject(mycel::RubyTextObject::kObjectType);
+    if (!handler) {
+        std::cerr << "ruby geometry failed: no handler registered\n";
+        return false;
+    }
+    const QTextFragment fragment = doc.begin().begin().fragment();
+    const QSizeF size = handler->intrinsicSize(&doc, fragment.position(), fragment.charFormat());
+    const QFontMetricsF metrics(doc.defaultFont());
+    const bool tallEnough = size.height() >= metrics.ascent();
+    const bool wideEnough = size.width() >= metrics.horizontalAdvance(QStringLiteral("青梅")) - 0.5;
+    if (!tallEnough || !wideEnough) {
+        std::cerr << "ruby geometry failed: size " << size.width() << "x" << size.height()
+                  << " for ascent " << metrics.ascent() << '\n';
+        return false;
+    }
+    return true;
 }
 
 bool checkDocument(const char* label, const char* markdown, const char* expected)
@@ -115,12 +142,16 @@ int main(int argc, char** argv)
                     "コード `青梅《おうめ》` と <A>青梅<S>おうめ<T>");
 
     // 2) Whole documents through Qt's importer.
-    ok &= checkDocument("doc: ruby superscript", "青梅《おうめ》は地名", "青梅{おうめ}は地名");
+    ok &= checkDocument("doc: ruby object", "青梅《おうめ》は地名", "{青梅|おうめ}は地名");
     ok &= checkDocument("doc: ruby with line break", "青梅《おうめ》\n次の行",
-                        "青梅{おうめ}<LS>次の行");
+                        "{青梅|おうめ}<LS>次の行");
+    ok &= checkDocument("doc: ruby in bold", "**太字《ふとじ》**", "<b>{太字|ふとじ}</b>");
+    ok &= checkDocument("doc: two rubies", "一応《いちおう》何時《いつ》もの",
+                        "{一応|いちおう}{何時|いつ}もの");
     ok &= checkDocument("doc: ruby in fence kept", "```\n青梅《おうめ》\n```", "青梅《おうめ》");
+    ok &= checkRubyGeometry();
     ok &= checkDocument("doc: alert", "> [!NOTE]\n> 青梅《おうめ》は地名\n> 二行目",
-                        "[quote][bg]<b>Note</b> | [quote][bg]青梅{おうめ}は地名<LS>二行目");
+                        "[quote][bg]<b>Note</b> | [quote][bg]{青梅|おうめ}は地名<LS>二行目");
     ok &= checkDocument("doc: alert paragraphs then text",
                         "> [!WARNING]\n> 一つ目\n>\n> 二つ目\n\n本文",
                         "[quote][bg]<b>Warning</b> | [quote][bg]一つ目 | [quote][bg]二つ目 | 本文");
