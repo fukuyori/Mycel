@@ -403,8 +403,8 @@ private:
     QString windowMarkdownPreviewText() const;
     bool windowIsDocumentThumbnail(const QFileInfo& info) const;
     QPixmap windowDocumentThumbnail(const QFileInfo& info) const;
-    // Markdown with Mermaid diagrams / TeX math: the card shows a rendered image instead of the
-    // Markdown source, because QTextEdit cannot draw diagrams or formulas.
+    // Markdown with Mermaid diagrams / TeX math / GitHub Alerts / Aozora ruby: the card shows a
+    // rendered image instead of the Markdown source, because QTextEdit cannot draw those.
     bool windowIsRichMarkdownPreview(const QFileInfo& info) const;
     QPixmap windowMarkdownThumbnail(const QFileInfo& info) const;
     void updateDragAtScene(const QPointF& scenePos);
@@ -570,7 +570,7 @@ private:
         } else if (windowIsDocumentThumbnail(info)) {
             previewPixmap = windowDocumentThumbnail(info);  // PDF first-page thumbnail
         } else if (windowIsRichMarkdownPreview(info)) {
-            previewPixmap = windowMarkdownThumbnail(info);  // Mermaid / TeX rendered image
+            previewPixmap = windowMarkdownThumbnail(info);  // Mermaid / TeX / Alert / ruby image
             if (previewPixmap.isNull()) {
                 // Still rendering (or unavailable): tell the user instead of leaving a blank card.
                 QFont waitFont = painter->font();
@@ -578,7 +578,7 @@ private:
                 waitFont.setBold(false);
                 painter->setFont(waitFont);
                 painter->setPen(colors.inlinePreviewText);
-                painter->drawText(body, Qt::AlignCenter, QStringLiteral("図・数式を描画中…"));
+                painter->drawText(body, Qt::AlignCenter, QStringLiteral("描画中…"));
             }
         }
         if (!previewPixmap.isNull()) {

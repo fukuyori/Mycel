@@ -2,7 +2,7 @@
 
 Mycel is a mind-map tool that uses the folders and files on your system as its data source. It treats existing files as nodes without converting them to a proprietary format, so they remain available to other applications as usual. We are also exploring its use as a pipeline tool by combining links between files with script execution.
 
-- Current version: 0.9.5
+- Current version: 0.9.6
 - Release history: [CHANGELOG.md](CHANGELOG.md)
 - Documentation index: [docs/README.ja.md](docs/README.ja.md)
 - Development plan: [docs/development-plan.ja.md](docs/development-plan.ja.md)
@@ -45,7 +45,7 @@ Mycel is a mind-map tool that uses the folders and files on your system as its d
 
 ### File Operations
 
-- Create `NewFile.txt` / `NewFolder` from the canvas
+- Create `NewFile.md` / `NewFolder` from the canvas
 - Move items between folders by drag and drop
 - Move several selected items together in a single drag
 - Copy OS files and folders by dropping them onto folder nodes
@@ -67,6 +67,8 @@ Mycel is a mind-map tool that uses the folders and files on your system as its d
 - Thumbnail previews of the first page of PDFs and the cover of EPUBs, cached under `.mycel/thumbnails` and generated when the preview is opened
 - Inline previews for text and Markdown files, showing up to 200 lines so a taller frame reveals more text
 - Mermaid diagrams (```mermaid fences) and TeX math (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`) are rendered in Markdown previews. mermaid.js and KaTeX ship inside the binary, so rendering works offline with no network access. The preview pane draws them live; inline cards show a cached image under `.mycel/md-thumbnails` that is regenerated when the file or the theme changes
+- GitHub Alerts (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`) and Aozora Bunko ruby (`漢字《かんじ》`, `｜base《reading》`; the bar may be full- or half-width) are rendered in Markdown previews. Text inside inline code and code blocks is left untouched
+- A newline in Markdown text is shown as a line break (a blank line still starts a new paragraph). New files created with `N` default to `.md`
 - Text and other plain preview frames can be freely resized on both axes by dragging the lower-right corner; image, PDF, and EPUB frames keep their source aspect ratio
 - Select and copy text inside previews
 - Lightweight preview frames for images, PDFs, and other files
@@ -191,7 +193,7 @@ On macOS, two-finger trackpad slide pans the canvas while trackpad pinch remains
 | Operation | Action |
 | --- | --- |
 | Double-click a folder | Collapse or expand that folder |
-| N | Create `NewFile.txt` in the selected folder or selected file's folder |
+| N | Create `NewFile.md` in the selected folder or selected file's folder |
 | Shift + N | Create `NewFolder` in the selected folder or selected file's folder |
 | Double-click a file | Show or hide its preview |
 | Drag a file or folder node | Reorder it inside the same folder |

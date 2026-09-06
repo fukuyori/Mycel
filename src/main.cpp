@@ -854,7 +854,7 @@ void NodeItem::createPreviewWidget()
 
     if (windowIsRichMarkdownPreview(info)) {
         delete textEdit;
-        return;  // Mermaid / TeX Markdown is drawn as an image by paintPreviewFrame
+        return;  // Mermaid / TeX / Alert / ruby Markdown is drawn as an image by paintPreviewFrame
     }
 
     QFont previewFont;
@@ -862,7 +862,8 @@ void NodeItem::createPreviewWidget()
         previewFont.setPointSize(10);
         textEdit->setFont(previewFont);
         const QString markdown = windowMarkdownPreviewText();
-        textEdit->setMarkdown(markdown);
+        textEdit->setMarkdown(mycel::markdownWithHardLineBreaks(markdown));  // newline = line break
+        mycel::mergeHardLineBreaks(textEdit->document());
         if (textEdit->toPlainText().trimmed().isEmpty() && !markdown.trimmed().isEmpty()) {
             textEdit->setPlainText(markdown);
         }

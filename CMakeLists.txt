@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(Mycel VERSION 0.9.5 LANGUAGES CXX)
+project(Mycel VERSION 0.9.6 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -126,6 +126,15 @@ if(TARGET Qt6::Core)
     target_include_directories(mycel_file_name_order_test PRIVATE src)
     target_link_libraries(mycel_file_name_order_test PRIVATE Qt6::Core)
     add_test(NAME file_name_order COMMAND mycel_file_name_order_test)
+
+    find_package(Qt6 QUIET COMPONENTS Gui)
+    if(TARGET Qt6::Gui)
+        add_executable(mycel_markdown_line_breaks_test tests/markdown_line_breaks_test.cpp)
+        set_target_properties(mycel_markdown_line_breaks_test PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+        target_include_directories(mycel_markdown_line_breaks_test PRIVATE src)
+        target_link_libraries(mycel_markdown_line_breaks_test PRIVATE Qt6::Core Qt6::Gui)
+        add_test(NAME markdown_line_breaks COMMAND mycel_markdown_line_breaks_test)
+    endif()
 endif()
 
 # Packaging (Linux .deb). Run with: scripts/package-linux.sh

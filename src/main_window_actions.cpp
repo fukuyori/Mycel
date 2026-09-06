@@ -9,10 +9,10 @@ QString MainWindow::createFileInDirectory(const QString& dirPath, const QString&
             return QString();
         }
         QDir dir(dirInfo.absoluteFilePath());
-        QString name = QStringLiteral("NewFile.txt");
+        QString name = QStringLiteral("NewFile.md");
         QString path = dir.filePath(name);
         for (int number = 2; QFileInfo::exists(path); ++number) {
-            name = QStringLiteral("NewFile %1.txt").arg(number);
+            name = QStringLiteral("NewFile %1.md").arg(number);
             path = dir.filePath(name);
         }
         const MetadataSnapshot historyBefore = captureMetadataSnapshot();

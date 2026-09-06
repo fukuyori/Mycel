@@ -437,19 +437,21 @@ void MainWindow::loadSidePreviewFile(const QString& path)
         if (isMarkdownPreviewFile(info)) {
             const QString body = filterPreviewMetadataLines(text);
 #if MYCEL_HAS_WEBENGINE
-            // Mermaid diagrams and TeX math need the bundled mermaid.js / KaTeX, which only run in
-            // the QtWebEngine view. Plain Markdown keeps using the lighter QTextEdit renderer.
+            // Mermaid diagrams, TeX math, GitHub Alerts and Aozora ruby need the extended renderer
+            // (mermaid.js / KaTeX / <ruby>), which only runs in the QtWebEngine view. Plain Markdown
+            // keeps using the lighter QTextEdit renderer.
             if (markdownNeedsRichRendering(body)) {
                 QWebEngineView* web = ensureHtmlPreviewView();
                 web->setHtml(markdownToRichHtml(body), QUrl(QStringLiteral("qrc:/web/")));
                 applyHtmlPreviewZoom();
                 sidePreviewStack_->setCurrentWidget(web);
-                setSidePaneMode(false, QStringLiteral("Markdown プレビュー（図・数式）"));
-                sideEditorStatusLabel_->setText(QStringLiteral("Markdown プレビュー（図・数式）"));
+                setSidePaneMode(false, QStringLiteral("Markdown プレビュー（拡張）"));
+                sideEditorStatusLabel_->setText(QStringLiteral("Markdown プレビュー（拡張）"));
                 return;
             }
 #endif
-            sidePreviewText_->setMarkdown(body);
+            sidePreviewText_->setMarkdown(mycel::markdownWithHardLineBreaks(body));  // newline = line break
+            mycel::mergeHardLineBreaks(sidePreviewText_->document());
             setSidePaneMode(false, QStringLiteral("Markdown プレビュー"));
             sideEditorStatusLabel_->setText(QStringLiteral("Markdown プレビュー"));
         } else if (isHtmlPreviewFile(info)) {

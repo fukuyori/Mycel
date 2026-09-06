@@ -175,7 +175,7 @@ public:
     Node* nodeForPath(const QString& path) const;
 
 
-    // Create an empty NewFile.txt (conflict-free name) in dirPath, register it, rebuild, record
+    // Create an empty NewFile.md (conflict-free name) in dirPath, register it, rebuild, record
     // history, and move focus to the new file. Returns the new path (empty on failure).
     QString createFileInDirectory(const QString& dirPath, const QString& afterSiblingPath = QString());
 
@@ -848,8 +848,8 @@ public:
     QString urlThumbnailCachePathForUrl(const QUrl& url) const;
 
 
-    // Inline previews of Markdown containing Mermaid diagrams or TeX math are rendered to an image
-    // (mermaid.js / KaTeX in an offscreen web page), cached under .mycel/md-thumbnails.
+    // Inline previews of Markdown containing Mermaid diagrams, TeX math, GitHub Alerts or Aozora ruby
+    // are rendered to an image (offscreen web page), cached under .mycel/md-thumbnails.
     QString markdownThumbnailCacheDirectoryPath() const;
 
 
