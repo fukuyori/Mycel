@@ -29,9 +29,11 @@ CMAKE_ARGS=(
 )
 
 if [[ -n "${CMAKE_PREFIX_PATH:-}" ]]; then
+    CMAKE_ARGS+=("-UQt6*_DIR")
     CMAKE_ARGS+=(-DCMAKE_PREFIX_PATH="$CMAKE_PREFIX_PATH")
-elif [[ -d "/Users/fuk/Qt/6.11.1/macos" ]]; then
-    CMAKE_ARGS+=(-DCMAKE_PREFIX_PATH="/Users/fuk/Qt/6.11.1/macos")
+elif [[ -d "/Users/fuk/Qt/6.11.2/macos" ]]; then
+    CMAKE_ARGS+=("-UQt6*_DIR")
+    CMAKE_ARGS+=(-DCMAKE_PREFIX_PATH="/Users/fuk/Qt/6.11.2/macos")
 fi
 
 APP_BUNDLE="$BUILD_DIR/Mycel.app"
