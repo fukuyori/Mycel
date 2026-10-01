@@ -2,7 +2,7 @@
 
 Mycel is a mind-map tool that uses the folders and files on your system as its data source. It treats existing files as nodes without converting them to a proprietary format, so they remain available to other applications as usual. We are also exploring its use as a pipeline tool by combining links between files with script execution.
 
-- Current version: 0.10.1
+- Current version: 0.11.0
 - Release history: [CHANGELOG.md](CHANGELOG.md)
 - Documentation index: [docs/README.ja.md](docs/README.ja.md)
 - Development plan: [docs/development-plan.ja.md](docs/development-plan.ja.md)
