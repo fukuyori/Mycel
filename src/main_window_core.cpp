@@ -449,10 +449,7 @@ MainWindow::~MainWindow()
         fileSystemRefreshTimer_.stop();
         sideEditorSaveTimer_.stop();
         viewStateSaveTimer_.stop();
-        if (fileSystemWatcher_) {
-            fileSystemWatcher_->removePaths(fileSystemWatcher_->files());
-            fileSystemWatcher_->removePaths(fileSystemWatcher_->directories());
-        }
+        pauseFileSystemWatcher();  // multi-pass removal, see removeWatchedPaths()
         if (view_) {
             view_->setScene(nullptr);
         }

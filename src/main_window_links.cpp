@@ -66,7 +66,10 @@ void MainWindow::addFileLink(Node* from, Node* to)
 
         FileOperationService::MovedEntry movedEntry;
         if (needsMove) {
-            pauseFileSystemWatcher();
+            if (!pauseFileSystemWatcherForFileOperation()) {
+                rebuild(false);
+                return;
+            }
             const FileOperationService::MoveResult result = FileOperationService::moveInto(
                 {{toPath, to->isDir, false}}, sourceDir);
             recordDebugEvent(QStringLiteral("link move fs result: moved=%1 failed=%2 blocked=%3")

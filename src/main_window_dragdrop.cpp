@@ -159,7 +159,10 @@ void MainWindow::moveNode(Node* source, Node* targetDir)
             }
         }
 
-        pauseFileSystemWatcher();
+        if (!pauseFileSystemWatcherForFileOperation()) {
+            rebuild(false);
+            return;
+        }
         const FileOperationService::MoveResult result = FileOperationService::moveInto(requests, targetDirPath);
         recordDebugEvent(QStringLiteral("move node fs result: moved=%1 failed=%2 blocked=%3 sameDir=%4")
                              .arg(static_cast<int>(result.moved.size()))
@@ -277,7 +280,11 @@ void MainWindow::moveDragItemsToFolder(NodeItem* sourceItem, Node* targetDir)
         const MetadataSnapshot historyBefore = captureMetadataSnapshot();
         const QStringList historySelection = selectedNodePaths();
 
-        pauseFileSystemWatcher();
+        if (!pauseFileSystemWatcherForFileOperation()) {
+            clearDragPreview();
+            rebuild(false);
+            return;
+        }
         const FileOperationService::MoveResult result = FileOperationService::moveInto(requests, targetDirPath);
         recordDebugEvent(QStringLiteral("move drag fs result: moved=%1 failed=%2 blocked=%3 sameDir=%4")
                              .arg(static_cast<int>(result.moved.size()))

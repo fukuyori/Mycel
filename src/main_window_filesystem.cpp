@@ -14,19 +14,78 @@ void MainWindow::applyMovedMetadata(const FileOperationService::MovedEntry& entr
         }
     }
 
-void MainWindow::pauseFileSystemWatcher()
+bool MainWindow::removeWatchedPaths(const QStringList& paths)
+{
+        if (!fileSystemWatcher_ || paths.isEmpty()) {
+            return true;
+        }
+        // Qt's Windows engine spreads watches over several threads once there are more than 64
+        // handles, and its removePaths() then silently skips a directory whose parent's handle
+        // lives in a thread visited earlier (it finds the parent, fails to remove the child from
+        // it, and stops looking). The skipped handle stays open, and an open handle on a
+        // subdirectory makes Windows refuse to move the parent ("Access is denied"). The skipped
+        // paths come back as the return value, so keep removing until nothing is left; each pass
+        // clears the handles that blocked the previous one. Stop early when a pass makes no
+        // progress, so a path Qt can never remove does not spin the loop.
+        constexpr int kMaxPasses = 8;
+        QStringList remaining = paths;
+        for (int pass = 0; pass < kMaxPasses && !remaining.isEmpty(); ++pass) {
+            const QStringList unhandled = fileSystemWatcher_->removePaths(remaining);
+            if (unhandled.isEmpty()) {
+                return true;
+            }
+            recordDebugEvent(QStringLiteral("watcher remove pass %1: %2 of %3 path(s) still watched")
+                                 .arg(pass + 1)
+                                 .arg(unhandled.size())
+                                 .arg(remaining.size()));
+            if (unhandled.size() >= remaining.size()) {
+                break;  // no progress: another pass would return the same list
+            }
+            remaining = unhandled;
+        }
+        // Only count what is really still watched: removePaths() also reports paths that were
+        // never watched (e.g. already gone), which are not a problem.
+        const QStringList watchedFiles = fileSystemWatcher_->files();
+        const QStringList watchedDirs = fileSystemWatcher_->directories();
+        const QSet<QString> watched(watchedFiles.begin(), watchedFiles.end());
+        const QSet<QString> watchedDirSet(watchedDirs.begin(), watchedDirs.end());
+        QStringList leftover;
+        for (const QString& path : remaining) {
+            if (watched.contains(path) || watchedDirSet.contains(path)) {
+                leftover.append(path);
+            }
+        }
+        if (leftover.isEmpty()) {
+            return true;
+        }
+        recordDebugEvent(QStringLiteral("watcher remove gave up: %1 path(s) still watched, e.g. %2")
+                             .arg(leftover.size())
+                             .arg(relativeKeyForPath(leftover.first())));
+        return false;
+    }
+
+bool MainWindow::pauseFileSystemWatcher()
 {
         if (!fileSystemWatcher_) {
-            return;
+            return true;
         }
-        const QStringList files = fileSystemWatcher_->files();
-        if (!files.isEmpty()) {
-            fileSystemWatcher_->removePaths(files);
+        return removeWatchedPaths(fileSystemWatcher_->files() + fileSystemWatcher_->directories());
+    }
+
+bool MainWindow::pauseFileSystemWatcherForFileOperation()
+{
+        if (pauseFileSystemWatcher()) {
+            return true;
         }
-        const QStringList directories = fileSystemWatcher_->directories();
-        if (!directories.isEmpty()) {
-            fileSystemWatcher_->removePaths(directories);
-        }
+        recordDebugEvent(QStringLiteral("file operation cancelled: watcher could not be paused"));
+        QMessageBox::warning(this, QStringLiteral("Mycel"),
+                             QStringLiteral("フォルダ監視を解除できなかったため、操作を中止しました。\n"
+                                            "もう一度お試しください。"));
+        // The pause removed part of the watches before giving up and no rebuild follows a
+        // cancelled operation, so re-arm them here (a no-op during an inline rename, whose
+        // resume path does it).
+        resetFileSystemWatcher();
+        return false;
     }
 
 void MainWindow::refreshNode(Node*)
@@ -65,14 +124,7 @@ void MainWindow::updateNativeWatcherModeForRoot()
         nativeWatcherDisabled_ = qEnvironmentVariableIsSet("MYCEL_NO_WATCHER") ||
                                  isNetworkFileSystemPath(rootPath_);
         if (nativeWatcherDisabled_ && fileSystemWatcher_) {
-            const QStringList files = fileSystemWatcher_->files();
-            if (!files.isEmpty()) {
-                fileSystemWatcher_->removePaths(files);
-            }
-            const QStringList directories = fileSystemWatcher_->directories();
-            if (!directories.isEmpty()) {
-                fileSystemWatcher_->removePaths(directories);
-            }
+            pauseFileSystemWatcher();
             recordDebugEvent(QStringLiteral(
                 "network filesystem root: native watching disabled, periodic sweep takes over"));
         }
@@ -140,9 +192,7 @@ void MainWindow::applyFileSystemWatcherPaths(const QStringList& directories, con
                 toRemove.append(path);
             }
         }
-        if (!toRemove.isEmpty()) {
-            fileSystemWatcher_->removePaths(toRemove);
-        }
+        removeWatchedPaths(toRemove);
         if (!toAdd.isEmpty()) {
             fileSystemWatcher_->addPaths(QStringList(toAdd.begin(), toAdd.end()));
         }
@@ -162,7 +212,7 @@ void MainWindow::reviveWatchedPaths(const QSet<QString>& paths)
         if (revive.isEmpty()) {
             return;
         }
-        fileSystemWatcher_->removePaths(revive);
+        removeWatchedPaths(revive);
         fileSystemWatcher_->addPaths(revive);
     }
 

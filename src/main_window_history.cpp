@@ -26,7 +26,9 @@ QString MainWindow::allocateTrashPath(const QString& name)
 
 QString MainWindow::moveToTrash(const QString& path)
 {
-        pauseFileSystemWatcher();
+        if (!pauseFileSystemWatcherForFileOperation()) {
+            return QString();
+        }
         const QString trashPath = allocateTrashPath(QFileInfo(path).fileName());
         std::error_code ec;
         std::filesystem::rename(std::filesystem::u8path(path.toStdString()),
@@ -34,6 +36,7 @@ QString MainWindow::moveToTrash(const QString& path)
         if (ec) {
             recordDebugEvent(QStringLiteral("trash move failed: %1 : %2")
                                  .arg(relativeKeyForPath(path), QString::fromStdString(ec.message())));
+            resetFileSystemWatcher();  // nothing moved, so no rebuild follows to re-arm the watches
             return QString();
         }
         return trashPath;
@@ -41,8 +44,8 @@ QString MainWindow::moveToTrash(const QString& path)
 
 bool MainWindow::applyHistoryMoves(const std::vector<std::pair<QString, QString>>& moves)
 {
-        if (!moves.empty()) {
-            pauseFileSystemWatcher();
+        if (!moves.empty() && !pauseFileSystemWatcherForFileOperation()) {
+            return false;
         }
         bool ok = true;
         for (const auto& move : moves) {
@@ -129,6 +132,12 @@ void MainWindow::performUndo()
         if (renameEdit_ || sideEditorEditing_ || undoStack_.empty()) {
             return;
         }
+        // Pause the watcher before taking the entry off the stack: if that fails the files stay
+        // where they are, so the entry must stay on the undo side and the metadata untouched.
+        if (!undoStack_.back().undoMoves.empty() && !pauseFileSystemWatcherForFileOperation()) {
+            rebuild(false);
+            return;
+        }
         HistoryEntry entry = std::move(undoStack_.back());
         undoStack_.pop_back();
         applyingHistory_ = true;
@@ -147,6 +156,10 @@ void MainWindow::performRedo()
 {
         if (renameEdit_ || sideEditorEditing_ || redoStack_.empty()) {
             return;
+        }
+        if (!redoStack_.back().redoMoves.empty() && !pauseFileSystemWatcherForFileOperation()) {
+            rebuild(false);
+            return;  // see performUndo
         }
         HistoryEntry entry = std::move(redoStack_.back());
         redoStack_.pop_back();

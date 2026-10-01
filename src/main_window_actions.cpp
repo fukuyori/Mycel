@@ -1048,7 +1048,9 @@ bool MainWindow::renamePathTo(const QString& path, const QString& name)
         const bool wasDir = info.isDir();
         const MetadataSnapshot historyBefore = captureMetadataSnapshot();
         const QStringList historySelection = selectedNodePaths();
-        pauseFileSystemWatcher();
+        if (!pauseFileSystemWatcherForFileOperation()) {
+            return false;
+        }
         bool renamed = false;
         if (caseOnlyRename && QFileInfo::exists(destination)) {
             // QFile::rename refuses when the target "exists" (the same file under a different
@@ -1066,6 +1068,7 @@ bool MainWindow::renamePathTo(const QString& path, const QString& name)
         }
         if (!renamed) {
             QMessageBox::warning(this, QStringLiteral("Mycel"), QStringLiteral("名前を変更できませんでした。"));
+            resetFileSystemWatcher();  // nothing changed, so no rebuild follows to re-arm the watches
             return false;
         }
 
@@ -1266,6 +1269,13 @@ void MainWindow::deleteSelectedItems()
         if (QMessageBox::question(this, QStringLiteral("Mycel"), message,
                                   QMessageBox::Yes | QMessageBox::Cancel,
                                   QMessageBox::Cancel) != QMessageBox::Yes) {
+            return;
+        }
+
+        // Pause once for the whole batch: if that fails nothing is moved. The per-item pause inside
+        // moveToTrash() then finds nothing left to remove and succeeds, so a later item can never
+        // start moving after an earlier one was cancelled.
+        if (!pauseFileSystemWatcherForFileOperation()) {
             return;
         }
 
@@ -1971,12 +1981,9 @@ void MainWindow::suspendInlineRenameActivity()
 
         pausedWatcherFiles_ = fileSystemWatcher_->files();
         pausedWatcherDirectories_ = fileSystemWatcher_->directories();
-        if (!pausedWatcherFiles_.isEmpty()) {
-            fileSystemWatcher_->removePaths(pausedWatcherFiles_);
-        }
-        if (!pausedWatcherDirectories_.isEmpty()) {
-            fileSystemWatcher_->removePaths(pausedWatcherDirectories_);
-        }
+        // Same multi-pass removal as a structural move. A failure is not fatal here: the rename
+        // itself goes through renamePathTo(), which pauses again and cancels if that fails.
+        pauseFileSystemWatcher();
         recordDebugEvent(QStringLiteral("inline rename suspended timers and watcher"));
     }
 

@@ -946,8 +946,16 @@ public:
     // On Windows QFileSystemWatcher keeps an open handle on every watched directory, which blocks
     // renaming/moving those directories ("Access is denied"). Drop all watched paths before a
     // structural filesystem move; the rebuild that follows re-establishes them via
-    // resetFileSystemWatcher().
-    void pauseFileSystemWatcher();
+    // resetFileSystemWatcher(). Returns false when some watch could not be removed.
+    bool pauseFileSystemWatcher();
+    // pauseFileSystemWatcher() for a move / rename / trash operation: on failure it tells the
+    // user the operation was cancelled (a leftover handle would make the rename fail anyway)
+    // and returns false so the caller must bail out before touching the filesystem.
+    bool pauseFileSystemWatcherForFileOperation();
+    // removePaths() with the multi-pass workaround for Qt's Windows engine, which can skip a
+    // directory whose parent handle lives in another engine thread. Returns false if paths are
+    // still watched after the last pass (they are recorded in the debug pane).
+    bool removeWatchedPaths(const QStringList& paths);
 
 
     // Move a tree item into .mycel/trash and return its new path (empty on failure). Deletes go
