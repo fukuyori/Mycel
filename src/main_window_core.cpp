@@ -159,10 +159,18 @@ MainWindow::MainWindow(QString rootPath, bool mycelStorageEnabled, QWidget* pare
         debugPaneAction_->setShortcut(QKeySequence(QStringLiteral("F12")));
         debugPaneAction_->setShortcutContext(Qt::ApplicationShortcut);
 
-        QAction* renameSelectedAction = new QAction(this);
+        QAction* renameSelectedAction = new QAction(QStringLiteral("名前を変更"), this);
         renameSelectedAction->setShortcut(QKeySequence(Qt::Key_F2));
         renameSelectedAction->setShortcutContext(Qt::ApplicationShortcut);
         addAction(renameSelectedAction);
+        renameSelectedAction_ = renameSelectedAction;
+        // N / Shift+N are handled in keyPressEvent (they must not fire while editing text), so
+        // these actions carry no shortcut; the tooltip names the key instead.
+        newFileAction_ = new QAction(QStringLiteral("ファイルを作成"), this);
+        newFolderAction_ = new QAction(QStringLiteral("フォルダを作成"), this);
+        connect(newFileAction_, &QAction::triggered, this, [this] { createFileInSelectedFolder(); });
+        connect(newFolderAction_, &QAction::triggered, this, [this] { createFolderInSelectedFolder(); });
+        updateSelectionActions();
 
         auto* editorPositionGroup = new QActionGroup(this);
         editorPositionGroup->setExclusive(true);
@@ -238,6 +246,9 @@ MainWindow::MainWindow(QString rootPath, bool mycelStorageEnabled, QWidget* pare
         viewMenu->addAction(openSelectedPreviewsAction);
         viewMenu->addAction(closeSelectedPreviewsAction);
         viewMenu->addSeparator();
+        toolbarVisibleAction_ = viewMenu->addAction(QStringLiteral("ツールバー"));
+        toolbarVisibleAction_->setCheckable(true);
+        toolbarVisibleAction_->setChecked(QSettings().value(QStringLiteral("ui/toolbarVisible"), true).toBool());
         viewMenu->addAction(editorPaneAction_);
         viewMenu->addAction(debugPaneAction_);
 
@@ -250,41 +261,57 @@ MainWindow::MainWindow(QString rootPath, bool mycelStorageEnabled, QWidget* pare
         positionMenu->addAction(editorRightAction);
         positionMenu->addAction(editorBottomAction);
 
-        // ---- Toolbar: ファイル → 履歴 → 表示 → 設定 ----
-        auto* toolbar = addToolBar(QStringLiteral("Mycel"));
-        toolbar->setMovable(false);
-        toolbar->addAction(openAction);
-        toolbar->addAction(exportAction);
-        toolbar->addAction(importAction);
-        toolbar->addSeparator();
-        toolbar->addAction(undoAction_);
-        toolbar->addAction(redoAction_);
-        toolbar->addSeparator();
-        toolbar->addAction(refreshAction);
-        toolbar->addAction(fitAction);
-        toolbar->addAction(boardModeAction_);
-        toolbar->addAction(openSelectedPreviewsAction);
-        toolbar->addAction(closeSelectedPreviewsAction);
-        toolbar->addAction(editorPaneAction_);
-        toolbar->addAction(debugPaneAction_);
-        toolbar->addSeparator();
-        auto* editorPositionButton = new QToolButton(this);
-        editorPositionButton->setText(QStringLiteral("配置"));
-        editorPositionButton->setPopupMode(QToolButton::InstantPopup);
-        auto* editorPositionToolMenu = new QMenu(editorPositionButton);
-        editorPositionToolMenu->addAction(editorLeftAction);
-        editorPositionToolMenu->addAction(editorRightAction);
-        editorPositionToolMenu->addAction(editorBottomAction);
-        editorPositionButton->setMenu(editorPositionToolMenu);
-        toolbar->addWidget(editorPositionButton);
-        auto* themeButton = new QToolButton(this);
-        themeButton->setText(QStringLiteral("テーマ"));
-        themeButton->setPopupMode(QToolButton::InstantPopup);
-        auto* themeToolMenu = new QMenu(themeButton);
-        themeToolMenu->addAction(lightThemeAction_);
-        themeToolMenu->addAction(darkThemeAction_);
-        themeButton->setMenu(themeToolMenu);
-        toolbar->addWidget(themeButton);
+        // ---- Toolbar: icon-only buttons for the frequent map operations ----
+        // 開く 検索 | 元に戻す やり直す | 作成 作成 名前変更 | 更新 全体 ボード | プレビュー開 閉 ペイン | … エクスポート インポート
+        // Debug pane, preview position and theme stay in the menus only. The icons are drawn in
+        // the theme text colour (toolbar_icons.h) and re-tinted by refreshToolbarIcons().
+        toolbar_ = addToolBar(QStringLiteral("Mycel"));
+        toolbar_->setObjectName(QStringLiteral("mainToolbar"));
+        toolbar_->setMovable(false);
+        toolbar_->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        toolbar_->setIconSize(QSize(20, 20));
+        toolbar_->setVisible(toolbarVisibleAction_->isChecked());
+        auto tool = [this](QAction* action, const char* icon, const QString& hint) {
+            iconActions_.emplace_back(action, QString::fromLatin1(icon));
+            const QString shortcut = action->shortcut().isEmpty()
+                                         ? hint
+                                         : action->shortcut().toString(QKeySequence::NativeText);
+            action->setToolTip(shortcut.isEmpty() ? action->text()
+                                                  : QStringLiteral("%1 (%2)").arg(action->text(), shortcut));
+            toolbar_->addAction(action);
+        };
+        tool(openAction, "open", QString());
+        tool(searchAction, "search", QString());
+        toolbar_->addSeparator();
+        tool(undoAction_, "undo", QString());
+        tool(redoAction_, "redo", QString());
+        toolbar_->addSeparator();
+        tool(newFileAction_, "new-file", QStringLiteral("N"));
+        tool(newFolderAction_, "new-folder", QStringLiteral("Shift+N"));
+        tool(renameSelectedAction, "rename", QString());
+        toolbar_->addSeparator();
+        tool(refreshAction, "refresh", QString());
+        tool(fitAction, "fit", QString());
+        tool(boardModeAction_, "board", QString());
+        toolbar_->addSeparator();
+        tool(openSelectedPreviewsAction, "preview-open", QString());
+        tool(closeSelectedPreviewsAction, "preview-close", QString());
+        tool(editorPaneAction_, "pane", QString());
+        auto* toolbarSpacer = new QWidget(this);
+        toolbarSpacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        toolbar_->addWidget(toolbarSpacer);
+        tool(exportAction, "export", QString());
+        tool(importAction, "import", QString());
+        refreshToolbarIcons();
+        connect(toolbarVisibleAction_, &QAction::toggled, this, [this](bool visible) {
+            toolbar_->setVisible(visible);
+            QSettings settings;
+            settings.setValue(QStringLiteral("ui/toolbarVisible"), visible);
+            settings.sync();
+        });
+        Q_UNUSED(editorLeftAction);
+        Q_UNUSED(editorRightAction);
+        Q_UNUSED(editorBottomAction);
 
         applyEditorPanePosition(QSettings().value(QStringLiteral("editor/panePosition"), QStringLiteral("right")).toString(),
                                 false);
@@ -346,6 +373,7 @@ MainWindow::MainWindow(QString rootPath, bool mycelStorageEnabled, QWidget* pare
         });
         connect(quitAction, &QAction::triggered, this, &QWidget::close);
         connect(&scene_, &QGraphicsScene::selectionChanged, this, [this] {
+            updateSelectionActions();
             if (!suppressSideEditorSelectionUpdate_) {
                 updateSideEditorForSelection();
             }

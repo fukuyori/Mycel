@@ -156,6 +156,7 @@ using mycel::isDescendantPath;
 #include "drop_target_resolver.h"
 #include "selection_controller.h"
 #include "search_controller.h"
+#include "toolbar_icons.h"
 #include "parent_root_item.h"
 
 class MainWindow final : public QMainWindow {
@@ -516,12 +517,20 @@ public:
 
 
     void updateThemeActions();
+    // Toolbar icons are drawn in the theme text colour, so they are regenerated on a theme switch.
+    void refreshToolbarIcons();
+    // Enables the selection-dependent toolbar actions (new file / folder, rename) only when
+    // exactly one node is selected.
+    void updateSelectionActions();
 
 
     void applyTextPaneTheme();
 
 
     void applyRenameEditTheme(QLineEdit* edit);
+    // The Ctrl+F search bar carries its own stylesheet (background, labels, input, buttons) so
+    // its colours follow the app theme instead of the OS theme the platform style would use.
+    void applySearchBarTheme();
 
 
     void setSidePaneMode(bool editing, const QString& detail);
@@ -1784,6 +1793,13 @@ private:
 
     QAction* editorPaneAction_ = nullptr;
     QAction* debugPaneAction_ = nullptr;
+    QToolBar* toolbar_ = nullptr;
+    QAction* toolbarVisibleAction_ = nullptr;
+    QAction* newFileAction_ = nullptr;
+    QAction* newFolderAction_ = nullptr;
+    QAction* renameSelectedAction_ = nullptr;
+    // (action, icon name) pairs that refreshToolbarIcons() re-tints.
+    std::vector<std::pair<QAction*, QString>> iconActions_;
     QAction* lightThemeAction_ = nullptr;
     QAction* darkThemeAction_ = nullptr;
     AppTheme uiTheme_ = AppTheme::Light;

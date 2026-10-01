@@ -106,14 +106,14 @@ Recent root-folder history is saved in the application settings. Mycel stores no
 
 ### Archive Export And Import
 
-The toolbar `Export` action writes the opened root folder as a Mycel Archive Markdown file.
+The Export action at the right end of the toolbar (or in the File menu) writes the opened root folder as a Mycel Archive Markdown file.
 
 - Text files supported by Mycel are embedded into one Markdown file.
 - Lines in text bodies that start with `` ``` `` or `\` are escaped so they can be restored exactly.
 - Binary files such as images, PDFs, videos, and Office documents are copied into a sibling `.assets` folder while preserving their relative paths.
 - The Markdown file records the binary references, ordering, colors, preview state, collapsed folders, and file-to-file links.
 
-The toolbar `Import` action reads a Mycel Archive Markdown file into a selected destination folder. Existing files are not overwritten; conflicting files are skipped and reported.
+The Import action at the right end of the toolbar (or in the File menu) reads a Mycel Archive Markdown file into a selected destination folder. Existing files are not overwritten; conflicting files are skipped and reported.
 
 ## Run
 
@@ -167,7 +167,8 @@ On normal startup, if the root directory does not contain a `.mycel` folder, Myc
 | + / - | Zoom in or out |
 | F5 | Reload the whole map |
 | F11 | Maximize or restore the window |
-| Toolbar Theme | Switch between light and dark themes |
+| Settings menu > Theme | Switch between light and dark themes |
+| View menu > Toolbar | Show or hide the toolbar |
 | ? | Show the cheat sheet |
 
 On macOS, two-finger trackpad slide pans the canvas while trackpad pinch remains zoom. Windows and Linux keep the existing wheel behavior.
@@ -216,7 +217,7 @@ On macOS, two-finger trackpad slide pans the canvas while trackpad pinch remains
 | Click the preview pane for an editable selected file | Enter plain-text edit mode |
 | E | Edit the selected file as plain text |
 | Ctrl + E | Show or hide the preview pane |
-| Toolbar Preview Place | Move the preview pane to the left, right, or bottom |
+| Settings menu > Preview position | Move the preview pane to the left, right, or bottom |
 | Ctrl + S in edit mode | Save and apply `Subject:` file-name changes |
 | Esc in edit mode | Save and return to preview mode |
 | Ctrl + Enter in the text editor dialog | Save and close |

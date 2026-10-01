@@ -635,10 +635,16 @@ void MainWindow::applyTheme(AppTheme theme, bool persist, bool refreshTree)
                                                        .arg(110);
             qApp->setStyleSheet(QStringLiteral(
                                     "QMainWindow, QDialog, QWidget { color: %1; }"
-                                    "QToolBar { background: %2; border-bottom: 1px solid %3; spacing: 3px; }"
+                                    "QToolBar { background: %2; border-bottom: 1px solid %3; spacing: 2px; padding: 2px 4px; }"
                                     "QToolButton, QPushButton { background: %4; color: %1; border: 1px solid %3; "
                                     "border-radius: 4px; padding: 4px 8px; }"
                                     "QToolButton:hover, QPushButton:hover { border-color: %5; }"
+                                    // Toolbar buttons: flat icons, a border on hover, filled when checked.
+                                    "QToolBar#mainToolbar QToolButton { background: transparent; border: 1px solid transparent; padding: 3px; }"
+                                    "QToolBar#mainToolbar QToolButton:hover { background: %4; border-color: %3; }"
+                                    "QToolBar#mainToolbar QToolButton:checked { background: %5; border-color: %5; }"
+                                    "QToolBar#mainToolbar QToolButton:disabled { background: transparent; border-color: transparent; }"
+                                    "QToolBar::separator { width: 1px; background: %3; margin: 4px 3px; }"
                                     "QMenu { background: %2; color: %1; border: 1px solid %3; }"
                                     "QMenu::item:selected { background: %5; color: %6; }"
                                     "QMenu::item:disabled { color: %7; }"
@@ -659,6 +665,8 @@ void MainWindow::applyTheme(AppTheme theme, bool persist, bool refreshTree)
         }
 
         updateThemeActions();
+        refreshToolbarIcons();
+        applySearchBarTheme();
         applyTextPaneTheme();
         if (!sideEditorEditing_ && !sideEditorPath_.isEmpty()) {
             loadSidePreviewFile(sideEditorPath_);
@@ -674,6 +682,38 @@ void MainWindow::applyTheme(AppTheme theme, bool persist, bool refreshTree)
         scene_.update();
         if (refreshTree && root_) {
             rebuild(false);
+        }
+    }
+
+void MainWindow::refreshToolbarIcons()
+{
+        const ThemeColors colors = themeColors(uiTheme_);
+        const int size = toolbar_ ? toolbar_->iconSize().width() : 20;
+        for (const auto& [action, name] : iconActions_) {
+            // A checked button sits on the highlight colour, so its icon uses the highlighted text.
+            QIcon icon = mycel::makeToolbarIcon(name, colors.text, size);
+            if (action->isCheckable()) {
+                const QIcon on = mycel::makeToolbarIcon(name, colors.highlightedText, size);
+                for (const QSize& s : on.availableSizes(QIcon::Normal, QIcon::Off)) {
+                    icon.addPixmap(on.pixmap(s, QIcon::Normal, QIcon::Off), QIcon::Normal, QIcon::On);
+                }
+            }
+            action->setIcon(icon);
+        }
+    }
+
+void MainWindow::updateSelectionActions()
+{
+        Node* node = singleSelectedNode();
+        const bool canCreate = node && !node->isExternalRoot;
+        if (newFileAction_) {
+            newFileAction_->setEnabled(canCreate);
+        }
+        if (newFolderAction_) {
+            newFolderAction_->setEnabled(canCreate);
+        }
+        if (renameSelectedAction_) {
+            renameSelectedAction_->setEnabled(node != nullptr);
         }
     }
 
@@ -743,6 +783,44 @@ void MainWindow::applyRenameEditTheme(QLineEdit* edit)
                                      cssColor(colors.highlight),
                                      cssColor(colors.highlight),
                                      cssColor(colors.highlightedText)));
+    }
+
+void MainWindow::applySearchBarTheme()
+{
+        if (!searchBar_) {
+            return;
+        }
+        const ThemeColors colors = currentThemeColors();
+        QColor muted = colors.text;
+        muted.setAlphaF(0.72);
+        searchBar_->setStyleSheet(
+            QStringLiteral(
+                // The bar itself: window colour with a thin bottom rule, like the toolbar.
+                "QWidget#SearchBar { background: %1; border-bottom: 1px solid %2; }"
+                "QWidget#SearchBar QLabel { background: transparent; color: %3; }"
+                "QLabel#SearchPathLabel { color: %7; font-size: 11px; padding-left: 2px; }"
+                // The field matches the inline-rename editor (applyRenameEditTheme).
+                "QLineEdit#SearchInput { background: %4; color: %3; border: 1px solid %2; "
+                "border-radius: 5px; padding: 2px 5px; selection-background-color: %5; "
+                "selection-color: %6; }"
+                "QLineEdit#SearchInput:focus { border-color: %5; }"
+                // ▲ ▼ ✕: flat like the toolbar buttons, a border on hover.
+                "QWidget#SearchBar QToolButton { background: transparent; color: %3; "
+                "border: 1px solid transparent; border-radius: 4px; padding: 2px 6px; }"
+                "QWidget#SearchBar QToolButton:hover { background: %8; border-color: %2; }"
+                "QWidget#SearchBar QToolButton:disabled { color: %7; }")
+                .arg(cssColor(colors.window),
+                     cssColor(colors.inlinePreviewBorder),
+                     cssColor(colors.text),
+                     cssColor(colors.base),
+                     cssColor(colors.highlight),
+                     cssColor(colors.highlightedText),
+                     QStringLiteral("rgba(%1,%2,%3,%4)")
+                         .arg(muted.red())
+                         .arg(muted.green())
+                         .arg(muted.blue())
+                         .arg(muted.alpha()),
+                     cssColor(colors.button)));
     }
 
 void MainWindow::setSidePaneMode(bool editing, const QString& detail)

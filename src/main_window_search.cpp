@@ -20,9 +20,14 @@ QWidget* MainWindow::createSearchBar()
         inputRow->setSpacing(6);
         auto* caption = new QLabel(QStringLiteral("検索:"), searchBar_);
         searchInput_ = new QLineEdit(searchBar_);
+        searchInput_->setObjectName(QStringLiteral("SearchInput"));
         searchInput_->setClearButtonEnabled(true);
         searchInput_->setPlaceholderText(QStringLiteral("ファイル名・フォルダ名・相対パス"));
         searchInput_->installEventFilter(this);  // Enter/Shift+Enter/Esc: see eventFilter()
+        // A query is short; cap the field so it does not stretch across a wide window and
+        // leave the count and the buttons right next to it.
+        searchInput_->setMinimumWidth(200);
+        searchInput_->setMaximumWidth(420);
         searchCountLabel_ = new QLabel(searchBar_);
         searchCountLabel_->setMinimumWidth(110);
         searchPrevButton_ = new QToolButton(searchBar_);
@@ -40,12 +45,15 @@ QWidget* MainWindow::createSearchBar()
         inputRow->addWidget(searchPrevButton_);
         inputRow->addWidget(searchNextButton_);
         inputRow->addWidget(closeButton);
+        inputRow->addStretch(2);  // keeps the row left-aligned once the field hits its cap
         barLayout->addLayout(inputRow);
 
         searchPathLabel_ = new QLabel(searchBar_);
+        searchPathLabel_->setObjectName(QStringLiteral("SearchPathLabel"));
         searchPathLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
         searchPathLabel_->hide();  // shown only while a current result exists
         barLayout->addWidget(searchPathLabel_);
+        applySearchBarTheme();
 
         searchDebounceTimer_.setSingleShot(true);
         searchDebounceTimer_.setInterval(SearchDebounceMs);
