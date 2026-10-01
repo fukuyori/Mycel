@@ -31,20 +31,33 @@ function Find-QtPrefixPath {
         return ""
     }
 
+    # Only desktop Windows kits qualify (msvc*_64 first, then mingw_64); wasm / android / arm64
+    # kits that the Qt installer may add live beside them and must never be picked. Among the
+    # candidates the highest Qt version wins.
     $QtKits = Get-ChildItem "C:\Qt" -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "^\d+(\.\d+)+$" } |
         ForEach-Object {
-            Get-ChildItem $_.FullName -Directory -ErrorAction SilentlyContinue
+            $VersionDir = $_
+            Get-ChildItem $VersionDir.FullName -Directory -ErrorAction SilentlyContinue |
+                Where-Object {
+                    ($_.Name -match "^msvc\d+_64$" -or $_.Name -eq "mingw_64") -and
+                    (Test-Path (Join-Path $_.FullName "lib\cmake\Qt6\Qt6Config.cmake"))
+                } |
+                ForEach-Object {
+                    [pscustomobject]@{
+                        Path     = $_.FullName
+                        Version  = [version]$VersionDir.Name
+                        IsMsvc   = $_.Name -like "msvc*"
+                    }
+                }
         } |
-        Where-Object {
-            Test-Path (Join-Path $_.FullName "lib\cmake\Qt6\Qt6Config.cmake")
-        } |
-        Sort-Object FullName -Descending
+        Sort-Object -Property @{ Expression = "IsMsvc"; Descending = $true }, @{ Expression = "Version"; Descending = $true }
 
-    if ($QtKits.Count -eq 0) {
+    if (-not $QtKits -or @($QtKits).Count -eq 0) {
         return ""
     }
 
-    return $QtKits[0].FullName
+    return @($QtKits)[0].Path
 }
 
 function Find-CMake {
@@ -127,8 +140,10 @@ function Find-VcVars64 {
 }
 
 function Import-VcVars64 {
+    # cl.exe on PATH is not enough: without INCLUDE / LIB from vcvars the compiler cannot find
+    # even <type_traits>, so only skip the import when the full environment is already present.
     $Cl = Get-Command cl -ErrorAction SilentlyContinue
-    if ($Cl) {
+    if ($Cl -and $env:INCLUDE -and $env:LIB) {
         return
     }
 
@@ -238,6 +253,22 @@ if (-not $BuildDirWasProvided -and -not [string]::IsNullOrWhiteSpace($Generator)
         } else {
             $SafeGeneratorName = ($Generator -replace "[^A-Za-z0-9]+", "-").Trim("-").ToLowerInvariant()
             $BuildDir = Join-Path $RootDir "build-$SafeGeneratorName"
+        }
+    }
+}
+
+# An existing build directory stays on the Qt it was configured with: mixing a newer kit's
+# windeployqt (or a re-configure against it) into an older build produces a broken deployment.
+# Delete the build directory to move to another Qt version.
+if (Test-Path $CMakeCache) {
+    $CachedQtDir = Select-String -Path $CMakeCache -Pattern "^Qt6_DIR:[^=]*=(.+)$" -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($CachedQtDir) {
+        $CachedPrefix = $CachedQtDir.Matches[0].Groups[1].Value -replace "/lib/cmake/Qt6/?$", ""
+        $CachedPrefix = $CachedPrefix -replace "/", "\"
+        if ((Test-Path $CachedPrefix) -and ($CachedPrefix -ne $CMakePrefixPath)) {
+            Write-Host "Using the Qt kit cached in $BuildDir ($CachedPrefix)."
+            $CMakePrefixPath = $CachedPrefix
         }
     }
 }
