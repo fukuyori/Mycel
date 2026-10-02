@@ -38,6 +38,9 @@ jobs:
         with:
           version: "6.7.3"
           arch: ${{ matrix.qt_arch }}
+          # Multimedia is a separate module in the Qt installer; without it
+          # find_package(Qt6 COMPONENTS Multimedia MultimediaWidgets) fails.
+          modules: qtmultimedia
           cache: true
 
       - name: Install Linux build dependencies
