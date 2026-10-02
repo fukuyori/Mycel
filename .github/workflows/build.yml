@@ -27,16 +27,18 @@ jobs:
             qt_arch: linux_gcc_64
           - name: Windows
             os: windows-latest
-            qt_arch: win64_msvc2019_64
+            qt_arch: win64_msvc2022_64
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Qt
+        # 6.8+: Qt 6.7 still links the AGL framework, which the current macOS runners'
+        # Xcode no longer ships ("ld: framework 'AGL' not found").
         uses: jurplel/install-qt-action@v4
         with:
-          version: "6.7.3"
+          version: "6.8.3"
           arch: ${{ matrix.qt_arch }}
           # Multimedia is a separate module in the Qt installer; without it
           # find_package(Qt6 COMPONENTS Multimedia MultimediaWidgets) fails.

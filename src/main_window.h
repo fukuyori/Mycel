@@ -39,7 +39,7 @@
 #include <QtCore/QUrlQuery>
 #include <QtCore/QVariant>
 #include <QtCore/QVector>
-#include <QtCore/qtenvironmentvariables.h>
+#include <QtCore/QtGlobal>  // qEnvironmentVariable*/qputenv (qtenvironmentvariables.h is 6.5+)
 #include <QtGui/QTransform>
 #include <QtGui/QBrush>
 #include <QtGui/QActionGroup>
