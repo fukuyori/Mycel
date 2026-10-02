@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QtCore/QCollator>
+#include <QtCore/QLocale>
 #include <QtCore/QString>
 
 namespace mycel {
@@ -8,6 +9,12 @@ namespace mycel {
 inline QCollator makeFileNameCollator()
 {
     QCollator collator;
+    // Under the "C" / POSIX locale (headless CI, minimal containers) QCollator falls back to
+    // plain code-point comparison and ignores the numeric and case options, so "item 10" would
+    // sort before "item 2". Use English collation there; everywhere else the user's locale wins.
+    if (collator.locale().language() == QLocale::C) {
+        collator.setLocale(QLocale(QLocale::English));
+    }
     collator.setCaseSensitivity(Qt::CaseInsensitive);
     collator.setNumericMode(true);
     return collator;

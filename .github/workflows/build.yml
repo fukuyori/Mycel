@@ -18,7 +18,10 @@ jobs:
       matrix:
         include:
           - name: macOS
-            os: macos-latest
+            # Pinned: macos-latest now carries Xcode 26 (macOS 26 SDK), which no longer ships
+            # the AGL framework that the prebuilt Qt 6.8 still links ("ld: framework 'AGL'
+            # not found"). The macOS 15 SDK still has it.
+            os: macos-15
             script: ./scripts/build-mac.sh
             qt_arch: clang_64
           - name: Linux
