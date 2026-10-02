@@ -8,6 +8,7 @@ Mycel の主な変更履歴です。
 
 - バージョン番号のタグ（例: `0.11.0`）のプッシュで、Ubuntu 24.04 の Qt 6 パッケージを使って Linux 版 `.deb` をビルドし、ユニットテストを実行して GitHub Release に添付するワークフロー `.github/workflows/release.yml` を追加。リリースノートは `CHANGELOG.md` の該当節から生成し、タグと `CMakeLists.txt` のバージョンが一致しない場合は失敗する
 - `.github/workflows/build.yml` の Qt インストールに `qtmultimedia` モジュールを追加。Multimedia が無く 0.9.6 以降の 3 OS ビルドがすべて構成段階で失敗していた
+- QtWebEngine 無しの構成（CI の macOS / Windows）で、Web プレビューのズーム関数の宣言が `#if MYCEL_HAS_WEBENGINE` の中にあり未宣言エラーになっていた問題を修正。Linux の apt に `zipcmp` / `zipmerge` / `ziptool` を追加（libzip の CMake 設定が参照する）
 
 ### ツールバーの刷新
 

@@ -454,11 +454,13 @@ public:
     // needed to preview HTML files. Create the view on first use so launch stays fast and light
     // for the common case where no HTML file is previewed.
     QWebEngineView* ensureHtmlPreviewView();
-
+#endif
 
     // The HTML/Markdown preview is a web page, so it carries its own browser-style zoom factor
     // (Ctrl + wheel / Ctrl + +,-,0). A multiplicative step keeps enlarging and shrinking even, which
     // the discrete 7–32pt text sizes could not do (they bottomed out at 0.7x).
+    // Declared for every build: without QtWebEngine the definitions are no-ops (the callers in
+    // eventFilter() and the preview code are not guarded).
     void applyHtmlPreviewZoom();
 
 
@@ -471,7 +473,6 @@ public:
 
     // Ctrl + wheel / Ctrl + +,-,0 over the web preview. Returns true when the event was consumed.
     bool handleHtmlPreviewZoomEvent(QObject* object, QEvent* event);
-#endif
 
     // Documents whose first page can be rendered to a thumbnail (currently PDF).
     bool isDocumentThumbnailFile(const QFileInfo& info) const;
