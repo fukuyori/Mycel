@@ -31,3 +31,12 @@ git grep -n "<旧バージョン>" -- ':!build-*'
 ```
 
 最後にビルドスクリプトを実行して CMake を再構成し、`CMakeCache.txt` の `CMAKE_PROJECT_VERSION` が新しい値になっていることを確認する。
+
+## リリース
+
+バージョン更新をコミットしたあと、同じ番号のタグをプッシュすると `.github/workflows/release.yml` が Linux 版 `.deb` をビルドして GitHub Release を作成する（`CHANGELOG.md` の見出しが `## x.y.z` になっていること。リリースノートはその節から生成される）。
+
+```sh
+git tag x.y.z
+git push origin x.y.z
+```

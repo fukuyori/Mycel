@@ -428,7 +428,15 @@ $env:CODESIGN_CERT = "<証明書>"
 
 ## GitHub Actions
 
-GitHub Actions 用の workflow を `.github/workflows/build.yml` に追加しています。macOS、Linux、Windows で Qt 6 をインストールし、各 OS のビルドスクリプトを実行します。
+GitHub Actions 用の workflow を 2 つ用意しています。
+
+- `.github/workflows/build.yml`: `main` へのプッシュとプルリクエストで、macOS、Linux、Windows に Qt 6 をインストールして各 OS のビルドスクリプトを実行します。
+- `.github/workflows/release.yml`: バージョン番号のタグ（例: `0.11.0`）をプッシュすると、Ubuntu 24.04 の Qt 6 パッケージで Linux 版をビルドして `.deb` を作り、ユニットテストを実行したうえで GitHub Release を作成して添付します。リリースノートは `CHANGELOG.md` の該当バージョンの節から生成します。タグと `CMakeLists.txt` のバージョンが一致しない場合は失敗します。
+
+```sh
+git tag 0.11.0
+git push origin 0.11.0
+```
 
 ## サンプル
 

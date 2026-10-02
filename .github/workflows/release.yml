@@ -1,0 +1,110 @@
+name: Release
+
+# Builds the Linux .deb and publishes it as a GitHub Release when a version tag
+# (e.g. "0.11.0", the same form as the existing tags) is pushed. The tag must match
+# the version in CMakeLists.txt, which scripts/package-linux.sh also reads.
+#
+# The package is built against Ubuntu's own Qt 6 packages (not a Qt installer kit), so
+# dpkg-shlibdeps can derive Depends: on the distro's libqt6* packages and the .deb
+# installs with `apt install ./Mycel-<version>-linux-x64.deb` on Ubuntu 24.04 and later.
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux-deb:
+    name: Linux .deb
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build dpkg-dev \
+            qt6-base-dev qt6-multimedia-dev qt6-webengine-dev qt6-pdf-dev \
+            libzip-dev libgl1-mesa-dev libxkbcommon-dev
+
+      - name: Read version and check the tag
+        id: version
+        shell: bash
+        run: |
+          version="$(sed -nE 's/^[[:space:]]*project\([[:space:]]*Mycel[[:space:]]+VERSION[[:space:]]+([0-9]+(\.[0-9]+){1,3}).*/\1/p' CMakeLists.txt | head -n 1)"
+          if [[ -z "$version" ]]; then
+            echo "::error::could not read the version from CMakeLists.txt"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "$version" ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match CMakeLists.txt version $version"
+            exit 1
+          fi
+
+      - name: Build and package
+        shell: bash
+        env:
+          BUILD_DIR: ${{ github.workspace }}/build
+          DIST_DIR: ${{ github.workspace }}/dist
+        run: ./scripts/package-linux.sh
+
+      - name: Run unit tests
+        shell: bash
+        run: |
+          cmake --build build --config Release
+          ctest --test-dir build --output-on-failure
+
+      - name: Show package metadata
+        shell: bash
+        run: |
+          for deb in dist/*.deb; do
+            echo "== $deb"
+            dpkg-deb --info "$deb"
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mycel-${{ steps.version.outputs.version }}-linux-x64-deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+      - name: Extract release notes from CHANGELOG.md
+        if: github.ref_type == 'tag'
+        id: notes
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          # The block under "## <version>" up to the next "## " heading. CR is stripped first
+          # so a CRLF checkout cannot break the heading comparison.
+          tr -d '\r' < CHANGELOG.md | awk -v v="$version" '
+            $0 == "## " v { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' | sed -e '1{/^$/d}' > release-notes.md
+          if [[ ! -s release-notes.md ]]; then
+            echo "CHANGELOG.md has no section for $version." > release-notes.md
+          fi
+          {
+            echo
+            echo "---"
+            echo "Ubuntu 24.04 以降: \`sudo apt install ./Mycel-$version-linux-x64.deb\`"
+          } >> release-notes.md
+          cat release-notes.md
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Mycel ${{ steps.version.outputs.version }}
+          body_path: release-notes.md
+          files: dist/*.deb
+          fail_on_unmatched_files: true

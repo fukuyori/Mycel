@@ -425,7 +425,15 @@ If you select the `Add Mycel to the user PATH` additional task, the installer ad
 
 ## GitHub Actions
 
-The repository includes a GitHub Actions workflow at `.github/workflows/build.yml`. It installs Qt 6 and runs the platform build scripts on macOS, Linux, and Windows.
+The repository includes two GitHub Actions workflows.
+
+- `.github/workflows/build.yml`: on pushes to `main` and on pull requests, installs Qt 6 and runs the platform build scripts on macOS, Linux, and Windows.
+- `.github/workflows/release.yml`: when a version tag (e.g. `0.11.0`) is pushed, builds the Linux `.deb` against Ubuntu 24.04's Qt 6 packages, runs the unit tests, and creates a GitHub Release with the package attached. The release notes come from the matching section of `CHANGELOG.md`. The run fails if the tag does not match the version in `CMakeLists.txt`.
+
+```sh
+git tag 0.11.0
+git push origin 0.11.0
+```
 
 ## Samples
 
